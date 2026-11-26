@@ -1,0 +1,11 @@
+extends: ["spectral:oas"]
+
+rules:
+  # Single owner, self-hosted: there is no contact to give.
+  info-contact: off
+
+overrides:
+  # A WebSocket upgrade answers 101; there is no 2xx to document.
+  - files: ["**/openapi.json#/paths/~1api~1terminals~1%7BterminalId%7D~1ws/get/responses"]
+    rules:
+      operation-success-response: off
