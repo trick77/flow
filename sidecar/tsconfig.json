@@ -1,0 +1,15 @@
+{
+  // Type-checks everything, tests included (npm run lint); the build compiles
+  // through tsconfig.build.json.
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

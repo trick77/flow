@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1
+# Build from the repository root: docker build -f backend/Containerfile .
+
+# --- Stage 1: build the SPA and the sidecar ---
+FROM node:26-alpine AS node
+WORKDIR /app
+COPY ui/package.json ui/package-lock.json ./ui/
+COPY sidecar/package.json sidecar/package-lock.json ./sidecar/
+RUN npm --prefix ui ci && npm --prefix sidecar ci
+COPY ui/ ./ui/
+COPY sidecar/ ./sidecar/
+# ui/vite.config.ts builds straight to ../backend/web/dist: /app/backend/web/dist
+# here. The sidecar compiles to sidecar/dist, its tests left out.
+RUN npm --prefix ui run build && npm --prefix sidecar run build
+
+# --- Stage 2: the server with the embedded SPA, and flowd (pure Go, no cgo) ---
+FROM golang:1.27-alpine AS build
+WORKDIR /app/backend
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend/ ./
+# The context leaves the host's web/dist out (.dockerignore): //go:embed all:dist
+# bakes this stage's build into the binary.
+COPY --from=node /app/backend/web/dist ./web/dist
+# ship release passes the release version; declared late so a new version
+# rebuilds only the link steps.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/trick77/ship/kit/version.Version=${VERSION}" -o /out/flow ./cmd/flow
+# flowd for both sandbox architectures, whatever the image's own: the server
+# pushes the matching binary into each sandbox.
+RUN for arch in amd64 arm64; do \
+      CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags="-s -w -X github.com/trick77/ship/kit/version.Version=${VERSION}" -o /out/opt/flowd-linux-$arch ./cmd/flowd || exit 1; \
+    done
+
+# --- Stage 3: minimal runtime ---
+FROM gcr.io/distroless/static-debian13:nonroot
+COPY --from=build /out/flow /flow
+COPY --from=build /out/opt/ /opt/flow/
+# The sidecar's compiled output with its package.json (ESM). It never runs
+# here: there is no node in this image; the server hands it to the sandboxes.
+COPY --from=node /app/sidecar/package.json /opt/flow/sidecar/package.json
+COPY --from=node /app/sidecar/dist/ /opt/flow/sidecar/dist/
+# distroless nonroot's own uid, never 1000 (the host's first user).
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/flow"]

@@ -1,0 +1,15 @@
+go:
+  dir: backend
+ui:
+  embed: backend/web/dist
+steps:
+  # Linux-only files (flowd's process supervision, sandbox plumbing) compile
+  # only for GOOS=linux; vetting both arches here keeps them from rotting on a
+  # Mac, where the hook runs.
+  - { name: linux vet, dir: backend, run: GOOS=linux GOARCH=amd64 go vet ./... && GOOS=linux GOARCH=arm64 go vet ./... }
+  # The sidecar is outside ui: (floors, patch gate, Dependabot); this is its
+  # whole gate.
+  - { name: sidecar, dir: sidecar, run: npm ci && npm run lint && npm test && npm run build && npm audit --audit-level=high --omit=dev }
+images:
+  - { containerfile: backend/Containerfile }
+visibility: public

@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+/* Self-hosted variable text fonts (src/fonts/): sans for the chrome, serif
+   for prose, mono for code. */
+@font-face {
+  font-family: "Flow Sans";
+  src: url("./fonts/SansWebVariable-TextRegular.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Flow Serif";
+  src: url("./fonts/SerifWebVariable-TextRegular.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Flow Serif";
+  src: url("./fonts/SerifWebVariable-TextRegularItalic.woff2") format("woff2");
+  font-weight: 300 800;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Flow Mono";
+  src: url("./fonts/MonoVariableVariable-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Warm editorial, dark only; the same palette as the owner's other apps.
+   These tokens drive the Tailwind v4 theme: the bg, text, border, font and
+   rounded-ui utilities. Warm charcoal surfaces, off-white ink, clay accent. */
+@theme {
+  --color-bg: #1f1f1e;
+  --color-panel: #1b1b1a;
+  --color-active: #2c2c2a;
+  --color-border: #323230;
+  --color-ink: #faf9f5;
+  --color-muted: #9c9a92;
+  --color-accent: #c6613f;
+  --color-accent-strong: #d97757;
+  --color-success: #5fa97a;
+  --color-danger: #d9534f;
+  /* Cards on the page, a hover a step above the page, the stronger border of
+     inputs, a progress track; softer inks for secondary text; gold for
+     highlights and the unread marker. */
+  --color-card: #242422;
+  --color-raised: #2a2a28;
+  --color-border-strong: #4b4a46;
+  --color-track: #3a3a37;
+  /* Popover surface and the checkmark of a picked option. */
+  --color-popover: #2f2f2c;
+  --color-select: #4f8cff;
+  --color-ink-bright: #f3f0e8;
+  --color-ink-soft: #e8e6dc;
+  --color-ink-warm: #d5d2c9;
+  --color-ink-dim: #c7c5bd;
+  --color-sun: #e0b46a;
+  /* Blues that are never the accent (the accent warns). */
+  --color-rain: #7fb0de;
+  --color-cold: #8fb4d9;
+  /* A good-to-extreme scale, muted for the dark ground. */
+  --color-aq-good: #5fa97a;
+  --color-aq-fair: #b5c46a;
+  --color-aq-moderate: #e0b46a;
+  --color-aq-poor: #d97757;
+  --color-aq-very-poor: #e06a66;
+  --color-aq-extreme: #b98ad6;
+  --color-unread: #c9a25f;
+  --color-unread-ink: #e0c48f;
+  /* Quieter than muted: frames and card buttons. The border token reads 1.3:1
+     on a card fill, invisible; faint reads 4:1. */
+  --color-faint: #6f6d66;
+  --font-sans:
+    "Flow Sans", system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-serif: "Flow Serif", Georgia, "Times New Roman", Times, serif;
+  --font-mono: "Flow Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius-ui: 10px;
+}
+
+html {
+  color-scheme: dark;
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.ui-wordmark {
+  font-size: 1.3125rem;
+  line-height: 1.75rem;
+}

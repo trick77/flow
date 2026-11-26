@@ -1,0 +1,31 @@
+# Sidecar: what its install, build and tests write (outside ship's ui handling).
+sidecar/node_modules/
+sidecar/dist/
+sidecar/coverage/
+
+# Local builds (make build)
+/bin/
+
+# Local data and secrets: compose's bind mount and env file.
+/data/
+.env
+.env.*
+!.env.example
+
+# macOS, editors
+.DS_Store
+.vscode/
+.idea/
+
+# Local agent tooling (machine-specific)
+.claude/
+
+# ship:begin (owned by ship init; the repo's own lines go above the begin marker)
+# What the gate and the UI build write into the tree.
+coverage/ui/
+ui/node_modules/
+ui/*.tsbuildinfo
+# The UI build the Go binary embeds; .gitkeep stays tracked so go:embed's dir exists in a fresh clone.
+backend/web/dist/*
+!backend/web/dist/.gitkeep
+# ship:end
