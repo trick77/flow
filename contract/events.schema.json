@@ -1,0 +1,684 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/trick77/flow/contract/events.schema.json",
+  "title": "Flow event model",
+  "description": "Flow's provider-neutral event and command contract, version 1. Source of truth for the Go, sidecar and UI bindings, which backend/internal/contractgen generates. See docs/events.md.",
+  "x-unions": {
+    "Event": {
+      "envelope": "Event",
+      "also": ["EventDraft"],
+      "kindType": "EventKind",
+      "goPrefix": "Kind",
+      "kinds": [
+        { "kind": "session.started", "payload": "SessionStarted" },
+        { "kind": "session.resumed", "payload": "SessionResumed" },
+        { "kind": "session.settings", "payload": "SessionSettings" },
+        { "kind": "session.status", "payload": "SessionStatusChanged" },
+        { "kind": "session.reported", "payload": "SessionReported" },
+        { "kind": "message.user", "payload": "UserMessage" },
+        { "kind": "message.queued", "payload": "MessageQueued" },
+        { "kind": "message.dequeued", "payload": "MessageDequeued" },
+        { "kind": "turn.started", "payload": "TurnStarted" },
+        { "kind": "turn.ended", "payload": "TurnEnded" },
+        { "kind": "assistant.text", "payload": "AssistantText" },
+        { "kind": "assistant.text_delta", "payload": "AssistantTextDelta", "ephemeral": true },
+        { "kind": "assistant.thinking", "payload": "AssistantThinking" },
+        { "kind": "tool.started", "payload": "ToolStarted" },
+        { "kind": "tool.progress", "payload": "ToolProgress", "ephemeral": true },
+        { "kind": "tool.finished", "payload": "ToolFinished" },
+        { "kind": "permission.requested", "payload": "PermissionRequested" },
+        { "kind": "permission.resolved", "payload": "PermissionResolved" },
+        { "kind": "question.asked", "payload": "QuestionAsked" },
+        { "kind": "question.resolved", "payload": "QuestionResolved" },
+        { "kind": "plan.proposed", "payload": "PlanProposed" },
+        { "kind": "plan.resolved", "payload": "PlanResolved" },
+        { "kind": "todo.updated", "payload": "TodoUpdated" },
+        { "kind": "child.started", "payload": "ChildStarted" },
+        { "kind": "child.reported", "payload": "ChildReported" },
+        { "kind": "worktree.added", "payload": "WorktreeAdded" },
+        { "kind": "files.changed", "payload": "FilesChanged" },
+        { "kind": "pull_requests.updated", "payload": "PullRequestsUpdated" },
+        { "kind": "gate.queued", "payload": "GateQueued" },
+        { "kind": "gate.started", "payload": "GateStarted" },
+        { "kind": "gate.finished", "payload": "GateFinished" },
+        { "kind": "notice", "payload": "Notice" },
+        { "kind": "live.snapshot", "payload": "LiveSnapshot", "ephemeral": true }
+      ]
+    },
+    "Command": {
+      "envelope": "Command",
+      "kindType": "CommandKind",
+      "goPrefix": "Cmd",
+      "kinds": [
+        { "kind": "message.send", "payload": "MessageSend", "sidecar": true },
+        { "kind": "message.send_now", "payload": "MessageSendNow" },
+        { "kind": "message.remove", "payload": "MessageRemove" },
+        { "kind": "turn.interrupt", "payload": "TurnInterrupt", "sidecar": true },
+        { "kind": "permission.reply", "payload": "PermissionReply", "sidecar": true },
+        { "kind": "question.reply", "payload": "QuestionReply", "sidecar": true },
+        { "kind": "plan.reply", "payload": "PlanReply", "sidecar": true },
+        { "kind": "settings.set", "payload": "SettingsSet", "sidecar": true },
+        { "kind": "gate.update", "payload": "GateUpdate" },
+        { "kind": "child.start", "payload": "ChildStart" },
+        { "kind": "child.report", "payload": "ChildReport" },
+        { "kind": "report.sent", "payload": "ReportSent" },
+        { "kind": "worktree.add", "payload": "WorktreeAdd" },
+        { "kind": "pull_requests.set", "payload": "PullRequestsSet" },
+        { "kind": "host.shutdown", "payload": "HostShutdown", "sidecar": true }
+      ]
+    }
+  },
+  "$defs": {
+    "Event": {
+      "type": "object",
+      "description": "One event: the envelope every log line, SSE frame and sidecar-to-host line (as EventDraft) carries. data is the payload of kind.",
+      "required": ["v", "ts", "session", "kind", "data"],
+      "properties": {
+        "v": { "type": "integer", "description": "Contract major version, 1. A reader skips events of a higher major." },
+        "seq": { "type": "integer", "format": "int64", "description": "Position in the session's log, from 1, gapless. Absent on ephemeral events." },
+        "ts": { "type": "string", "format": "date-time", "description": "When the host wrote it, UTC." },
+        "session": { "type": "string", "description": "Flow session id (UUID)." },
+        "kind": { "type": "string", "description": "An EventKind. A reader skips kinds it does not know." },
+        "turn": { "type": "string", "description": "Turn id, on every event between turn.started and turn.ended." },
+        "parentTool": { "type": "string", "description": "toolId of the subagent tool call this event belongs to." },
+        "cmd": { "type": "string", "description": "Id of the command that caused the event, for idempotency." },
+        "data": { "description": "The kind's payload." }
+      }
+    },
+    "EventDraft": {
+      "type": "object",
+      "description": "An event before the host numbers it: one line on the sidecar's stdout. The host adds v, seq, ts, session and turn.",
+      "required": ["kind", "data"],
+      "properties": {
+        "kind": { "type": "string" },
+        "parentTool": { "type": "string" },
+        "cmd": { "type": "string" },
+        "data": {}
+      }
+    },
+    "Command": {
+      "type": "object",
+      "description": "One command to a session: Flow to flowd, flowd to the host, the host to the sidecar (kinds marked sidecar).",
+      "required": ["v", "id", "session", "kind", "data"],
+      "properties": {
+        "v": { "type": "integer" },
+        "id": { "type": "string", "description": "Idempotency key chosen by the sender; a repeat is acknowledged, not applied again." },
+        "session": { "type": "string" },
+        "kind": { "type": "string", "description": "A CommandKind." },
+        "data": {}
+      }
+    },
+    "Provider": { "type": "string", "enum": ["claude", "opencode"] },
+    "ClaudeAuth": {
+      "type": "string",
+      "description": "The Claude credential a session uses, chosen per session (default subscription_token): the stored setup-token as CLAUDE_CODE_OAUTH_TOKEN, the CLI login in the home volume, or the stored key as ANTHROPIC_API_KEY. flowd sets only the chosen one.",
+      "enum": ["subscription_token", "subscription_login", "api_key"]
+    },
+    "PermissionMode": {
+      "type": "string",
+      "description": "Flow's modes, ordered from least to most permissive: plan, ask, accept_edits, auto, full_access.",
+      "enum": ["plan", "ask", "accept_edits", "auto", "full_access"]
+    },
+    "SessionStatus": {
+      "type": "string",
+      "enum": ["idle", "working", "queued", "approval", "plan", "question", "done", "failed"]
+    },
+    "SessionStarted": {
+      "type": "object",
+      "required": ["provider", "model", "mode", "cwd"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/Provider" },
+        "claudeAuth": { "$ref": "#/$defs/ClaudeAuth" },
+        "model": { "type": "string" },
+        "mode": { "$ref": "#/$defs/PermissionMode" },
+        "modeCap": { "$ref": "#/$defs/PermissionMode" },
+        "providerSessionId": { "type": "string" },
+        "cwd": { "type": "string" }
+      }
+    },
+    "ResumeReason": { "type": "string", "enum": ["message", "sandbox_start", "host_restart", "upgrade"] },
+    "SessionResumed": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": { "$ref": "#/$defs/ResumeReason" },
+        "providerSessionId": { "type": "string" }
+      }
+    },
+    "SessionSettings": {
+      "type": "object",
+      "description": "The session's settings after a change; absent fields did not change.",
+      "properties": {
+        "model": { "type": "string" },
+        "mode": { "$ref": "#/$defs/PermissionMode" },
+        "modeCap": { "$ref": "#/$defs/PermissionMode" }
+      }
+    },
+    "SessionStatusChanged": {
+      "type": "object",
+      "required": ["status"],
+      "properties": { "status": { "$ref": "#/$defs/SessionStatus" } }
+    },
+    "ReportOutcome": { "type": "string", "enum": ["done", "failed", "needs_user"] },
+    "SessionReported": {
+      "type": "object",
+      "description": "In a started session's log: it reported to the session that started it.",
+      "required": ["parentSession", "outcome"],
+      "properties": {
+        "parentSession": { "type": "string" },
+        "outcome": { "$ref": "#/$defs/ReportOutcome" }
+      }
+    },
+    "MessageOrigin": { "type": "string", "enum": ["user", "parent_session", "child_report"] },
+    "UserMessage": {
+      "type": "object",
+      "required": ["messageId", "text", "origin"],
+      "properties": {
+        "messageId": { "type": "string" },
+        "text": { "type": "string" },
+        "origin": { "$ref": "#/$defs/MessageOrigin" },
+        "fromSession": { "type": "string", "description": "The sending session for origin parent_session and child_report." }
+      }
+    },
+    "MessageQueued": {
+      "type": "object",
+      "required": ["messageId", "text", "origin"],
+      "properties": {
+        "messageId": { "type": "string" },
+        "text": { "type": "string" },
+        "origin": { "$ref": "#/$defs/MessageOrigin" },
+        "fromSession": { "type": "string" }
+      }
+    },
+    "DequeueReason": { "type": "string", "enum": ["sent", "removed"] },
+    "MessageDequeued": {
+      "type": "object",
+      "required": ["messageId", "reason"],
+      "properties": {
+        "messageId": { "type": "string" },
+        "reason": { "$ref": "#/$defs/DequeueReason" }
+      }
+    },
+    "TurnStarted": {
+      "type": "object",
+      "required": ["messageId"],
+      "properties": { "messageId": { "type": "string" } }
+    },
+    "TurnOutcome": {
+      "type": "string",
+      "description": "lost: the agent process ended mid-turn (crash, sandbox stop); the host writes it on its next start.",
+      "enum": ["completed", "interrupted", "error", "lost"]
+    },
+    "Usage": {
+      "type": "object",
+      "required": ["inputTokens", "outputTokens"],
+      "properties": {
+        "inputTokens": { "type": "integer", "format": "int64" },
+        "outputTokens": { "type": "integer", "format": "int64" },
+        "cacheReadTokens": { "type": "integer", "format": "int64" },
+        "cacheWriteTokens": { "type": "integer", "format": "int64" }
+      }
+    },
+    "TurnEnded": {
+      "type": "object",
+      "required": ["outcome", "durationMs"],
+      "properties": {
+        "outcome": { "$ref": "#/$defs/TurnOutcome" },
+        "durationMs": { "type": "integer", "format": "int64" },
+        "usage": { "$ref": "#/$defs/Usage" },
+        "costUsd": { "type": "number" },
+        "errorCode": { "type": "string", "description": "A code, never a sentence: max_turns, budget, provider_error, ..." }
+      }
+    },
+    "AssistantText": {
+      "type": "object",
+      "description": "A complete assistant text block, Markdown.",
+      "required": ["blockId", "text"],
+      "properties": {
+        "blockId": { "type": "string" },
+        "text": { "type": "string" }
+      }
+    },
+    "AssistantTextDelta": {
+      "type": "object",
+      "description": "Ephemeral: text appended to the open block blockId. The durable assistant.text with the same blockId replaces all deltas.",
+      "required": ["blockId", "text"],
+      "properties": {
+        "blockId": { "type": "string" },
+        "text": { "type": "string" }
+      }
+    },
+    "AssistantThinking": {
+      "type": "object",
+      "required": ["blockId", "text"],
+      "properties": {
+        "blockId": { "type": "string" },
+        "text": { "type": "string" }
+      }
+    },
+    "ToolKind": {
+      "type": "string",
+      "enum": ["read", "edit", "write", "search", "bash", "web", "todo", "subagent", "mcp", "question", "plan", "other"]
+    },
+    "ToolStarted": {
+      "type": "object",
+      "required": ["toolId", "name", "kind"],
+      "properties": {
+        "toolId": { "type": "string" },
+        "name": { "type": "string", "description": "The provider's tool name (Read, Bash, mcp__flow__create_session, ...)." },
+        "kind": { "$ref": "#/$defs/ToolKind" },
+        "path": { "type": "string", "description": "File or directory the tool works on, relative to the session directory when inside it." },
+        "command": { "type": "string" },
+        "pattern": { "type": "string" },
+        "url": { "type": "string" },
+        "description": { "type": "string", "description": "The agent's own short description (subagent title, Bash description)." },
+        "input": { "description": "The raw tool input, for detail views." }
+      }
+    },
+    "ToolProgress": {
+      "type": "object",
+      "required": ["toolId", "elapsedMs"],
+      "properties": {
+        "toolId": { "type": "string" },
+        "elapsedMs": { "type": "integer", "format": "int64" }
+      }
+    },
+    "ToolStatus": { "type": "string", "enum": ["ok", "error", "denied", "interrupted"] },
+    "PullRequestRef": {
+      "type": "object",
+      "required": ["repo", "number"],
+      "properties": {
+        "repo": { "type": "string", "description": "owner/name" },
+        "number": { "type": "integer" }
+      }
+    },
+    "ToolResult": {
+      "type": "object",
+      "description": "Facts for the tool row's summary; each present only when the adapter knows it.",
+      "properties": {
+        "matches": { "type": "integer" },
+        "matchedRepos": { "type": "integer" },
+        "added": { "type": "integer" },
+        "removed": { "type": "integer" },
+        "created": { "type": "boolean" },
+        "exitCode": { "type": "integer" },
+        "testsPassed": { "type": "integer" },
+        "testsFailed": { "type": "integer" },
+        "pullRequest": { "$ref": "#/$defs/PullRequestRef" },
+        "sessionsStarted": { "type": "integer" }
+      }
+    },
+    "ToolFinished": {
+      "type": "object",
+      "required": ["toolId", "status"],
+      "properties": {
+        "toolId": { "type": "string" },
+        "status": { "$ref": "#/$defs/ToolStatus" },
+        "result": { "$ref": "#/$defs/ToolResult" },
+        "output": { "type": "string", "description": "Tool output, at most 16 KiB: head and tail when longer." },
+        "outputTruncated": { "type": "boolean" },
+        "durationMs": { "type": "integer", "format": "int64" }
+      }
+    },
+    "PermissionKind": { "type": "string", "enum": ["command", "edit", "write", "read", "web", "mcp", "other"] },
+    "PermissionRequested": {
+      "type": "object",
+      "required": ["requestId", "tool", "kind", "mode", "canAlwaysAllow"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "toolId": { "type": "string" },
+        "tool": { "type": "string" },
+        "kind": { "$ref": "#/$defs/PermissionKind" },
+        "command": { "type": "string" },
+        "path": { "type": "string" },
+        "cwd": { "type": "string" },
+        "input": {},
+        "mode": { "$ref": "#/$defs/PermissionMode" },
+        "modeCap": { "$ref": "#/$defs/PermissionMode", "description": "Set when the mode is capped by the session that started this one." },
+        "canAlwaysAllow": { "type": "boolean", "description": "The provider offered a rule to remember." }
+      }
+    },
+    "PermissionDecision": { "type": "string", "enum": ["allow_once", "allow_always", "deny", "expired"] },
+    "PermissionResolved": {
+      "type": "object",
+      "required": ["requestId", "decision"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "decision": { "$ref": "#/$defs/PermissionDecision" },
+        "message": { "type": "string", "description": "The owner's note with a deny, passed to the agent." }
+      }
+    },
+    "QuestionOption": {
+      "type": "object",
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "Question": {
+      "type": "object",
+      "required": ["id", "text", "multiSelect", "options"],
+      "properties": {
+        "id": { "type": "string" },
+        "header": { "type": "string" },
+        "text": { "type": "string" },
+        "multiSelect": { "type": "boolean" },
+        "options": { "type": "array", "items": { "$ref": "#/$defs/QuestionOption" } }
+      }
+    },
+    "QuestionAsked": {
+      "type": "object",
+      "required": ["requestId", "questions"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "toolId": { "type": "string" },
+        "questions": { "type": "array", "items": { "$ref": "#/$defs/Question" } }
+      }
+    },
+    "Answer": {
+      "type": "object",
+      "required": ["questionId", "optionIds"],
+      "properties": {
+        "questionId": { "type": "string" },
+        "optionIds": { "type": "array", "items": { "type": "string" } },
+        "text": { "type": "string", "description": "Free text instead of or besides the options." }
+      }
+    },
+    "QuestionOutcome": { "type": "string", "enum": ["answered", "expired"] },
+    "QuestionResolved": {
+      "type": "object",
+      "required": ["requestId", "outcome"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "outcome": { "$ref": "#/$defs/QuestionOutcome" },
+        "answers": { "type": "array", "items": { "$ref": "#/$defs/Answer" } },
+        "text": { "type": "string", "description": "An answer typed in the composer instead of the options." }
+      }
+    },
+    "PlanProposed": {
+      "type": "object",
+      "required": ["requestId", "plan"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "toolId": { "type": "string" },
+        "plan": { "type": "string", "description": "Markdown." }
+      }
+    },
+    "PlanDecision": { "type": "string", "enum": ["approved", "rejected", "expired"] },
+    "PlanResolved": {
+      "type": "object",
+      "required": ["requestId", "decision"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "decision": { "$ref": "#/$defs/PlanDecision" },
+        "feedback": { "type": "string" },
+        "mode": { "$ref": "#/$defs/PermissionMode", "description": "The mode the session continues in after an approval." }
+      }
+    },
+    "TodoStatus": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
+    "TodoItem": {
+      "type": "object",
+      "required": ["text", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "activeText": { "type": "string" },
+        "status": { "$ref": "#/$defs/TodoStatus" }
+      }
+    },
+    "TodoUpdated": {
+      "type": "object",
+      "description": "The whole list after a change; replaces the previous one.",
+      "required": ["items"],
+      "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/TodoItem" } } }
+    },
+    "ChildStarted": {
+      "type": "object",
+      "required": ["session", "title", "repos", "mode"],
+      "properties": {
+        "session": { "type": "string" },
+        "title": { "type": "string" },
+        "repos": { "type": "array", "items": { "type": "string" } },
+        "mode": { "$ref": "#/$defs/PermissionMode" }
+      }
+    },
+    "ChildReported": {
+      "type": "object",
+      "required": ["session", "outcome"],
+      "properties": {
+        "session": { "type": "string" },
+        "outcome": { "$ref": "#/$defs/ReportOutcome" },
+        "summary": { "type": "string", "description": "The started session's last assistant text, shortened; also delivered to the agent." }
+      }
+    },
+    "WorktreeAdded": {
+      "type": "object",
+      "required": ["repo", "branch", "path", "baseRef"],
+      "properties": {
+        "repo": { "type": "string" },
+        "branch": { "type": "string" },
+        "path": { "type": "string", "description": "Absolute path in the sandbox." },
+        "baseRef": { "type": "string" },
+        "baseSha": { "type": "string" }
+      }
+    },
+    "FileChangeKind": { "type": "string", "enum": ["added", "modified", "deleted", "renamed"] },
+    "FileChange": {
+      "type": "object",
+      "required": ["path", "change", "added", "removed"],
+      "properties": {
+        "path": { "type": "string" },
+        "oldPath": { "type": "string" },
+        "change": { "$ref": "#/$defs/FileChangeKind" },
+        "added": { "type": "integer" },
+        "removed": { "type": "integer" },
+        "binary": { "type": "boolean" }
+      }
+    },
+    "FilesChanged": {
+      "type": "object",
+      "description": "What the turn changed in one worktree, from the tree at turn start to the tree at turn end.",
+      "required": ["repo", "files"],
+      "properties": {
+        "repo": { "type": "string" },
+        "files": { "type": "array", "items": { "$ref": "#/$defs/FileChange" } }
+      }
+    },
+    "PullRequestState": { "type": "string", "enum": ["not_opened", "draft", "open", "merged", "closed"] },
+    "PullRequestItem": {
+      "type": "object",
+      "required": ["repo", "order", "state"],
+      "properties": {
+        "repo": { "type": "string" },
+        "order": { "type": "integer", "description": "Merge order in the set, from 1." },
+        "number": { "type": "integer" },
+        "title": { "type": "string" },
+        "url": { "type": "string" },
+        "state": { "$ref": "#/$defs/PullRequestState" },
+        "note": { "type": "string", "description": "Free text from the agent (waits for a release, ...). Provisional: see docs/events.md." }
+      }
+    },
+    "PullRequestsUpdated": {
+      "type": "object",
+      "required": ["items"],
+      "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/PullRequestItem" } } }
+    },
+    "GateQueued": {
+      "type": "object",
+      "required": ["position"],
+      "properties": {
+        "position": { "type": "integer", "description": "1 runs next." },
+        "repo": { "type": "string" },
+        "aheadRepo": { "type": "string", "description": "Repo of the run directly ahead." }
+      }
+    },
+    "GateStarted": {
+      "type": "object",
+      "properties": { "repo": { "type": "string" } }
+    },
+    "GateFinished": {
+      "type": "object",
+      "required": ["exitCode", "durationMs"],
+      "properties": {
+        "repo": { "type": "string" },
+        "exitCode": { "type": "integer" },
+        "durationMs": { "type": "integer", "format": "int64" }
+      }
+    },
+    "NoticeLevel": { "type": "string", "enum": ["info", "warning", "error"] },
+    "Notice": {
+      "type": "object",
+      "description": "Something the owner should see that is not part of the conversation. code is an i18n key, params its values.",
+      "required": ["code", "level"],
+      "properties": {
+        "code": { "type": "string" },
+        "level": { "$ref": "#/$defs/NoticeLevel" },
+        "params": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "OpenBlock": {
+      "type": "object",
+      "required": ["blockId", "text"],
+      "properties": {
+        "blockId": { "type": "string" },
+        "text": { "type": "string" }
+      }
+    },
+    "LiveSnapshot": {
+      "type": "object",
+      "description": "Ephemeral: first frame of a live subscription, the text of every open block so far.",
+      "required": ["blocks"],
+      "properties": { "blocks": { "type": "array", "items": { "$ref": "#/$defs/OpenBlock" } } }
+    },
+    "WhenBusy": { "type": "string", "enum": ["queue", "interrupt"] },
+    "MessageSend": {
+      "type": "object",
+      "description": "To the host: deliver now when idle, else queue (or interrupt). To the sidecar: start a turn with this message now.",
+      "required": ["messageId", "text", "origin"],
+      "properties": {
+        "messageId": { "type": "string" },
+        "text": { "type": "string" },
+        "origin": { "$ref": "#/$defs/MessageOrigin" },
+        "fromSession": { "type": "string" },
+        "whenBusy": { "$ref": "#/$defs/WhenBusy" }
+      }
+    },
+    "MessageSendNow": {
+      "type": "object",
+      "required": ["messageId"],
+      "properties": { "messageId": { "type": "string" } }
+    },
+    "MessageRemove": {
+      "type": "object",
+      "required": ["messageId"],
+      "properties": { "messageId": { "type": "string" } }
+    },
+    "TurnInterrupt": { "type": "object", "properties": {} },
+    "ReplyDecision": { "type": "string", "enum": ["allow_once", "allow_always", "deny"] },
+    "PermissionReply": {
+      "type": "object",
+      "required": ["requestId", "decision"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "decision": { "$ref": "#/$defs/ReplyDecision" },
+        "message": { "type": "string" }
+      }
+    },
+    "QuestionReply": {
+      "type": "object",
+      "required": ["requestId"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "answers": { "type": "array", "items": { "$ref": "#/$defs/Answer" } },
+        "text": { "type": "string" }
+      }
+    },
+    "PlanReplyDecision": { "type": "string", "enum": ["approved", "rejected"] },
+    "PlanReply": {
+      "type": "object",
+      "required": ["requestId", "decision"],
+      "properties": {
+        "requestId": { "type": "string" },
+        "decision": { "$ref": "#/$defs/PlanReplyDecision" },
+        "feedback": { "type": "string" },
+        "mode": { "$ref": "#/$defs/PermissionMode" }
+      }
+    },
+    "SettingsSet": {
+      "type": "object",
+      "properties": {
+        "model": { "type": "string" },
+        "mode": { "$ref": "#/$defs/PermissionMode" },
+        "modeCap": { "$ref": "#/$defs/PermissionMode" }
+      }
+    },
+    "GateState": { "type": "string", "enum": ["queued", "started", "finished"] },
+    "GateUpdate": {
+      "type": "object",
+      "required": ["state"],
+      "properties": {
+        "state": { "$ref": "#/$defs/GateState" },
+        "position": { "type": "integer" },
+        "repo": { "type": "string" },
+        "aheadRepo": { "type": "string" },
+        "exitCode": { "type": "integer" },
+        "durationMs": { "type": "integer", "format": "int64" }
+      }
+    },
+    "ChildStart": {
+      "type": "object",
+      "required": ["session", "title", "repos", "mode"],
+      "properties": {
+        "session": { "type": "string" },
+        "title": { "type": "string" },
+        "repos": { "type": "array", "items": { "type": "string" } },
+        "mode": { "$ref": "#/$defs/PermissionMode" }
+      }
+    },
+    "ChildReport": {
+      "type": "object",
+      "description": "To a parent's host: queued until the parent's turn ends, then logged as child.reported and delivered as a message with origin child_report.",
+      "required": ["session", "outcome"],
+      "properties": {
+        "session": { "type": "string" },
+        "outcome": { "$ref": "#/$defs/ReportOutcome" },
+        "summary": { "type": "string" }
+      }
+    },
+    "ReportSent": {
+      "type": "object",
+      "required": ["parentSession", "outcome"],
+      "properties": {
+        "parentSession": { "type": "string" },
+        "outcome": { "$ref": "#/$defs/ReportOutcome" }
+      }
+    },
+    "WorktreeAdd": {
+      "type": "object",
+      "required": ["repo", "branch", "path", "baseRef"],
+      "properties": {
+        "repo": { "type": "string" },
+        "branch": { "type": "string" },
+        "path": { "type": "string" },
+        "baseRef": { "type": "string" },
+        "baseSha": { "type": "string" }
+      }
+    },
+    "PullRequestsSet": {
+      "type": "object",
+      "required": ["items"],
+      "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/PullRequestItem" } } }
+    },
+    "ShutdownReason": { "type": "string", "enum": ["upgrade", "stop", "archive"] },
+    "HostShutdown": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": { "$ref": "#/$defs/ShutdownReason" },
+        "whenIdle": { "type": "boolean", "description": "Wait for the running turn to end." }
+      }
+    }
+  }
+}
