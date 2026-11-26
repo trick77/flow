@@ -5,6 +5,7 @@ export const composer = {
   send: "Send message",
   queue: "Queue message",
   stop: "Stop the running turn",
+  stopLabel: "Stop",
   queued: "Queued",
   sendNow: "Send now",
   remove: "Remove",
