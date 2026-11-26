@@ -87,6 +87,22 @@ func TestPanicIsA500(t *testing.T) {
 	}
 }
 
+// A JSON body must say it is JSON: a cross-site form post (text/plain, form-encoded) never reaches a handler.
+func TestDecode_requiresJSON(t *testing.T) {
+	for ct, ok := range map[string]bool{"application/json": true, "application/json; charset=utf-8": true,
+		"": false, "text/plain": false, "application/x-www-form-urlencoded": false, "multipart/form-data; boundary=x": false} {
+		r := httptest.NewRequest("POST", "/", strings.NewReader(`{"version":"1"}`))
+		if ct != "" {
+			r.Header.Set("Content-Type", ct)
+		}
+		var v apitypes.Version
+		err := Decode(r, &v)
+		if (err == nil) != ok {
+			t.Errorf("Content-Type %q: %v", ct, err)
+		}
+	}
+}
+
 func TestRequestIDHeader(t *testing.T) {
 	srv := newServer(t)
 	if _, _, h := get(t, srv.URL+"/api/version"); h.Get("X-Request-Id") == "" {

@@ -50,6 +50,9 @@ const (
 	CodeInvalid  = "invalid"
 	CodeUnknown  = "unknown_kind"
 	CodeShutdown = "shutting_down"
+	// CodeNotPending: a reply names a permission, question or plan request that is not open (answered, expired,
+	// or never asked).
+	CodeNotPending = "not_pending"
 )
 
 // Hello describes a running host.

@@ -21,6 +21,17 @@ const Version = 1
 // so an event stays below it.
 const MaxLine = 1 << 20
 
+// MaxText bounds a message's text, measured as encoded JSON: escaping makes it longer than its bytes (Go writes <, >
+// and & as six-byte \u escapes), and the text travels inside a command body and an event line, both bounded by
+// MaxLine. A quarter of MaxLine leaves the envelope and any re-encoding far from that bound.
+const MaxText = MaxLine / 4
+
+// TextFits reports whether text is within MaxText once encoded.
+func TextFits(text string) bool {
+	b, err := json.Marshal(text)
+	return err == nil && len(b) <= MaxText
+}
+
 // ErrUnknownKind is a kind outside this build's contract. Readers skip such events.
 var ErrUnknownKind = errors.New("event: unknown kind")
 
