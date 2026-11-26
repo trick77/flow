@@ -10,6 +10,17 @@ Self-hosted: runs Claude Code and OpenCode sessions in sandboxes on a Linux serv
 - `sidecar/`: Node package, will host the Claude Agent SDK and translate its messages into Flow's event stream.
   Not in Dependabot: its deps are bumped by hand.
 
+## Contracts
+- `docs/architecture.md` (processes, failures, credentials), `docs/events.md` (event model, provider mappings),
+  `docs/ownership.md` (who edits what, build order).
+- `docs/schema.md` = `TestSchemaDoc` golden (in `backend/`: `SCHEMADOC_UPDATE=1 go test ./... -run TestSchemaDoc`);
+  regen after a migration or model.go change. model.go holds only row types, each with its `Table:` line.
+- Event model source `contract/events.schema.json`, API source `backend/api/openapi.json`; `*.gen.go`/`*.gen.ts`
+  come from `internal/contractgen` (`CONTRACTGEN_UPDATE=1 go test ./internal/contractgen/`), never by hand.
+  The generator reads a JSON Schema subset and refuses the rest on purpose.
+- Every API route is registered in `internal/httpapi/routes.go`, checked against the spec; areas implement their
+  interface in `areas.go` in their own package. Unwired areas and an unwired Guard answer `not_implemented`.
+
 ## Working conventions
 - Commit subjects + PR titles: Go style `area: what` (`server: …`, `flowd: …`, `ui: …`, `sidecar: …`), gated by ship; release notes list them by area.
 - Fresh clone: `ship hooks` before the first push (check, conform and init install it too); without the pre-push hook a push skips the gate.

@@ -1,0 +1,928 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Flow API",
+    "version": "0.1.0",
+    "description": "The browser API of Flow, phase 1. Single owner: every route but the auth ones requires the owner's session cookie. Errors carry a code (ErrorCode), never a sentence the UI shows. Session timelines are Flow events (contract/events.schema.json) delivered as server-sent events with the event's seq as the SSE id. Requests whose Origin or Referer is a preview host are refused with preview_origin. Route handlers are registered in backend/internal/httpapi/routes.go, one area interface per x-flow-area."
+  },
+  "servers": [{ "url": "/", "description": "This Flow instance." }],
+  "security": [{ "ownerSession": [] }],
+  "tags": [
+    { "name": "auth", "description": "Owner sign-in through the OIDC provider (dev mode on loopback only)." },
+    { "name": "profile", "description": "The owner's profile and settings." },
+    { "name": "connections", "description": "GitHub App connection, API keys, Claude sign-in state." },
+    { "name": "projects", "description": "Projects and their repositories." },
+    { "name": "sandboxes", "description": "The one sandbox of each project." },
+    { "name": "sessions", "description": "Sessions, their worktrees and the agent catalog." },
+    { "name": "timeline", "description": "Event streams, messages, commands and replies to requests." },
+    { "name": "review", "description": "Diffs per repository and the pull-request set." },
+    { "name": "terminals", "description": "Terminals in a sandbox, over WebSocket." },
+    { "name": "previews", "description": "Preview hosts for dev servers in a sandbox." },
+    { "name": "meta", "description": "The running build." }
+  ],
+  "paths": {
+    "/api/version": {
+      "get": {
+        "tags": ["meta"], "operationId": "getVersion", "x-flow-area": "meta", "security": [],
+        "summary": "Running build", "description": "The version of the running server.",
+        "responses": { "200": { "description": "The version.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Version" } } } } }
+      }
+    },
+    "/api/auth/session": {
+      "get": {
+        "tags": ["auth"], "operationId": "getAuthSession", "x-flow-area": "auth", "security": [],
+        "summary": "Sign-in state", "description": "Whether the owner is signed in; the UI's first call.",
+        "responses": { "200": { "description": "The state.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthSession" } } } } }
+      }
+    },
+    "/api/auth/login": {
+      "get": {
+        "tags": ["auth"], "operationId": "authLogin", "x-flow-area": "auth", "security": [],
+        "summary": "Start sign-in", "description": "Redirects to the OIDC provider; in dev mode signs in at once.",
+        "responses": { "302": { "description": "To the provider, or back to the app in dev mode." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/auth/callback": {
+      "get": {
+        "tags": ["auth"], "operationId": "authCallback", "x-flow-area": "auth", "security": [],
+        "summary": "OIDC callback", "description": "Completes the code flow; admits only the configured subject or group.",
+        "responses": { "302": { "description": "Back to the app, signed in." }, "403": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": ["auth"], "operationId": "authLogout", "x-flow-area": "auth",
+        "summary": "Sign out", "description": "Clears the session cookie.",
+        "responses": { "204": { "description": "Signed out." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/profile": {
+      "get": {
+        "tags": ["profile"], "operationId": "getProfile", "x-flow-area": "profile",
+        "summary": "Owner profile", "description": "Git identity, formats, sidebar grouping and the config repository.",
+        "responses": { "200": { "$ref": "#/components/responses/Profile" }, "401": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      },
+      "patch": {
+        "tags": ["profile"], "operationId": "updateProfile", "x-flow-area": "profile",
+        "summary": "Change the profile", "description": "Absent fields stay as they are.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProfileUpdate" } } } },
+        "responses": { "200": { "$ref": "#/components/responses/Profile" }, "400": { "$ref": "#/components/responses/Error" }, "401": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/profile/config-sync": {
+      "post": {
+        "tags": ["profile"], "operationId": "syncConfigRepo", "x-flow-area": "profile",
+        "summary": "Sync agent config", "description": "Pulls the config repository into the home volume.",
+        "responses": { "202": { "description": "Sync started.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfigSync" } } } }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/connections": {
+      "get": {
+        "tags": ["connections"], "operationId": "getConnections", "x-flow-area": "connections",
+        "summary": "Connections", "description": "GitHub, Claude sign-in and stored API keys (never their values).",
+        "responses": { "200": { "description": "The connections.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Connections" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/connections/github/device": {
+      "post": {
+        "tags": ["connections"], "operationId": "startGitHubDeviceFlow", "x-flow-area": "connections",
+        "summary": "Start GitHub device flow", "description": "Returns the code the owner enters on GitHub.",
+        "responses": { "200": { "description": "The device code.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeviceFlow" } } } }, "502": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/connections/github/device/poll": {
+      "post": {
+        "tags": ["connections"], "operationId": "pollGitHubDeviceFlow", "x-flow-area": "connections",
+        "summary": "Poll GitHub device flow", "description": "Pending until the owner confirmed on GitHub.",
+        "responses": { "200": { "$ref": "#/components/responses/GitHubConnection" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/connections/github": {
+      "delete": {
+        "tags": ["connections"], "operationId": "disconnectGitHub", "x-flow-area": "connections",
+        "summary": "Disconnect GitHub", "description": "Forgets the tokens; sandboxes lose git and gh access on the next push of credentials.",
+        "responses": { "204": { "description": "Disconnected." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/connections/api-keys": {
+      "post": {
+        "tags": ["connections"], "operationId": "createApiKey", "x-flow-area": "connections",
+        "summary": "Store or replace a secret", "description": "A Claude subscription token, an Anthropic API key or an OpenCode provider key; one per kind and provider, a second one replaces the first. Stored encrypted, never returned; flowd sets it only where the session's mode asks for it.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiKeyCreate" } } } },
+        "responses": { "201": { "description": "Stored.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiKey" } } } }, "400": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/connections/api-keys/{keyId}": {
+      "delete": {
+        "tags": ["connections"], "operationId": "deleteApiKey", "x-flow-area": "connections",
+        "summary": "Delete an API key", "description": "Removes it from Flow and, on the next push, from sandboxes.",
+        "parameters": [{ "$ref": "#/components/parameters/KeyID" }],
+        "responses": { "204": { "description": "Deleted." }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/github/repos": {
+      "get": {
+        "tags": ["connections"], "operationId": "listGitHubRepos", "x-flow-area": "connections",
+        "summary": "Repositories on GitHub", "description": "Repositories the GitHub App installation can reach, for adding to a project.",
+        "parameters": [{ "name": "query", "in": "query", "required": false, "description": "Filter by name.", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "The repositories.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitHubRepoList" } } } }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "tags": ["projects"], "operationId": "listProjects", "x-flow-area": "projects",
+        "summary": "Projects", "description": "Every project with its repositories and sandbox state.",
+        "responses": { "200": { "description": "The projects.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectList" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      },
+      "post": {
+        "tags": ["projects"], "operationId": "createProject", "x-flow-area": "projects",
+        "summary": "Create a project", "description": "Creates the project and starts setting up its sandbox.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectCreate" } } } },
+        "responses": { "201": { "$ref": "#/components/responses/Project" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects/{projectId}": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
+      "get": {
+        "tags": ["projects"], "operationId": "getProject", "x-flow-area": "projects",
+        "summary": "A project", "description": "One project.",
+        "responses": { "200": { "$ref": "#/components/responses/Project" }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      },
+      "patch": {
+        "tags": ["projects"], "operationId": "updateProject", "x-flow-area": "projects",
+        "summary": "Rename a project", "description": "Absent fields stay as they are.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectUpdate" } } } },
+        "responses": { "200": { "$ref": "#/components/responses/Project" }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      },
+      "delete": {
+        "tags": ["projects"], "operationId": "deleteProject", "x-flow-area": "projects",
+        "summary": "Delete a project", "description": "Deletes its sessions and its sandbox.",
+        "responses": { "204": { "description": "Deleted." }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects/{projectId}/repos": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
+      "post": {
+        "tags": ["projects"], "operationId": "addProjectRepo", "x-flow-area": "projects",
+        "summary": "Add a repository", "description": "Clones it into the project's sandbox.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectRepoAdd" } } } },
+        "responses": { "200": { "$ref": "#/components/responses/Project" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects/{projectId}/repos/{repoId}": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectID" }, { "$ref": "#/components/parameters/RepoID" }],
+      "delete": {
+        "tags": ["projects"], "operationId": "removeProjectRepo", "x-flow-area": "projects",
+        "summary": "Remove a repository", "description": "Refused while a session has a worktree of it.",
+        "responses": { "204": { "description": "Removed." }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects/{projectId}/sandbox": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
+      "get": {
+        "tags": ["sandboxes"], "operationId": "getSandbox", "x-flow-area": "sandboxes",
+        "summary": "Sandbox state", "description": "State, resource use and the running flowd.",
+        "responses": { "200": { "$ref": "#/components/responses/Sandbox" }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects/{projectId}/sandbox/start": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
+      "post": {
+        "tags": ["sandboxes"], "operationId": "startSandbox", "x-flow-area": "sandboxes",
+        "summary": "Start the sandbox", "description": "Creates it on first use; delivers flowd.",
+        "responses": { "202": { "$ref": "#/components/responses/Sandbox" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects/{projectId}/sandbox/stop": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
+      "post": {
+        "tags": ["sandboxes"], "operationId": "stopSandbox", "x-flow-area": "sandboxes",
+        "summary": "Stop the sandbox", "description": "Ends running turns; the filesystem stays.",
+        "responses": { "202": { "$ref": "#/components/responses/Sandbox" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects/{projectId}/sandbox/rebuild": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
+      "post": {
+        "tags": ["sandboxes"], "operationId": "rebuildSandbox", "x-flow-area": "sandboxes",
+        "summary": "Re-run setup", "description": "Runs the repositories' .flow/setup.sh again.",
+        "responses": { "202": { "$ref": "#/components/responses/Sandbox" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/projects/{projectId}/sandbox/setup-log": {
+      "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
+      "get": {
+        "tags": ["sandboxes"], "operationId": "getSetupLog", "x-flow-area": "sandboxes",
+        "summary": "Setup log", "description": "Lines of the last setup run after a line number; poll while state is setup.",
+        "parameters": [{ "name": "after", "in": "query", "required": false, "description": "Last line number seen.", "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "The lines.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetupLog" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/agents": {
+      "get": {
+        "tags": ["sessions"], "operationId": "listAgents", "x-flow-area": "sessions",
+        "summary": "Agent catalog", "description": "Providers, models and permission modes for the composer pickers.",
+        "responses": { "200": { "description": "The catalog.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentCatalog" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "tags": ["sessions"], "operationId": "listSessions", "x-flow-area": "sessions",
+        "summary": "Sessions", "description": "Everything the sidebar shows, archived sessions left out.",
+        "parameters": [{ "name": "projectId", "in": "query", "required": false, "description": "Only this project.", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "The sessions.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionList" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      },
+      "post": {
+        "tags": ["sessions"], "operationId": "createSession", "x-flow-area": "sessions",
+        "summary": "Start a session", "description": "Creates worktrees on fresh origin/<default branch> and starts the agent; message, when given, is the first turn.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionCreate" } } } },
+        "responses": { "201": { "$ref": "#/components/responses/Session" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "get": {
+        "tags": ["sessions"], "operationId": "getSession", "x-flow-area": "sessions",
+        "summary": "A session", "description": "One session with its worktrees.",
+        "responses": { "200": { "$ref": "#/components/responses/Session" }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      },
+      "patch": {
+        "tags": ["sessions"], "operationId": "updateSession", "x-flow-area": "sessions",
+        "summary": "Change a session", "description": "Title, model or permission mode; a mode above the cap is mode_above_cap.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUpdate" } } } },
+        "responses": { "200": { "$ref": "#/components/responses/Session" }, "400": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      },
+      "delete": {
+        "tags": ["sessions"], "operationId": "archiveSession", "x-flow-area": "sessions",
+        "summary": "Archive a session", "description": "Stops its agent and removes its worktrees; the log stays readable.",
+        "responses": { "204": { "description": "Archived." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/seen": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "post": {
+        "tags": ["sessions"], "operationId": "markSessionSeen", "x-flow-area": "sessions",
+        "summary": "Mark seen", "description": "The owner has seen the session up to seq.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SeenMark" } } } },
+        "responses": { "204": { "description": "Marked." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/repos": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "post": {
+        "tags": ["sessions"], "operationId": "addSessionRepo", "x-flow-area": "sessions",
+        "summary": "Add a repository", "description": "Adds a worktree on the session's branch.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionRepoAdd" } } } },
+        "responses": { "200": { "$ref": "#/components/responses/Session" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "tags": ["timeline"], "operationId": "streamAppEvents", "x-flow-area": "timeline",
+        "summary": "App event stream", "description": "Server-sent events of kind app (data: AppEvent): sidebar, sandbox and connection changes. No replay: on (re)connect the UI reloads the lists, then applies events.",
+        "responses": { "200": { "description": "text/event-stream; each event's data is one AppEvent.", "content": { "text/event-stream": { "schema": { "$ref": "#/components/schemas/AppEvent" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/events": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "get": {
+        "tags": ["timeline"], "operationId": "streamSessionEvents", "x-flow-area": "timeline",
+        "summary": "Session event stream", "description": "Server-sent events of kind flow (data: a Flow event). Durable events after the position (after, else Last-Event-ID, else 0) in seq order, then live; SSE id is seq, ephemeral events have no id. Starts with a live.snapshot when a block is open.",
+        "parameters": [
+          { "name": "after", "in": "query", "required": false, "description": "Last seq seen.", "schema": { "type": "integer", "format": "int64" } },
+          { "name": "Last-Event-ID", "in": "header", "required": false, "description": "Set by EventSource on reconnect.", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "$ref": "#/components/responses/EventStream" }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/log": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "get": {
+        "tags": ["timeline"], "operationId": "readSessionLog", "x-flow-area": "timeline",
+        "summary": "Read the log", "description": "A page of durable events, backwards from before or forwards from after, for long histories.",
+        "parameters": [
+          { "name": "after", "in": "query", "required": false, "description": "Read forwards from this seq.", "schema": { "type": "integer", "format": "int64" } },
+          { "name": "before", "in": "query", "required": false, "description": "Read backwards from this seq.", "schema": { "type": "integer", "format": "int64" } },
+          { "name": "limit", "in": "query", "required": false, "description": "At most this many, default 500.", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "The page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventPage" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/messages": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "post": {
+        "tags": ["timeline"], "operationId": "sendMessage", "x-flow-area": "timeline",
+        "summary": "Send a message", "description": "Starts a turn, or queues it while one runs. clientId makes a retry harmless.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageCreate" } } } },
+        "responses": { "202": { "description": "Accepted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageAccepted" } } } }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/queue/{messageId}/send-now": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/MessageID" }],
+      "post": {
+        "tags": ["timeline"], "operationId": "sendQueuedNow", "x-flow-area": "timeline",
+        "summary": "Send a queued message now", "description": "Interrupts the running turn, then sends it.",
+        "responses": { "204": { "description": "Done." }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/queue/{messageId}": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/MessageID" }],
+      "delete": {
+        "tags": ["timeline"], "operationId": "removeQueued", "x-flow-area": "timeline",
+        "summary": "Remove a queued message", "description": "Drops it from the queue.",
+        "responses": { "204": { "description": "Removed." }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/interrupt": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "post": {
+        "tags": ["timeline"], "operationId": "interruptTurn", "x-flow-area": "timeline",
+        "summary": "Stop the running turn", "description": "The turn ends with outcome interrupted.",
+        "responses": { "204": { "description": "Requested." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/permissions/{requestId}": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/RequestID" }],
+      "post": {
+        "tags": ["timeline"], "operationId": "replyPermission", "x-flow-area": "timeline",
+        "summary": "Answer a permission request", "description": "Allow once, always allow, or deny. Only the owner can answer; no agent tool can.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PermissionAnswer" } } } },
+        "responses": { "204": { "description": "Delivered." }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/questions/{requestId}": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/RequestID" }],
+      "post": {
+        "tags": ["timeline"], "operationId": "replyQuestion", "x-flow-area": "timeline",
+        "summary": "Answer a question", "description": "Chosen options, or text typed in the composer.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuestionAnswer" } } } },
+        "responses": { "204": { "description": "Delivered." }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/plans/{requestId}": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/RequestID" }],
+      "post": {
+        "tags": ["timeline"], "operationId": "replyPlan", "x-flow-area": "timeline",
+        "summary": "Approve or reject a plan", "description": "Approve (optionally switching mode) or keep planning with feedback.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlanAnswer" } } } },
+        "responses": { "204": { "description": "Delivered." }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/repos/{repoId}/diff": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/RepoID" }],
+      "get": {
+        "tags": ["review"], "operationId": "getSessionDiff", "x-flow-area": "review",
+        "summary": "Diff of one worktree", "description": "Working tree against the base the worktree was cut from, untracked files included.",
+        "responses": { "200": { "description": "The diff.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Diff" } } } }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/pull-requests": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "get": {
+        "tags": ["review"], "operationId": "listPullRequests", "x-flow-area": "review",
+        "summary": "Pull-request set", "description": "One entry per worktree, in merge order.",
+        "responses": { "200": { "$ref": "#/components/responses/PullRequestSet" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/pull-requests/refresh": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "post": {
+        "tags": ["review"], "operationId": "refreshPullRequests", "x-flow-area": "review",
+        "summary": "Refresh pull requests", "description": "Asks GitHub for the current state now.",
+        "responses": { "200": { "$ref": "#/components/responses/PullRequestSet" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/terminals": {
+      "post": {
+        "tags": ["terminals"], "operationId": "createTerminal", "x-flow-area": "terminals",
+        "summary": "Open a terminal", "description": "In a session's directory, or in a project's sandbox home without a session (Claude sign-in).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TerminalCreate" } } } },
+        "responses": { "201": { "description": "Opened.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Terminal" } } } }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/terminals/{terminalId}/ws": {
+      "parameters": [{ "$ref": "#/components/parameters/TerminalID" }],
+      "get": {
+        "tags": ["terminals"], "operationId": "attachTerminal", "x-flow-area": "terminals",
+        "summary": "Attach to a terminal", "description": "WebSocket. Binary frames: terminal bytes both ways. Text frames from the browser: TerminalControl JSON. On attach the scrollback is replayed first.",
+        "x-flow-websocket-messages": { "$ref": "#/components/schemas/TerminalControl" },
+        "responses": { "101": { "description": "Switching to WebSocket." }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/terminals/{terminalId}": {
+      "parameters": [{ "$ref": "#/components/parameters/TerminalID" }],
+      "delete": {
+        "tags": ["terminals"], "operationId": "closeTerminal", "x-flow-area": "terminals",
+        "summary": "Close a terminal", "description": "Ends its shell.",
+        "responses": { "204": { "description": "Closed." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/previews": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
+      "get": {
+        "tags": ["previews"], "operationId": "listPreviews", "x-flow-area": "previews",
+        "summary": "Previews", "description": "Preview hosts opened for this session.",
+        "responses": { "200": { "description": "The previews.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PreviewList" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      },
+      "post": {
+        "tags": ["previews"], "operationId": "openPreview", "x-flow-area": "previews",
+        "summary": "Open a preview", "description": "Maps a port of the session's sandbox to a preview host.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PreviewCreate" } } } },
+        "responses": { "201": { "description": "Opened.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Preview" } } } }, "400": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    },
+    "/api/sessions/{sessionId}/previews/{port}/ticket": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/Port" }],
+      "post": {
+        "tags": ["previews"], "operationId": "createPreviewTicket", "x-flow-area": "previews",
+        "summary": "Preview sign-in ticket", "description": "A one-use, short-lived URL that sets the preview host's own cookie; the app's cookie never reaches a preview host.",
+        "responses": { "200": { "description": "The ticket.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PreviewTicket" } } } }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ownerSession": { "type": "apiKey", "in": "cookie", "name": "flow_session", "description": "kit/auth's signed, host-only session cookie." }
+    },
+    "parameters": {
+      "ProjectID": { "name": "projectId", "in": "path", "required": true, "description": "Project id.", "schema": { "type": "string" } },
+      "RepoID": { "name": "repoId", "in": "path", "required": true, "description": "Project repository id.", "schema": { "type": "string" } },
+      "SessionID": { "name": "sessionId", "in": "path", "required": true, "description": "Session id.", "schema": { "type": "string" } },
+      "MessageID": { "name": "messageId", "in": "path", "required": true, "description": "Message id.", "schema": { "type": "string" } },
+      "RequestID": { "name": "requestId", "in": "path", "required": true, "description": "Permission, question or plan request id.", "schema": { "type": "string" } },
+      "TerminalID": { "name": "terminalId", "in": "path", "required": true, "description": "Terminal id.", "schema": { "type": "string" } },
+      "KeyID": { "name": "keyId", "in": "path", "required": true, "description": "API key id.", "schema": { "type": "string" } },
+      "Port": { "name": "port", "in": "path", "required": true, "description": "Port in the sandbox.", "schema": { "type": "integer" } }
+    },
+    "responses": {
+      "Error": { "description": "An error code.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotImplemented": { "description": "The handler is not implemented yet (code not_implemented).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "EventStream": { "description": "text/event-stream.", "content": { "text/event-stream": { "schema": { "type": "string" } } } },
+      "Profile": { "description": "The profile.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Profile" } } } },
+      "GitHubConnection": { "description": "The GitHub connection.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitHubConnection" } } } },
+      "Project": { "description": "The project.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } },
+      "Sandbox": { "description": "The sandbox.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Sandbox" } } } },
+      "Session": { "description": "The session.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } },
+      "PullRequestSet": { "description": "The pull-request set.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PullRequestSet" } } } }
+    },
+    "schemas": {
+      "ErrorCode": {
+        "type": "string",
+        "description": "Every error the API answers with. The UI maps each to a sentence in its errors namespace.",
+        "enum": [
+          "not_implemented", "unauthenticated", "forbidden", "preview_origin", "not_found", "invalid_request",
+          "conflict", "internal", "upstream", "github_not_connected", "sandbox_unavailable", "sandbox_busy",
+          "session_archived", "request_not_pending", "mode_above_cap", "provider_unavailable", "repo_in_use",
+          "too_many_sessions"
+        ]
+      },
+      "Error": {
+        "type": "object", "required": ["code"],
+        "properties": {
+          "code": { "$ref": "#/components/schemas/ErrorCode" },
+          "field": { "type": "string", "description": "The request field at fault, for invalid_request." },
+          "detail": { "type": "string", "description": "For logs and bug reports only; the UI never shows it as the message." }
+        }
+      },
+      "Version": { "type": "object", "required": ["version"], "properties": { "version": { "type": "string" } } },
+      "AuthMode": { "type": "string", "enum": ["oidc", "dev"] },
+      "AuthSession": {
+        "type": "object", "required": ["signedIn", "mode"],
+        "properties": {
+          "signedIn": { "type": "boolean" },
+          "mode": { "$ref": "#/components/schemas/AuthMode" },
+          "name": { "type": "string", "description": "Display name from the provider." },
+          "profile": { "$ref": "#/components/schemas/Profile", "description": "The owner's profile, when signed in: the UI's first call carries everything it needs to render." }
+        }
+      },
+      "SidebarGrouping": { "type": "string", "enum": ["status", "project"] },
+      "ConfigSyncState": { "type": "string", "enum": ["never", "syncing", "synced", "failed"] },
+      "ConfigSync": {
+        "type": "object", "required": ["state"],
+        "properties": {
+          "state": { "$ref": "#/components/schemas/ConfigSyncState" },
+          "syncedAt": { "type": "string", "format": "date-time" },
+          "commit": { "type": "string" },
+          "files": { "type": "integer" },
+          "errorCode": { "$ref": "#/components/schemas/ErrorCode" }
+        }
+      },
+      "Profile": {
+        "type": "object", "required": ["gitName", "gitEmail", "language", "formatLocale", "timeZone", "sidebarGrouping", "configSync"],
+        "properties": {
+          "gitName": { "type": "string" },
+          "gitEmail": { "type": "string" },
+          "language": { "type": "string", "description": "UI language, BCP 47; en only in phase 1." },
+          "formatLocale": { "type": "string", "description": "Number and date formats, default en-CH." },
+          "timeZone": { "type": "string", "description": "IANA zone, default Europe/Zurich." },
+          "sidebarGrouping": { "$ref": "#/components/schemas/SidebarGrouping" },
+          "configRepo": { "type": "string", "description": "owner/name of the agent config repository." },
+          "configSync": { "$ref": "#/components/schemas/ConfigSync" }
+        }
+      },
+      "ProfileUpdate": {
+        "type": "object",
+        "properties": {
+          "gitName": { "type": "string" },
+          "gitEmail": { "type": "string" },
+          "language": { "type": "string" },
+          "formatLocale": { "type": "string" },
+          "timeZone": { "type": "string" },
+          "sidebarGrouping": { "$ref": "#/components/schemas/SidebarGrouping" },
+          "configRepo": { "type": "string", "description": "Empty string clears it." }
+        }
+      },
+      "GitHubState": { "type": "string", "enum": ["disconnected", "pending", "connected", "expired"] },
+      "GitHubConnection": {
+        "type": "object", "required": ["state"],
+        "properties": {
+          "state": { "$ref": "#/components/schemas/GitHubState" },
+          "login": { "type": "string" },
+          "tokenExpiresAt": { "type": "string", "format": "date-time" },
+          "refreshExpiresAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ClaudeSignIn": {
+        "type": "object", "required": ["signedIn"],
+        "description": "Whether the home volume holds a Claude login; Flow never reads the token.",
+        "properties": {
+          "signedIn": { "type": "boolean" },
+          "checkedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ApiKeyKind": {
+        "type": "string",
+        "description": "claude_token: the subscription token from claude setup-token. anthropic: an Anthropic API key. opencode_provider: an OpenCode provider key.",
+        "enum": ["claude_token", "anthropic", "opencode_provider"]
+      },
+      "ApiKey": {
+        "type": "object", "required": ["id", "kind", "label", "createdAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "$ref": "#/components/schemas/ApiKeyKind" },
+          "provider": { "type": "string", "description": "OpenCode provider id (openrouter, ...), for opencode_provider." },
+          "envName": { "type": "string", "description": "The environment variable flowd sets." },
+          "label": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ApiKeyCreate": {
+        "type": "object", "required": ["kind", "value"],
+        "properties": {
+          "kind": { "$ref": "#/components/schemas/ApiKeyKind" },
+          "provider": { "type": "string" },
+          "label": { "type": "string" },
+          "value": { "type": "string", "description": "The secret; write-only." }
+        }
+      },
+      "Connections": {
+        "type": "object", "required": ["github", "claude", "apiKeys"],
+        "properties": {
+          "github": { "$ref": "#/components/schemas/GitHubConnection" },
+          "claude": { "$ref": "#/components/schemas/ClaudeSignIn" },
+          "apiKeys": { "type": "array", "items": { "$ref": "#/components/schemas/ApiKey" } }
+        }
+      },
+      "DeviceFlow": {
+        "type": "object", "required": ["userCode", "verificationUri", "expiresAt", "intervalSeconds"],
+        "properties": {
+          "userCode": { "type": "string" },
+          "verificationUri": { "type": "string" },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "intervalSeconds": { "type": "integer" }
+        }
+      },
+      "GitHubRepo": {
+        "type": "object", "required": ["fullName", "defaultBranch", "private"],
+        "properties": {
+          "fullName": { "type": "string" },
+          "defaultBranch": { "type": "string" },
+          "private": { "type": "boolean" },
+          "description": { "type": "string" }
+        }
+      },
+      "GitHubRepoList": { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/GitHubRepo" } } } },
+      "SandboxState": {
+        "type": "string",
+        "description": "none: never created. setup: creating or running setup scripts. warm: running. stopped: filesystem kept.",
+        "enum": ["none", "setup", "warm", "stopping", "stopped", "failed", "deleting"]
+      },
+      "Sandbox": {
+        "type": "object", "required": ["state"],
+        "properties": {
+          "state": { "$ref": "#/components/schemas/SandboxState" },
+          "progressCode": { "type": "string", "description": "i18n code of the setup step running now." },
+          "errorCode": { "$ref": "#/components/schemas/ErrorCode" },
+          "lastUsedAt": { "type": "string", "format": "date-time" },
+          "diskBytes": { "type": "integer", "format": "int64" },
+          "memoryBytes": { "type": "integer", "format": "int64" },
+          "flowdVersion": { "type": "string" }
+        }
+      },
+      "SetupLine": { "type": "object", "required": ["n", "text"], "properties": { "n": { "type": "integer" }, "text": { "type": "string" } } },
+      "SetupLog": {
+        "type": "object", "required": ["state", "lines"],
+        "properties": {
+          "state": { "$ref": "#/components/schemas/SandboxState" },
+          "lines": { "type": "array", "items": { "$ref": "#/components/schemas/SetupLine" } }
+        }
+      },
+      "ProjectRepo": {
+        "type": "object", "required": ["id", "fullName", "defaultBranch"],
+        "properties": {
+          "id": { "type": "string" },
+          "fullName": { "type": "string" },
+          "defaultBranch": { "type": "string" }
+        }
+      },
+      "Project": {
+        "type": "object", "required": ["id", "name", "repos", "sandbox", "createdAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "repos": { "type": "array", "items": { "$ref": "#/components/schemas/ProjectRepo" } },
+          "sandbox": { "$ref": "#/components/schemas/Sandbox" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ProjectList": { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } } } },
+      "ProjectCreate": {
+        "type": "object", "required": ["name", "repos"],
+        "properties": {
+          "name": { "type": "string" },
+          "repos": { "type": "array", "items": { "type": "string" }, "description": "owner/name of each repository." }
+        }
+      },
+      "ProjectUpdate": { "type": "object", "properties": { "name": { "type": "string" } } },
+      "ProjectRepoAdd": { "type": "object", "required": ["fullName"], "properties": { "fullName": { "type": "string" } } },
+      "Provider": { "type": "string", "enum": ["claude", "opencode"] },
+      "ClaudeAuth": {
+        "type": "string",
+        "description": "The Claude credential a session uses, chosen per session (default subscription_token): the stored setup-token as CLAUDE_CODE_OAUTH_TOKEN, the CLI login in the home volume, or the stored key as ANTHROPIC_API_KEY. flowd sets only the chosen one.",
+        "enum": ["subscription_token", "subscription_login", "api_key"]
+      },
+      "PermissionMode": { "type": "string", "enum": ["plan", "ask", "accept_edits", "auto", "full_access"] },
+      "SessionStatus": { "type": "string", "enum": ["idle", "working", "queued", "approval", "plan", "question", "done", "failed"] },
+      "ModelInfo": {
+        "type": "object", "required": ["id", "label"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string" },
+          "descriptionCode": { "type": "string", "description": "i18n key of the one-line description." },
+          "via": { "type": "string", "description": "OpenCode provider the model runs through." }
+        }
+      },
+      "ProviderInfo": {
+        "type": "object", "required": ["provider", "available", "models"],
+        "properties": {
+          "provider": { "$ref": "#/components/schemas/Provider" },
+          "available": { "type": "boolean", "description": "False without a sign-in or key." },
+          "claudeAuths": { "type": "array", "items": { "$ref": "#/components/schemas/ClaudeAuth" }, "description": "For claude, the credential modes usable now: subscription_token when a token is stored, subscription_login when the home volume holds a login, api_key when a key is stored." },
+          "models": { "type": "array", "items": { "$ref": "#/components/schemas/ModelInfo" } }
+        }
+      },
+      "AgentCatalog": {
+        "type": "object", "required": ["providers", "modes"],
+        "properties": {
+          "providers": { "type": "array", "items": { "$ref": "#/components/schemas/ProviderInfo" } },
+          "modes": { "type": "array", "items": { "$ref": "#/components/schemas/PermissionMode" }, "description": "From least to most permissive." }
+        }
+      },
+      "SessionSummary": {
+        "type": "object", "description": "What the sidebar shows of a session.",
+        "required": ["id", "projectId", "title", "provider", "model", "mode", "status", "unseen", "repos", "branch", "lastActivityAt", "createdAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "parentId": { "type": "string", "description": "The session that started this one." },
+          "title": { "type": "string" },
+          "provider": { "$ref": "#/components/schemas/Provider" },
+          "claudeAuth": { "$ref": "#/components/schemas/ClaudeAuth" },
+          "model": { "type": "string" },
+          "mode": { "$ref": "#/components/schemas/PermissionMode" },
+          "modeCap": { "$ref": "#/components/schemas/PermissionMode" },
+          "status": { "$ref": "#/components/schemas/SessionStatus" },
+          "unseen": { "type": "boolean" },
+          "repos": { "type": "array", "items": { "type": "string" }, "description": "Repository names (no owner)." },
+          "branch": { "type": "string" },
+          "gatePosition": { "type": "integer", "description": "Position in the check queue while status is queued." },
+          "queued": { "type": "integer", "description": "Messages waiting in the session's queue." },
+          "turnStartedAt": { "type": "string", "format": "date-time" },
+          "lastActivityAt": { "type": "string", "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SessionList": { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/SessionSummary" } } } },
+      "PullRequestState": { "type": "string", "enum": ["not_opened", "draft", "open", "merged", "closed"] },
+      "PullRequest": {
+        "type": "object", "required": ["state"],
+        "properties": {
+          "number": { "type": "integer" },
+          "url": { "type": "string" },
+          "title": { "type": "string" },
+          "state": { "$ref": "#/components/schemas/PullRequestState" }
+        }
+      },
+      "Worktree": {
+        "type": "object", "required": ["repoId", "repo", "branch", "path", "baseRef"],
+        "properties": {
+          "repoId": { "type": "string" },
+          "repo": { "type": "string", "description": "owner/name" },
+          "branch": { "type": "string" },
+          "path": { "type": "string" },
+          "baseRef": { "type": "string" },
+          "added": { "type": "integer", "description": "Lines added against the base, for the repositories card." },
+          "removed": { "type": "integer" },
+          "pullRequest": { "$ref": "#/components/schemas/PullRequest" }
+        }
+      },
+      "Session": {
+        "type": "object", "required": ["summary", "dir", "worktrees", "lastSeq"],
+        "properties": {
+          "summary": { "$ref": "#/components/schemas/SessionSummary" },
+          "dir": { "type": "string", "description": "The session directory in the sandbox." },
+          "worktrees": { "type": "array", "items": { "$ref": "#/components/schemas/Worktree" } },
+          "lastSeq": { "type": "integer", "format": "int64" }
+        }
+      },
+      "SessionCreate": {
+        "type": "object", "required": ["projectId", "repoIds", "provider", "model", "mode"],
+        "properties": {
+          "projectId": { "type": "string" },
+          "repoIds": { "type": "array", "items": { "type": "string" } },
+          "provider": { "$ref": "#/components/schemas/Provider" },
+          "claudeAuth": { "$ref": "#/components/schemas/ClaudeAuth", "description": "For provider claude; default subscription_token. Never inferred from which credentials exist." },
+          "model": { "type": "string" },
+          "mode": { "$ref": "#/components/schemas/PermissionMode" },
+          "title": { "type": "string", "description": "Else derived from the first message." },
+          "message": { "$ref": "#/components/schemas/MessageCreate" }
+        }
+      },
+      "SessionUpdate": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "model": { "type": "string" },
+          "mode": { "$ref": "#/components/schemas/PermissionMode" }
+        }
+      },
+      "SeenMark": { "type": "object", "required": ["seq"], "properties": { "seq": { "type": "integer", "format": "int64" } } },
+      "SessionRepoAdd": { "type": "object", "required": ["repoId"], "properties": { "repoId": { "type": "string" } } },
+      "AppEventKind": {
+        "type": "string",
+        "enum": ["session.updated", "session.removed", "project.updated", "project.removed", "sandbox.updated", "connections.updated", "profile.updated"]
+      },
+      "AppEvent": {
+        "type": "object", "description": "One frame of /api/events; the field named by kind is set.",
+        "required": ["kind"],
+        "properties": {
+          "kind": { "$ref": "#/components/schemas/AppEventKind" },
+          "session": { "$ref": "#/components/schemas/SessionSummary" },
+          "sessionId": { "type": "string" },
+          "project": { "$ref": "#/components/schemas/Project" },
+          "projectId": { "type": "string" },
+          "sandbox": { "$ref": "#/components/schemas/Sandbox" }
+        }
+      },
+      "EventPage": {
+        "type": "object", "required": ["events", "lastSeq"],
+        "properties": {
+          "events": { "type": "array", "items": {}, "description": "Flow events (contract/events.schema.json), in seq order." },
+          "lastSeq": { "type": "integer", "format": "int64", "description": "The log's last seq now." }
+        }
+      },
+      "MessageCreate": {
+        "type": "object", "required": ["clientId", "text"],
+        "properties": {
+          "clientId": { "type": "string", "description": "UUID the browser picks; becomes the message id and the command id." },
+          "text": { "type": "string" },
+          "interrupt": { "type": "boolean", "description": "Interrupt a running turn instead of queueing." }
+        }
+      },
+      "MessageAccepted": {
+        "type": "object", "required": ["messageId", "queued"],
+        "properties": { "messageId": { "type": "string" }, "queued": { "type": "boolean" } }
+      },
+      "ReplyDecision": { "type": "string", "enum": ["allow_once", "allow_always", "deny"] },
+      "PermissionAnswer": {
+        "type": "object", "required": ["decision"],
+        "properties": {
+          "decision": { "$ref": "#/components/schemas/ReplyDecision" },
+          "message": { "type": "string", "description": "A note for the agent with a deny." }
+        }
+      },
+      "Answer": {
+        "type": "object", "required": ["questionId", "optionIds"],
+        "properties": {
+          "questionId": { "type": "string" },
+          "optionIds": { "type": "array", "items": { "type": "string" } },
+          "text": { "type": "string" }
+        }
+      },
+      "QuestionAnswer": {
+        "type": "object",
+        "properties": {
+          "answers": { "type": "array", "items": { "$ref": "#/components/schemas/Answer" } },
+          "text": { "type": "string", "description": "Answer typed in the composer." }
+        }
+      },
+      "PlanReplyDecision": { "type": "string", "enum": ["approved", "rejected"] },
+      "PlanAnswer": {
+        "type": "object", "required": ["decision"],
+        "properties": {
+          "decision": { "$ref": "#/components/schemas/PlanReplyDecision" },
+          "feedback": { "type": "string" },
+          "mode": { "$ref": "#/components/schemas/PermissionMode" }
+        }
+      },
+      "FileChangeKind": { "type": "string", "enum": ["added", "modified", "deleted", "renamed"] },
+      "DiffHunk": {
+        "type": "object", "required": ["header", "oldStart", "oldLines", "newStart", "newLines", "lines"],
+        "properties": {
+          "header": { "type": "string" },
+          "oldStart": { "type": "integer" },
+          "oldLines": { "type": "integer" },
+          "newStart": { "type": "integer" },
+          "newLines": { "type": "integer" },
+          "lines": { "type": "array", "items": { "type": "string" }, "description": "Unified diff lines with their +, - or space prefix." }
+        }
+      },
+      "DiffFile": {
+        "type": "object", "required": ["path", "change", "added", "removed", "hunks"],
+        "properties": {
+          "path": { "type": "string" },
+          "oldPath": { "type": "string" },
+          "change": { "$ref": "#/components/schemas/FileChangeKind" },
+          "added": { "type": "integer" },
+          "removed": { "type": "integer" },
+          "binary": { "type": "boolean" },
+          "truncated": { "type": "boolean", "description": "Hunks left out past the size limit." },
+          "hunks": { "type": "array", "items": { "$ref": "#/components/schemas/DiffHunk" } }
+        }
+      },
+      "Diff": {
+        "type": "object", "required": ["repo", "baseRef", "baseSha", "files"],
+        "properties": {
+          "repo": { "type": "string" },
+          "baseRef": { "type": "string" },
+          "baseSha": { "type": "string" },
+          "files": { "type": "array", "items": { "$ref": "#/components/schemas/DiffFile" } }
+        }
+      },
+      "PullRequestEntry": {
+        "type": "object", "required": ["repoId", "repo", "order", "state"],
+        "properties": {
+          "repoId": { "type": "string" },
+          "repo": { "type": "string" },
+          "order": { "type": "integer" },
+          "number": { "type": "integer" },
+          "url": { "type": "string" },
+          "title": { "type": "string" },
+          "state": { "$ref": "#/components/schemas/PullRequestState" },
+          "note": { "type": "string" }
+        }
+      },
+      "PullRequestSet": { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/PullRequestEntry" } } } },
+      "TerminalCreate": {
+        "type": "object", "required": ["projectId", "cols", "rows"],
+        "properties": {
+          "projectId": { "type": "string" },
+          "sessionId": { "type": "string", "description": "Start in this session's directory; else in the home directory." },
+          "cols": { "type": "integer" },
+          "rows": { "type": "integer" }
+        }
+      },
+      "Terminal": {
+        "type": "object", "required": ["id", "projectId", "cwd"],
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "sessionId": { "type": "string" },
+          "cwd": { "type": "string" }
+        }
+      },
+      "TerminalControl": {
+        "type": "object", "description": "Text frame from the browser on a terminal WebSocket.",
+        "required": ["resize"],
+        "properties": { "resize": { "$ref": "#/components/schemas/TerminalSize" } }
+      },
+      "TerminalSize": { "type": "object", "required": ["cols", "rows"], "properties": { "cols": { "type": "integer" }, "rows": { "type": "integer" } } },
+      "Preview": {
+        "type": "object", "required": ["port", "url"],
+        "properties": {
+          "port": { "type": "integer" },
+          "url": { "type": "string", "description": "https://flow-<session short id>-<port>.<preview domain>" }
+        }
+      },
+      "PreviewList": { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Preview" } } } },
+      "PreviewCreate": { "type": "object", "required": ["port"], "properties": { "port": { "type": "integer" } } },
+      "PreviewTicket": {
+        "type": "object", "required": ["url", "expiresAt"],
+        "properties": {
+          "url": { "type": "string" },
+          "expiresAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

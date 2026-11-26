@@ -10,6 +10,9 @@ steps:
   # The sidecar is outside ui: (floors, patch gate, Dependabot); this is its
   # whole gate.
   - { name: sidecar, dir: sidecar, run: npm ci && npm run lint && npm test && npm run build && npm audit --audit-level=high --omit=dev }
+  # The browser API's machine-readable contract (riptide's convention). Route
+  # registration and the generated Go/TS types are held to it by Go tests.
+  - { name: openapi lint, run: npx --yes @stoplight/spectral-cli@6.15.0 lint backend/api/openapi.json --ruleset .spectral.yaml }
 images:
   - { containerfile: backend/Containerfile }
 visibility: public
