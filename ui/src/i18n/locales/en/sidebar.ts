@@ -1,5 +1,7 @@
 // The session sidebar: sections, grouping, statuses. Owned by the sidebar area.
 export const sidebar = {
+  label: "Sessions",
+  listLabel: "Session list",
   newSession: "New session",
   search: "Search sessions",
   groupByStatus: "By status",
@@ -9,10 +11,14 @@ export const sidebar = {
   sectionDone: "Done",
   sectionIdle: "Idle",
   empty: "Nothing here",
+  loading: "Loading sessions…",
   statusApproval: "Approval",
   statusQuestion: "Question",
+  statusPlan: "Plan",
   statusWorking: "Working",
   statusQueued: "Check queue",
   statusDone: "Done",
   statusFailed: "Failed",
+  statusIdle: "Idle",
+  branch: "Branch",
 };
