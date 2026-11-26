@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/trick77/flow/internal/apitypes"
 )
 
 func newServer(t *testing.T) *httptest.Server {
@@ -46,7 +48,7 @@ func TestVersion(t *testing.T) {
 	if ct := h.Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
-	var got versionResponse
+	var got apitypes.Version
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatalf("body %q: %v", body, err)
 	}
