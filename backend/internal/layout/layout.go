@@ -11,6 +11,7 @@ package layout
 import (
 	"path"
 	"regexp"
+	"strings"
 )
 
 // AgentUser is the unprivileged account agents, hosts and terminals run as. Not 1000: that uid belongs to the
@@ -78,6 +79,19 @@ var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 // no slashes, no leading dot.
 func ValidName(s string) bool { return nameRE.MatchString(s) }
 
+// RepoDir is the directory of a repository (owner/name) in Work and in session directories: its name, lower case.
+// ok is false for a name that is not a ValidName (GitHub also allows a leading dot, underscore or dash and up to 100
+// characters): Flow refuses such repositories when a project is created, the one place both sides check. Two
+// repositories of one project must not share a RepoDir; Flow refuses that at creation too.
+func RepoDir(fullName string) (dir string, ok bool) {
+	owner, name, found := strings.Cut(fullName, "/")
+	if !found || owner == "" || strings.Contains(name, "/") {
+		return "", false
+	}
+	dir = strings.ToLower(name)
+	return dir, ValidName(dir)
+}
+
 // SessionDir is the agent's working directory: one sibling worktree per repository below it.
 func SessionDir(name string) string { return path.Join(Sessions, name) }
 
@@ -89,6 +103,14 @@ func Checkout(repo string) string { return path.Join(Work, repo) }
 
 // EventLog is a session's append-only log.
 func EventLog(sessionID string) string { return path.Join(Logs, sessionID, "events.jsonl") }
+
+// SessionSpecFile is the session's spec as flowd last started its host with (host.Spec, JSON), beside the log: the
+// host reads it on every start, and flowd serves the log from disk with no host running.
+func SessionSpecFile(sessionID string) string { return path.Join(Logs, sessionID, "spec.json") }
+
+// SessionClaim names the session id that owns a session directory: flowd never puts a second session's worktrees
+// into a directory another session id claimed, and frees the claim when it removes the worktrees.
+func SessionClaim(name string) string { return path.Join(State, "session-dirs", name) }
 
 // HostSocket is where a session host takes commands and live subscriptions.
 func HostSocket(sessionID string) string { return path.Join(Run, "sessions", sessionID, "host.sock") }

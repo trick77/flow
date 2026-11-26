@@ -68,6 +68,14 @@ var (
 	ErrProtocol     = errors.New("flowd: protocol version outside this build's range")
 	ErrUnauthorized = errors.New("flowd: token refused")
 	ErrUnavailable  = errors.New("flowd: not reachable")
+	// ErrNotPending: a reply to a request that is not open in the session.
+	ErrNotPending = errors.New("flowd: request not pending")
+	// ErrRepoBroken: a main checkout exists but is not usable, and flowd will not remove it because it may hold work
+	// (local branches, worktrees, unknown files). It needs the owner's look.
+	ErrRepoBroken = errors.New("flowd: main checkout broken")
+	// ErrInvalid: flowd or the host refused a request as malformed (CodeInvalid), e.g. a message whose event cannot be
+	// written.
+	ErrInvalid = errors.New("flowd: invalid request")
 )
 
 // ErrorBody is every non-2xx response body; Code is one of the Code* constants.
@@ -84,6 +92,8 @@ const (
 	CodeInvalid      = "invalid"
 	CodeBusy         = "busy"
 	CodeInternal     = "internal"
+	CodeNotPending   = "not_pending"
+	CodeRepoBroken   = "repo_broken"
 )
 
 // UnitState is a systemd unit's state as flowd sees it.
@@ -377,7 +387,8 @@ type API interface {
 	EnsureRepo(ctx context.Context, r RepoSpec) (RepoState, error)
 	EnsureSession(ctx context.Context, s SessionSpec) (SessionState, error)
 	Session(ctx context.Context, id string) (SessionState, error)
-	// StopSession stops the host unit; remove also deletes the worktrees (the log stays).
+	// StopSession stops the host unit; remove also deletes the worktrees and frees the session directory's claim
+	// (layout.SessionClaim) for another session (the log stays). On the wire: DELETE ...?remove=true.
 	StopSession(ctx context.Context, id string, remove bool) error
 	AddWorktree(ctx context.Context, sessionID string, w WorktreeSpec) (WorktreeState, error)
 	Command(ctx context.Context, c event.Command) (CommandResult, error)

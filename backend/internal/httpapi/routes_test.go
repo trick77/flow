@@ -184,7 +184,9 @@ func TestDecode(t *testing.T) {
 		`[`:                                   false,
 		strings.Repeat(" ", MaxBody+2) + `{}`: false,
 	} {
-		err := Decode(httptest.NewRequest("POST", "/", strings.NewReader(body)), &v)
+		req := httptest.NewRequest("POST", "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		err := Decode(req, &v)
 		var e *apitypes.Error
 		if ok != (err == nil) || (err != nil && (!errors.As(err, &e) || e.Code != apitypes.ErrorCodeInvalidRequest)) {
 			t.Errorf("Decode(%.20q) = %v", body, err)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,8 +35,13 @@ func WriteError(w http.ResponseWriter, err error) {
 	httpx.WriteJSON(w, e.Code.Status(), e)
 }
 
-// Decode reads a JSON body strictly into v: unknown fields, trailing data and oversize bodies are invalid_request.
+// Decode reads a JSON body strictly into v: a Content-Type other than application/json, unknown fields, trailing
+// data and oversize bodies are invalid_request. The Content-Type rule keeps cross-site form posts (which a browser
+// sends without asking) away from every handler that takes a body.
 func Decode(r *http.Request, v any) error {
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		return &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "Content-Type"}
+	}
 	dec := json.NewDecoder(io.LimitReader(r.Body, MaxBody+1))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {

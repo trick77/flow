@@ -34,7 +34,7 @@ is added before code imports it.
 | profile and settings (backend) | `internal/profile` | `httpapi.Profile`, `profile.Store` | flowdproto (config sync) |
 | GitHub App and credentials | `internal/github`, `internal/credentials` | `httpapi.Connections`, `credentials.Store`, `Sealer`, `Source` | profile |
 | projects | `internal/projects` | `httpapi.Projects`, `projects.Store` | sandboxes |
-| sandboxes and Incus | `internal/sandboxes`, `internal/sandbox/incus` | `httpapi.Sandboxes`, `sandboxes.Store`, `sandbox.Runtime` | flowdproto, credentials.Source |
+| sandboxes and Incus | `internal/sandboxes`, `internal/sandbox/incus`, `deploy/` (host setup, base image, dev run) | `httpapi.Sandboxes`, `sandboxes.Store`, `sandbox.Runtime` | flowdproto, credentials.Source |
 | sessions | `internal/sessions`, `internal/gate` | `httpapi.Sessions`, `sessions.Store`, control requests (child tools, gate) | flowdproto, projects, sandboxes, helper |
 | timeline API | `internal/timeline` | `httpapi.Timeline` (SSE by seq, log pages, commands) | flowdproto, sessions.Store |
 | review | `internal/review` | `httpapi.Review` | flowdproto, github |

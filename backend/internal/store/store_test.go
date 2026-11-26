@@ -1,8 +1,11 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/trick77/ship/kit/schemadoc"
 )
@@ -59,6 +62,23 @@ func TestOpen_migratesOnceAndSeedsTheProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = db.Close()
+}
+
+func TestValues(t *testing.T) {
+	a, b := NewID(), NewID()
+	if len(a) != 36 || a == b || a[14] != '7' || !strings.ContainsAny(a[19:20], "89ab") {
+		t.Errorf("ids %s %s", a, b)
+	}
+	now := time.Date(2026, 11, 26, 12, 0, 0, 5e6, time.UTC)
+	if s := Format(now); s != "2026-11-26T12:00:00.005Z" || !Parse(s).Equal(now) {
+		t.Errorf("Format = %s", s)
+	}
+	if !Parse("garbage").IsZero() || ParseNull(sql.NullString{}) != nil || Null(nil).Valid {
+		t.Error("null handling")
+	}
+	if p := ParseNull(Null(&now)); p == nil || !p.Equal(now) {
+		t.Error("nullable round trip")
+	}
 }
 
 func TestOpen_failsOnABadPath(t *testing.T) {

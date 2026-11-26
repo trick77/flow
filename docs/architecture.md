@@ -8,7 +8,7 @@ confirmed.
 
 ```
 browser ──HTTPS──▶ Flow (container: API, UI, SQLite, preview proxy)
-                     │  Incus REST (restricted cert, pinned key): create, start, push files, short exec
+                     │  Incus REST (restricted cert, pinned server cert): create, start, push files, short exec
                      │  HTTP/1.1 + SSE + WebSocket over the Incus bridge, Flow always dials
                      ▼
 sandbox (Incus system container, one per project)
@@ -42,6 +42,13 @@ sandbox (Incus system container, one per project)
   while the sidecar stays translation-only as the spec demands. Rejected: sidecar writes the log itself (Node has
   no flock, product logic would creep into it); flowd translates OpenCode in-process (flowd restarts would drop
   events and need resync every time).
+- **Adapter boundary** (`host.Adapter`): sidecar-marked `Command`s in, `EventDraft`s out, `Send` never blocks, one
+  `turn.ended` per `message.send`. The host writes `session.started` (from its spec, on the first start) and
+  `worktree.added` itself; an adapter's own `session.started` draft is dropped. Ids an adapter puts into drafts
+  (`toolId`, `requestId`, `blockId`) must be unique across the whole log, also across host restarts: Flow derives
+  reply command ids from request ids, so a reused one turns a new reply into a duplicate. The walking skeleton's
+  adapter is a replay of `contract/fixtures/demo.jsonl` written in Go inside the host (the sandbox image has no Node
+  yet); the sidecar replaces it behind the same interface.
 - **Reattach.** On start flowd lists `flow-session-*`/`flow-term-*` units (`systemctl list-units`), connects to
   each socket, sends `hello` (`hostproto`). A host started from an older release keeps running it (versioned
   release dirs, `layout.Release`); flowd speaks `hostproto` from `MinProtocol` and asks old hosts to
@@ -70,8 +77,10 @@ sandbox (Incus system container, one per project)
   browser) are seqs, never byte offsets. No rotation, no compaction: logs are complete and readable from any
   position. Why: line framing is crash-friendly and greppable; seqs survive any re-encoding. Rejected: length-prefixed
   binary (not inspectable), SQLite per session (heavier to tail live, no gain for an append-only stream).
-- **Crash safety.** One write per line with `O_APPEND`; exclusive `flock` held by the one writer; on open the writer
-  truncates a torn last line (no `\n`) and continues from the last complete seq. `fsync` after each turn's
+- **Crash safety.** One write per line at the end of the last complete line (no `O_APPEND`: a failed or short
+  write is cut back to that offset, so no fragment glues the next line onto itself; if the cut fails too the writer
+  closes); exclusive `flock` held by the one writer; on open the writer truncates a torn last line (no `\n`) and
+  continues from the last complete seq. `fsync` after each turn's
   `turn.ended` and at most every second while a turn runs; a crash may lose that last second, never corrupt
   earlier lines. A line is at most `event.MaxLine` (1 MiB): tool output is cut to 16 KiB (head and tail).
 - **Ephemeral events** (`assistant.text_delta`, `tool.progress`, `live.snapshot`) are never logged and carry no
@@ -80,8 +89,9 @@ sandbox (Incus system container, one per project)
   complete" holds for content: every delta is contained in a durable event that follows it; only token-by-token
   timing is not kept.
 - **Reading and following.** Readers seek with a sparse in-memory index (seq → offset every 256 lines, built on
-  first open) and follow by inotify, polling every 250 ms where inotify is missing; the host's `appended` frames wake
-  flowd early. Requests that died with a process are closed in the log: a host that starts and finds an open turn
+  first read) and follow by polling every 250 ms, woken early by the host's `appended` frames (so a live session's
+  events arrive without the poll delay; the poll alone serves a log with no host running). inotify was left out: the
+  wake-ups already cover the live case, and polling has no per-platform code. Requests that died with a process are closed in the log: a host that starts and finds an open turn
   writes `permission.resolved`/`question.resolved`/`plan.resolved` with `expired`, then `turn.ended {lost}`.
 
 ### 3. Flow↔flowd transport
@@ -91,11 +101,20 @@ sandbox (Incus system container, one per project)
   the network ACL blocks sandbox → Flow. Wire names: `flowdproto`. Why: SSE gives ordered resumable streams with
   `Last-Event-ID` on the standard library; the same shape as the browser leg. Rejected: gRPC (dependency, codegen,
   no gain at this scale), one WebSocket for everything (reinvents resumption and backpressure).
+- **SSE framing** is Flow's own (`internal/ssewire`, both legs): kit/sse frames only `event:` and `data:`, and every
+  durable event needs `id: <seq>`. The stream position is the larger of `?after` and `Last-Event-ID`: an EventSource
+  that reconnects by itself keeps the `?after` it opened with.
+- **Session stop:** `DELETE /v1/sessions/{id}?remove=true` also removes the worktrees and frees the session
+  directory's claim (`layout.SessionClaim`): a directory belongs to one session id, and flowd never adopts another
+  session's worktrees found there.
 - **flowd → Flow requests** (child-session tools, gate acquire) ride the control stream: flowd queues them with ids,
   re-sends every unanswered one to each new control stream, Flow answers with `POST /v1/control/{id}`, idempotent
   by id. A Flow restart therefore loses nothing: an MCP tool call just waits.
-- **Authentication.** Flow → flowd: bearer token, random per sandbox start, pushed with the Incus file API to
-  `/etc/flow/flowd.json` (root 0600) and kept sealed in `sandboxes.flowd_token`. flowd → Flow: there is no separate
+- **Authentication.** Flow → flowd: bearer token, random per sandbox (made on its first bring-up, not per start),
+  pushed with the Incus file API to `/etc/flow/flowd.json` (root 0600) and kept sealed in `sandboxes.flowd_token`.
+  Fixed rather than per start because the agent user can read it anyway (below) and a per-start token would need a
+  push and a flowd restart on every boot for no gain in isolation. Rotation: clear `sandboxes.flowd_token`; the next
+  bring-up makes a new one, flowd refuses the old one, and Flow re-delivers the config. flowd → Flow: there is no separate
   credential; Flow dials the bridge address Incus reports and the sandbox NIC has `security.mac_filtering` and
   `security.ipv4_filtering` ([devices_nic](https://linuxcontainers.org/incus/docs/main/reference/devices_nic/)),
   so another sandbox cannot answer on it. Because the agent user is effectively root in its sandbox (docker group,
@@ -108,7 +127,12 @@ sandbox (Incus system container, one per project)
   (`POST /1.0/instances/{name}/files`, headers `X-Incus-uid/gid/mode/type/write`,
   [rest-api.yaml](https://github.com/lxc/incus/blob/main/doc/rest-api.yaml)), then one bounded exec (≤ 15 s):
   `ln -sfn` the release to `/opt/flow/bin`, `systemctl daemon-reload`, `systemctl restart flowd`. Releases are
-  never overwritten: running hosts and terminals keep their binary. Skipped when `Hello.version` already matches.
+  never overwritten: running hosts and terminals keep their binary. The binary is pushed as `flowd.new` and moved
+  into place only when the release does not exist (Incus refuses to write onto a running executable: measured 500
+  "text file busy"). Skipped when `Hello.version` already matches; after a sandbox start Flow first waits for an
+  already delivered flowd to answer instead of delivering again. This needs a version that names one build: two
+  builds reporting the same version (an unstamped "dev") never get the newer flowd delivered, so dev builds stamp
+  `kit/version.Version` per build.
 
 ### 4. Sandbox layout
 
@@ -119,6 +143,7 @@ sandbox (Incus system container, one per project)
 | root fs `/home/flow/work/<repo>` | main checkouts | per project; source of worktrees only |
 | root fs `/home/flow/work/.sessions/<name>/<repo>` | worktrees, agent cwd = session dir | spec |
 | root fs `/var/lib/flow/sessions/<id>/events.jsonl` | logs | outside work trees: no git noise, survives worktree removal |
+| root fs `/var/lib/flow/sessions/<id>/spec.json`, `/var/lib/flow/session-dirs/<name>` | host spec; which session id owns a session directory | the log is served with no host running; no session adopts another's worktrees |
 | root fs `/opt/flow/releases/<v>/`, `/etc/flow/` | flowd, sidecar, config, Claude settings layer | versioned, root-owned |
 | home volume `/srv/flow-home/` | `claude/` (`CLAUDE_CONFIG_DIR`), `config/` + `data/` (XDG for OpenCode), `agent-config/`, `cache/{go-mod,npm,ms-playwright}` | one volume, all sandboxes |
 | tmpfs `/run/flow/` | sockets, `credentials/` (gh hosts.yml, provider env) | gone at reboot, never on disk |
@@ -136,8 +161,8 @@ sandbox (Incus system container, one per project)
   changes per session (stable tool lists keep the prompt cache). Passed as the SDK's `settings` option, which
   outranks user and project files but not managed settings
   ([settings](https://code.claude.com/docs/en/settings)). The env adds `DISABLE_AUTOUPDATER=1` and
-  `CLAUDE_AGENT_SDK_CLIENT_APP=flow/<version>`. `CLAUDE_CODE_ENTRYPOINT` is not documented
-  ([env-vars](https://code.claude.com/docs/en/env-vars)); setting it awaits the owner's confirmation.
+  `CLAUDE_AGENT_SDK_CLIENT_APP=flow/<version>` and `CLAUDE_CODE_ENTRYPOINT=flow` (owner's decision; the variable is
+  not documented in [env-vars](https://code.claude.com/docs/en/env-vars)).
 
 ### 5. Credentials, one place in flowd
 
@@ -172,8 +197,8 @@ sandbox (Incus system container, one per project)
   `githubState: disconnected` with no token; helpers fail with `github_disconnected`; the owner reconnects with the
   device flow.
 - Encryption at rest: `kit/secret` only compares secrets in constant time; it has no encryption. Flow seals with
-  AES-256-GCM (standard library) behind `credentials.Sealer`, key from a `BACKEND_*` setting (**owner decision**:
-  name and rotation).
+  AES-256-GCM (standard library) behind `credentials.Sealer`, key from `BACKEND_SEAL_KEY` (32 bytes, base64). Key
+  rotation is not built: a new key makes every sealed value unreadable (flowd tokens then need clearing, see 3).
 
 ### 6. Child-session tools
 
@@ -191,7 +216,9 @@ sandbox (Incus system container, one per project)
 - **Rules, enforced by Flow** on every control request: same project as the sandbox the request came from; the
   target was started by the caller (`sessions.parent_id`); the caller has no parent (depth 1); at most
   `BACKEND_MAX_CHILD_SESSIONS` non-archived children; the child's mode is `min(requested, caller's mode)` and stored
-  as `mode_cap`; later mode changes above the cap are `mode_above_cap`.
+  as `mode_cap`; later mode changes above the cap are `mode_above_cap`. Because the agent user is effectively root
+  inside its sandbox, the mode cap and the own-sessions-only rule guard against mistakes within a project, not
+  against a deliberately hostile agent in that project; the hard boundary is the sandbox.
 - **Identical prefix.** A started session gets exactly what any session gets: the same system prompt preset, the
   same settings layer, the same MCP list and tools; everything specific to it (the parent's instructions) is its
   first user message. So its prompt prefix matches the parent's and every other session's and hits the cache.

@@ -13,6 +13,8 @@ func TestPaths(t *testing.T) {
 		Checkout("riptide"):          "/home/flow/work/riptide",
 		EventLog(id):                 "/var/lib/flow/sessions/" + id + "/events.jsonl",
 		HostSocket(id):               "/run/flow/sessions/" + id + "/host.sock",
+		SessionSpecFile(id):          "/var/lib/flow/sessions/" + id + "/spec.json",
+		SessionClaim("flaky"):        "/var/lib/flow/session-dirs/flaky",
 		TerminalSocket("t1"):         "/run/flow/terminals/t1.sock",
 		Release("0.3.0"):             "/opt/flow/releases/0.3.0",
 		HostUnit(id):                 "flow-session-" + id + ".service",
@@ -28,6 +30,16 @@ func TestPaths(t *testing.T) {
 	for _, p := range []string{Work, Logs, Run, State} {
 		if strings.HasPrefix(p, HomeVolume) {
 			t.Errorf("%s is on the shared home volume", p)
+		}
+	}
+}
+
+func TestRepoDir(t *testing.T) {
+	for in, want := range map[string]string{"trick77/Toolkit": "toolkit", "a/.github": "", "a/_x": "", "a/-x": "",
+		"a/" + strings.Repeat("x", 64): "", "x": "", "/x": "", "a/b/c": ""} {
+		got, ok := RepoDir(in)
+		if ok != (want != "") || (ok && got != want) {
+			t.Errorf("RepoDir(%q) = %q, %v", in, got, ok)
 		}
 	}
 }
