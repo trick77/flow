@@ -1,6 +1,6 @@
 // Package sandbox is the boundary between Flow and the container runtime: everything Flow needs from Incus, as an
 // interface. The real client (sandbox/incus, Incus REST API over HTTPS with a project-restricted client certificate
-// and a pinned server key) and the in-memory fake (sandbox/sandboxfake) implement it; nothing else in Flow talks to
+// and a pinned server certificate) and the in-memory fake (sandbox/sandboxfake) implement it; nothing else in Flow talks to
 // Incus.
 //
 // Calls are short: no method holds a connection beyond its own operation. Exec is for bounded administrative
