@@ -1,0 +1,613 @@
+// Package host is the session host (flowd host, one transient systemd unit per session): the log's only writer,
+// the command socket (hostproto), the message queue, status derivation, turn bookkeeping (expiring open requests),
+// and the agent adapter it drives. The adapter boundary has the sidecar's shape: commands of the kinds marked
+// sidecar go in, event drafts come out; the Node sidecar (Claude) and the OpenCode bridge implement it, and so does
+// the replay adapter that plays a recorded stream. Owner: flowd Claude adapter host area (docs/ownership.md).
+package host
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"slices"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/trick77/flow/internal/event"
+	"github.com/trick77/flow/internal/eventlog"
+	"github.com/trick77/flow/internal/flowdproto"
+	"github.com/trick77/flow/internal/hostproto"
+)
+
+// Spec is what flowd starts a host with, written to layout.SessionSpecFile.
+type Spec struct {
+	Session   flowdproto.SessionSpec     `json:"session"`
+	Dir       string                     `json:"dir"`
+	Worktrees []flowdproto.WorktreeState `json:"worktrees"`
+}
+
+// Adapter drives one agent. Run emits drafts until ctx ends; Send hands it a command of a kind marked sidecar and
+// must not block. It writes turn.ended for every message.send it was given, also after turn.interrupt.
+//
+// Ids an adapter puts into drafts (toolId, requestId, blockId) must be unique within the session's whole log, across
+// host restarts and adapter process lifetimes: provider ids (toolu_…, per_…) are; anything an adapter numbers itself
+// must not restart from zero with its process. Flow derives reply command ids from request ids, so a reused request
+// id turns the new request's reply into a duplicate that is acknowledged and never applied.
+type Adapter interface {
+	Run(ctx context.Context, out chan<- event.EventDraft) error
+	Send(c event.Command) error
+}
+
+// Config wires a host.
+type Config struct {
+	Spec    Spec
+	LogPath string
+	Adapter Adapter
+	Version string
+	// ResumeReason goes into session.resumed when the log already has a session.started.
+	ResumeReason event.ResumeReason
+	Now          func() time.Time
+	Log          *slog.Logger
+}
+
+// Host is one session's host.
+type Host struct {
+	cfg  Config
+	w    *eventlog.Writer
+	mu   sync.Mutex
+	seen map[string]bool
+
+	status       event.SessionStatus
+	started      bool
+	turn         string
+	turns        int
+	turnStart    time.Time
+	interruptCmd string
+	pendingID    string
+	pendingKind  event.EventKind
+	queue        []event.MessageSend
+	blocks       map[string]string
+	blockOrder   []string
+	subs         map[chan hostproto.Frame]struct{}
+	shutdownIdle bool
+	stop         chan struct{}
+	stopped      bool
+}
+
+// New opens the log, rebuilds the state from it, closes a turn that died with the previous host and announces the
+// session (session.started on first start, session.resumed after).
+func New(cfg Config) (*Host, error) {
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
+	}
+	if cfg.ResumeReason == "" {
+		cfg.ResumeReason = event.ResumeReasonMessage
+	}
+	w, events, err := eventlog.Open(cfg.LogPath)
+	if err != nil {
+		return nil, err
+	}
+	h := &Host{cfg: cfg, w: w, seen: map[string]bool{}, status: event.SessionStatusIdle, blocks: map[string]string{},
+		subs: map[chan hostproto.Frame]struct{}{}, stop: make(chan struct{})}
+	h.recover(events)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.turn != "" {
+		h.endTurn(event.TurnEnded{Outcome: event.TurnOutcomeLost}, "")
+	}
+	s := cfg.Spec
+	if !h.started {
+		h.started = true
+		h.append(event.KindSessionStarted, "", event.SessionStarted{Provider: s.Session.Provider,
+			ClaudeAuth: s.Session.ClaudeAuth, Model: s.Session.Model, Mode: s.Session.Mode, ModeCap: s.Session.ModeCap,
+			ProviderSessionID: s.Session.ID, Cwd: s.Dir})
+		for _, wt := range s.Worktrees {
+			h.append(event.KindWorktreeAdded, "", event.WorktreeAdded{Repo: wt.Repo, Branch: wt.Branch, Path: wt.Path,
+				BaseRef: wt.BaseRef, BaseSHA: wt.BaseSHA})
+		}
+	} else {
+		h.append(event.KindSessionResumed, "", event.SessionResumed{Reason: cfg.ResumeReason,
+			ProviderSessionID: s.Session.ID})
+	}
+	return h, nil
+}
+
+// recover replays the log into the host's state: the seen command ids, status, the open turn and request, the queue.
+func (h *Host) recover(events []event.Event) {
+	for _, e := range events {
+		if e.Cmd != "" {
+			h.seen[e.Cmd] = true
+		}
+		p, err := e.Payload()
+		if err != nil {
+			continue
+		}
+		switch p := p.(type) {
+		case *event.SessionStarted:
+			h.started = true
+		case *event.SessionStatusChanged:
+			h.status = p.Status
+		case *event.TurnStarted:
+			h.turns++
+			h.turn, h.turnStart = e.Turn, e.TS
+		case *event.TurnEnded:
+			h.turn = ""
+			h.pendingID, h.pendingKind = "", ""
+		case *event.PermissionRequested:
+			h.pendingID, h.pendingKind = p.RequestID, e.Kind
+		case *event.QuestionAsked:
+			h.pendingID, h.pendingKind = p.RequestID, e.Kind
+		case *event.PlanProposed:
+			h.pendingID, h.pendingKind = p.RequestID, e.Kind
+		case *event.PermissionResolved, *event.QuestionResolved, *event.PlanResolved:
+			h.pendingID, h.pendingKind = "", ""
+		case *event.MessageQueued:
+			h.queue = append(h.queue, event.MessageSend{MessageID: p.MessageID, Text: p.Text, Origin: p.Origin,
+				FromSession: p.FromSession})
+		case *event.MessageDequeued:
+			h.queue = slices.DeleteFunc(h.queue, func(m event.MessageSend) bool { return m.MessageID == p.MessageID })
+		}
+	}
+}
+
+// Close syncs and closes the log and ends every subscription.
+func (h *Host) Close() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.subs {
+		close(c)
+		delete(h.subs, c)
+	}
+	return h.w.Close()
+}
+
+// Stopped is closed when a host.shutdown asks the host to end.
+func (h *Host) Stopped() <-chan struct{} { return h.stop }
+
+func (h *Host) requestStop() {
+	if !h.stopped {
+		h.stopped = true
+		close(h.stop)
+	}
+}
+
+// Hello describes the host now.
+func (h *Host) Hello(pid int) hostproto.Hello {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return hostproto.Hello{Protocol: hostproto.Protocol, Version: h.cfg.Version, Session: h.cfg.Spec.Session.ID,
+		PID: pid, LastSeq: h.w.LastSeq(), Status: h.status, Busy: h.turn != ""}
+}
+
+// append numbers and logs one durable event and announces it; callers hold mu. A failure is logged: callers whose
+// later steps depend on the event use tryAppend.
+func (h *Host) append(kind event.EventKind, cmd string, payload any) {
+	if err := h.tryAppend(kind, cmd, h.turn, payload); err != nil {
+		h.cfg.Log.Error("append", "kind", kind, "err", err)
+	}
+}
+
+// tryAppend is append with the turn given and the failure returned (an event over event.MaxLine, a full disk).
+func (h *Host) tryAppend(kind event.EventKind, cmd, turn string, payload any) error {
+	e, err := event.New(h.cfg.Spec.Session.ID, kind, h.cfg.Now(), payload)
+	if err != nil {
+		return err
+	}
+	e.Turn, e.Cmd = turn, cmd
+	return h.tryWrite(e)
+}
+
+func (h *Host) write(e event.Event) {
+	if err := h.tryWrite(e); err != nil {
+		h.cfg.Log.Error("append", "kind", e.Kind, "err", err)
+	}
+}
+
+func (h *Host) tryWrite(e event.Event) error {
+	e, err := h.w.Append(e)
+	if err != nil {
+		return err
+	}
+	h.broadcast(hostproto.Frame{Appended: e.Seq})
+	return nil
+}
+
+func (h *Host) broadcast(f hostproto.Frame) {
+	for c := range h.subs {
+		select {
+		case c <- f:
+		default: // a subscriber that far behind reconnects and reads the log
+			close(c)
+			delete(h.subs, c)
+		}
+	}
+}
+
+func (h *Host) setStatus(s event.SessionStatus) {
+	if h.status != s {
+		h.status = s
+		h.append(event.KindSessionStatus, "", event.SessionStatusChanged{Status: s})
+	}
+}
+
+// Subscribe opens a live subscription: the first frame is a live.snapshot of the open blocks; cancel ends it.
+func (h *Host) Subscribe() (<-chan hostproto.Frame, func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := make(chan hostproto.Frame, 512)
+	snap := event.LiveSnapshot{Blocks: []event.OpenBlock{}}
+	for _, id := range h.blockOrder {
+		snap.Blocks = append(snap.Blocks, event.OpenBlock{BlockID: id, Text: h.blocks[id]})
+	}
+	if e, err := event.New(h.cfg.Spec.Session.ID, event.KindLiveSnapshot, h.cfg.Now(), snap); err == nil {
+		e.Turn = h.turn
+		c <- hostproto.Frame{Live: &e}
+	}
+	h.subs[c] = struct{}{}
+	return c, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if _, ok := h.subs[c]; ok {
+			close(c)
+			delete(h.subs, c)
+		}
+	}
+}
+
+// CommandError is a refused command; Code is a hostproto Code* value.
+type CommandError struct {
+	Code   string
+	Detail string
+}
+
+func (e *CommandError) Error() string { return e.Code + ": " + e.Detail }
+
+// Command applies one command; duplicate is true when its id was seen before (nothing is applied again).
+func (h *Host) Command(c event.Command) (duplicate bool, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c.ID == "" || c.Session != h.cfg.Spec.Session.ID {
+		return false, &CommandError{Code: hostproto.CodeInvalid, Detail: "command id or session"}
+	}
+	if h.seen[c.ID] {
+		return true, nil
+	}
+	p, err := c.Payload()
+	if err != nil {
+		return false, &CommandError{Code: hostproto.CodeUnknown, Detail: err.Error()}
+	}
+	if h.stopped {
+		return false, &CommandError{Code: hostproto.CodeShutdown, Detail: "host is stopping"}
+	}
+	if err := h.apply(c, p); err != nil {
+		return false, err
+	}
+	h.seen[c.ID] = true
+	return false, nil
+}
+
+func (h *Host) apply(c event.Command, p any) error {
+	cmd := c.ID
+	switch p := p.(type) {
+	case *event.MessageSend:
+		switch {
+		case h.turn == "":
+			return h.startTurn(cmd, *p)
+		case p.WhenBusy == event.WhenBusyInterrupt:
+			if err := h.enqueue(cmd, *p, true); err != nil {
+				return err
+			}
+			h.interrupt(cmd)
+		default:
+			return h.enqueue(cmd, *p, false)
+		}
+	case *event.MessageSendNow:
+		i := slices.IndexFunc(h.queue, func(m event.MessageSend) bool { return m.MessageID == p.MessageID })
+		if i < 0 {
+			return &CommandError{Code: hostproto.CodeNotPending, Detail: "message not queued"}
+		}
+		m := h.queue[i]
+		h.queue = slices.Insert(slices.Delete(h.queue, i, i+1), 0, m)
+		if h.turn != "" {
+			h.interrupt(cmd)
+		} else {
+			h.drain()
+		}
+	case *event.MessageRemove:
+		i := slices.IndexFunc(h.queue, func(m event.MessageSend) bool { return m.MessageID == p.MessageID })
+		if i < 0 {
+			return &CommandError{Code: hostproto.CodeNotPending, Detail: "message not queued"}
+		}
+		h.queue = slices.Delete(h.queue, i, i+1)
+		h.append(event.KindMessageDequeued, cmd, event.MessageDequeued{MessageID: p.MessageID,
+			Reason: event.DequeueReasonRemoved})
+	case *event.TurnInterrupt:
+		if h.turn != "" {
+			h.interrupt(cmd)
+		}
+	case *event.PermissionReply:
+		if err := h.resolve(event.KindPermissionRequested, p.RequestID); err != nil {
+			return err
+		}
+		h.append(event.KindPermissionResolved, cmd, event.PermissionResolved{RequestID: p.RequestID,
+			Decision: event.PermissionDecision(p.Decision), Message: p.Message})
+		h.setStatus(event.SessionStatusWorking)
+		h.send(c)
+	case *event.QuestionReply:
+		if err := h.resolve(event.KindQuestionAsked, p.RequestID); err != nil {
+			return err
+		}
+		h.append(event.KindQuestionResolved, cmd, event.QuestionResolved{RequestID: p.RequestID,
+			Outcome: event.QuestionOutcomeAnswered, Answers: p.Answers, Text: p.Text})
+		h.setStatus(event.SessionStatusWorking)
+		h.send(c)
+	case *event.PlanReply:
+		if err := h.resolve(event.KindPlanProposed, p.RequestID); err != nil {
+			return err
+		}
+		h.append(event.KindPlanResolved, cmd, event.PlanResolved{RequestID: p.RequestID,
+			Decision: event.PlanDecision(p.Decision), Feedback: p.Feedback, Mode: p.Mode})
+		h.setStatus(event.SessionStatusWorking)
+		h.send(c)
+	case *event.SettingsSet:
+		h.append(event.KindSessionSettings, cmd, event.SessionSettings{Model: p.Model, Mode: p.Mode, ModeCap: p.ModeCap})
+		h.send(c)
+	case *event.WorktreeAdd:
+		h.append(event.KindWorktreeAdded, cmd, event.WorktreeAdded(*p))
+	case *event.PullRequestsSet:
+		h.append(event.KindPullRequestsUpdated, cmd, event.PullRequestsUpdated(*p))
+	case *event.ChildStart:
+		h.append(event.KindChildStarted, cmd, event.ChildStarted(*p))
+	case *event.ChildReport:
+		h.append(event.KindChildReported, cmd, event.ChildReported(*p))
+	case *event.ReportSent:
+		h.append(event.KindSessionReported, cmd, event.SessionReported(*p))
+	case *event.GateUpdate:
+		h.gate(cmd, p)
+	case *event.HostShutdown:
+		if h.turn != "" && p.WhenIdle {
+			h.shutdownIdle = true
+			return nil
+		}
+		if h.turn != "" {
+			h.interrupt(cmd)
+		}
+		h.requestStop()
+	default:
+		return &CommandError{Code: hostproto.CodeUnknown, Detail: string(c.Kind)}
+	}
+	return nil
+}
+
+func (h *Host) gate(cmd string, p *event.GateUpdate) {
+	switch p.State {
+	case event.GateStateQueued:
+		h.append(event.KindGateQueued, cmd, event.GateQueued{Position: p.Position, Repo: p.Repo, AheadRepo: p.AheadRepo})
+		h.setStatus(event.SessionStatusQueued)
+	case event.GateStateStarted:
+		h.append(event.KindGateStarted, cmd, event.GateStarted{Repo: p.Repo})
+		h.setStatus(event.SessionStatusWorking)
+	default:
+		h.append(event.KindGateFinished, cmd, event.GateFinished{Repo: p.Repo, ExitCode: p.ExitCode,
+			DurationMs: p.DurationMs})
+	}
+}
+
+func (h *Host) resolve(kind event.EventKind, id string) error {
+	if h.pendingKind != kind || h.pendingID != id {
+		return &CommandError{Code: hostproto.CodeNotPending, Detail: id}
+	}
+	h.pendingID, h.pendingKind = "", ""
+	return nil
+}
+
+func (h *Host) interrupt(cmd string) {
+	if h.interruptCmd == "" {
+		h.interruptCmd = cmd
+	}
+	c, err := event.NewCommand(cmd, h.cfg.Spec.Session.ID, event.CmdTurnInterrupt, event.TurnInterrupt{})
+	if err == nil {
+		h.send(c)
+	}
+}
+
+func (h *Host) send(c event.Command) {
+	if err := h.cfg.Adapter.Send(c); err != nil {
+		h.cfg.Log.Error("adapter send", "kind", c.Kind, "err", err)
+	}
+}
+
+// startTurn logs the user message and starts its turn. The message is written first: when it cannot be (too large,
+// disk full) nothing changes and the error goes back to the sender, so no turn runs without its message.
+func (h *Host) startTurn(cmd string, m event.MessageSend) error {
+	turn := "t-" + strconv.Itoa(h.turns+1)
+	if err := h.tryAppend(event.KindMessageUser, cmd, turn, event.UserMessage{MessageID: m.MessageID, Text: m.Text,
+		Origin: m.Origin, FromSession: m.FromSession}); err != nil {
+		return &CommandError{Code: hostproto.CodeInvalid, Detail: err.Error()}
+	}
+	h.turns++
+	h.turn = turn
+	h.turnStart = h.cfg.Now()
+	h.append(event.KindTurnStarted, cmd, event.TurnStarted{MessageID: m.MessageID})
+	h.setStatus(event.SessionStatusWorking)
+	id := cmd
+	if id == "" {
+		id = m.MessageID
+	}
+	m.WhenBusy = ""
+	if c, err := event.NewCommand(id, h.cfg.Spec.Session.ID, event.CmdMessageSend, m); err == nil {
+		h.send(c)
+	}
+	return nil
+}
+
+// enqueue logs a message as queued, then queues it (first with front); a message that cannot be logged is refused.
+func (h *Host) enqueue(cmd string, m event.MessageSend, front bool) error {
+	if err := h.tryAppend(event.KindMessageQueued, cmd, h.turn, event.MessageQueued{MessageID: m.MessageID,
+		Text: m.Text, Origin: m.Origin, FromSession: m.FromSession}); err != nil {
+		return &CommandError{Code: hostproto.CodeInvalid, Detail: err.Error()}
+	}
+	if front {
+		h.queue = slices.Insert(h.queue, 0, m)
+	} else {
+		h.queue = append(h.queue, m)
+	}
+	return nil
+}
+
+// drain starts the next queued message when no turn runs.
+func (h *Host) drain() {
+	if h.turn != "" || len(h.queue) == 0 || h.stopped {
+		return
+	}
+	m := h.queue[0]
+	h.queue = h.queue[1:]
+	h.append(event.KindMessageDequeued, "", event.MessageDequeued{MessageID: m.MessageID, Reason: event.DequeueReasonSent})
+	if err := h.startTurn("", m); err != nil {
+		// It was logged once as queued, so it fits: this is the disk. The owner sees it dequeued without a turn.
+		h.cfg.Log.Error("starting a queued message", "message", m.MessageID, "err", err)
+	}
+}
+
+// endTurn closes the open request and the turn; callers hold mu.
+func (h *Host) endTurn(t event.TurnEnded, cmd string) {
+	switch h.pendingKind {
+	case event.KindPermissionRequested:
+		h.append(event.KindPermissionResolved, cmd, event.PermissionResolved{RequestID: h.pendingID,
+			Decision: event.PermissionDecisionExpired})
+	case event.KindQuestionAsked:
+		h.append(event.KindQuestionResolved, cmd, event.QuestionResolved{RequestID: h.pendingID,
+			Outcome: event.QuestionOutcomeExpired})
+	case event.KindPlanProposed:
+		h.append(event.KindPlanResolved, cmd, event.PlanResolved{RequestID: h.pendingID,
+			Decision: event.PlanDecisionExpired})
+	}
+	h.pendingID, h.pendingKind = "", ""
+	if t.DurationMs == 0 && !h.turnStart.IsZero() {
+		t.DurationMs = h.cfg.Now().Sub(h.turnStart).Milliseconds()
+	}
+	h.append(event.KindTurnEnded, cmd, t)
+	h.turn, h.interruptCmd = "", ""
+	h.blocks, h.blockOrder = map[string]string{}, nil
+	status := event.SessionStatusDone
+	if t.Outcome == event.TurnOutcomeError || t.Outcome == event.TurnOutcomeLost {
+		status = event.SessionStatusFailed
+	}
+	h.setStatus(status)
+}
+
+// Draft takes one draft from the adapter.
+func (h *Host) Draft(d event.EventDraft) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	switch d.Kind {
+	case event.KindAssistantTextDelta:
+		var p event.AssistantTextDelta
+		if json.Unmarshal(d.Data, &p) == nil {
+			if _, ok := h.blocks[p.BlockID]; !ok {
+				h.blockOrder = append(h.blockOrder, p.BlockID)
+			}
+			h.blocks[p.BlockID] += p.Text
+		}
+		h.live(d)
+		return
+	case event.KindToolProgress:
+		h.live(d)
+		return
+	case event.KindLiveSnapshot:
+		return
+	case event.KindSessionStarted:
+		if h.started {
+			return // the host announced the session itself
+		}
+		h.started = true
+	case event.KindTurnEnded:
+		if h.turn == "" {
+			return
+		}
+		var t event.TurnEnded
+		if err := json.Unmarshal(d.Data, &t); err != nil {
+			t = event.TurnEnded{Outcome: event.TurnOutcomeError, ErrorCode: "adapter"}
+		}
+		h.endTurn(t, h.interruptCmd)
+		if h.shutdownIdle {
+			h.requestStop()
+			return
+		}
+		h.drain()
+		return
+	case event.KindAssistantText:
+		var p event.AssistantText
+		if json.Unmarshal(d.Data, &p) == nil {
+			delete(h.blocks, p.BlockID)
+			h.blockOrder = slices.DeleteFunc(h.blockOrder, func(id string) bool { return id == p.BlockID })
+		}
+	}
+	h.write(event.Event{V: event.Version, TS: h.cfg.Now().UTC(), Session: h.cfg.Spec.Session.ID, Kind: d.Kind,
+		Turn: h.turn, ParentTool: d.ParentTool, Cmd: d.Cmd, Data: d.Data})
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	status := map[event.EventKind]event.SessionStatus{event.KindPermissionRequested: event.SessionStatusApproval,
+		event.KindQuestionAsked: event.SessionStatusQuestion, event.KindPlanProposed: event.SessionStatusPlan}
+	if s, ok := status[d.Kind]; ok && json.Unmarshal(d.Data, &req) == nil {
+		h.pendingID, h.pendingKind = req.RequestID, d.Kind
+		h.setStatus(s)
+	}
+}
+
+func (h *Host) live(d event.EventDraft) {
+	e := event.Event{V: event.Version, TS: h.cfg.Now().UTC(), Session: h.cfg.Spec.Session.ID, Kind: d.Kind,
+		Turn: h.turn, ParentTool: d.ParentTool, Data: d.Data}
+	h.broadcast(hostproto.Frame{Live: &e})
+}
+
+// Pump feeds the adapter's drafts into the host until ctx ends or the adapter stops; an adapter that stops on its
+// own fails the turn it had.
+func (h *Host) Pump(ctx context.Context) error {
+	out := make(chan event.EventDraft, 64)
+	errc := make(chan error, 1)
+	go func() { errc <- h.cfg.Adapter.Run(ctx, out) }()
+	// Messages queued when the previous host died run first, in their order; a newer one queues behind them.
+	h.mu.Lock()
+	h.drain()
+	h.mu.Unlock()
+	for {
+		select {
+		case d := <-out:
+			h.Draft(d)
+		case err := <-errc:
+			for {
+				select {
+				case d := <-out:
+					h.Draft(d)
+					continue
+				default:
+				}
+				break
+			}
+			if ctx.Err() != nil {
+				// The adapter ended because the host stops: not a failure.
+				return nil //nolint:nilerr // see above
+			}
+			h.mu.Lock()
+			if h.turn != "" {
+				h.endTurn(event.TurnEnded{Outcome: event.TurnOutcomeError, ErrorCode: "adapter_exited"}, "")
+			}
+			h.mu.Unlock()
+			if err == nil {
+				return errors.New("adapter stopped")
+			}
+			return fmt.Errorf("adapter stopped: %w", err)
+		}
+	}
+}
+
+// Sync flushes the log; the host calls it every eventlog.SyncInterval.
+func (h *Host) Sync() { h.w.Sync() }
