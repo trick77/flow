@@ -46,6 +46,32 @@ func TestLoad_badAddrFails(t *testing.T) {
 	}
 }
 
+func TestLoad_devAuthAndIncus(t *testing.T) {
+	key := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	cfg, err := Load(lookup(map[string]string{"BACKEND_AUTH_MODE": "dev", "BACKEND_ADDR": "127.0.0.1:8080",
+		"BACKEND_SEAL_KEY": key, "BACKEND_INCUS_URL": "https://127.0.0.1:8443", "BACKEND_INCUS_CERT": "c",
+		"BACKEND_INCUS_KEY": "k", "BACKEND_INCUS_SERVER_CERT": "s"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthMode != AuthDev || len(cfg.SealKey) != 32 || cfg.SandboxImage != "flow-base" || cfg.SandboxMemory != 4<<30 {
+		t.Errorf("cfg %+v", cfg)
+	}
+	if _, err := Load(lookup(map[string]string{"BACKEND_AUTH_MODE": "dev", "BACKEND_ADDR": "localhost:1"})); err != nil {
+		t.Errorf("dev on localhost: %v", err)
+	}
+	for name, vars := range map[string]map[string]string{
+		"dev on every interface": {"BACKEND_AUTH_MODE": "dev"},
+		"bad seal key":           {"BACKEND_SEAL_KEY": "short"},
+		"incus without certs":    {"BACKEND_INCUS_URL": "https://x", "BACKEND_SEAL_KEY": key},
+		"incus without seal key": {"BACKEND_INCUS_URL": "https://x", "BACKEND_INCUS_CERT": "c", "BACKEND_INCUS_KEY": "k", "BACKEND_INCUS_SERVER_CERT": "s"},
+	} {
+		if _, err := Load(lookup(vars)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func TestAddr_matchesLoad(t *testing.T) {
 	vars := map[string]string{"BACKEND_ADDR": "127.0.0.1:9191"}
 	cfg, err := Load(lookup(vars))

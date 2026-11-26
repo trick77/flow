@@ -1,5 +1,6 @@
 // Command flowd is the supervisor daemon inside each sandbox's system container. The server pushes the binary
-// matching the sandbox's architecture into it.
+// matching the sandbox's architecture into it. Multi-call: "flowd host" is a session host, started by flowd as a
+// transient systemd unit.
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"github.com/trick77/ship/kit/run"
 	"github.com/trick77/ship/kit/version"
 
+	"github.com/trick77/flow/internal/host"
 	"github.com/trick77/flow/internal/supervisor"
 )
 
@@ -27,5 +29,8 @@ func start() error {
 	}
 	ctx, stop := run.Context(context.Background())
 	defer stop()
+	if len(os.Args) > 1 && os.Args[1] == "host" {
+		return host.Run(ctx, os.Args[2:], version.String(), slog.Default())
+	}
 	return supervisor.Run(ctx, slog.Default(), version.String())
 }

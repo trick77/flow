@@ -38,6 +38,9 @@ type Store interface {
 	ApplyMirror(ctx context.Context, id string, m Mirror) error
 	MarkSeen(ctx context.Context, id string, seq int64) error
 	Archive(ctx context.Context, id string) error
+	// Delete removes a session and its worktree rows: only for a creation that failed before the session was
+	// usable.
+	Delete(ctx context.Context, id string) error
 	Worktrees(ctx context.Context, sessionID string) ([]Worktree, error)
 	AddWorktree(ctx context.Context, w Worktree) error
 	UpdateWorktree(ctx context.Context, w Worktree) error
