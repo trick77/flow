@@ -57,6 +57,17 @@ describe("useMarkSeen", () => {
     expect(seqs()).toEqual([5, 6]);
   });
 
+  it("marks the same seq again when the session turns unseen without a new event", async () => {
+    const { rerender, props } = hook({ lastSeq: 5 });
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(seqs()).toEqual([5]);
+    // Seen; then a sandbox stop cuts the turn off: unseen, no new seq.
+    rerender({ ...props, lastSeq: 5, unseen: false });
+    rerender({ ...props, lastSeq: 5, unseen: true });
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(seqs()).toEqual([5, 5]);
+  });
+
   it("waits while the session is seen, hidden, or the tab lacks focus", async () => {
     const { rerender, props } = hook({ unseen: false });
     await act(async () => vi.advanceTimersByTime(1000));

@@ -766,4 +766,31 @@ describe("App", () => {
     await waitFor(() => expect(row).not.toHaveClass("unseen"));
     vi.restoreAllMocks();
   });
+
+  it("marks a session cut off by a sandbox stop seen with the row's last seq", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const server: Server = {
+      sessions: [summary({ unseen: true, status: "failed", lastSeq: 42 })],
+      projects: [{ ...project, sandbox: { state: "stopped" } }],
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    const list = await screen.findByRole("navigation", {
+      name: en.sidebar.listLabel,
+    });
+    const row = await within(list).findByRole("button", {
+      name: /Persist the sidebar width/,
+    });
+    // The stream of a stopped sandbox delivers nothing.
+    await waitFor(
+      () =>
+        expect(server.calls).toContain(
+          'SEEN /api/sessions/s-done/seen {"seq":42}',
+        ),
+      { timeout: 3000 },
+    );
+    await waitFor(() => expect(row).not.toHaveClass("unseen"));
+    vi.restoreAllMocks();
+  });
 });

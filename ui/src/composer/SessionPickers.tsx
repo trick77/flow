@@ -23,8 +23,9 @@ export type SettingsPatch = Pick<SessionUpdate, "model" | "mode">;
 // answer's values go to onUpdated, a refusal puts the old value back and
 // goes to onError. Only the session's own agent's models are offered (a
 // session cannot change agent); modes above the cap are disabled. The model
-// changes between turns (docs/events.md, "Model per turn"), so its picker is
-// off while one runs. Without a catalog they are a read-only display.
+// changes between turns (docs/events.md, "Model per turn"): picked while one
+// runs, it applies to the next, and the menu says so. Without a catalog they
+// are a read-only display.
 export function SessionPickers({
   sessionId,
   provider,
@@ -110,8 +111,9 @@ export function SessionPickers({
           value={shownModel}
           options={modelOptions}
           onChange={(m) => m !== shownModel && change({ model: m })}
-          disabled={turnRunning || busy}
-          title={turnRunning ? t("modelBetweenTurns") : undefined}
+          disabled={busy}
+          note={turnRunning ? t("modelNextTurn") : undefined}
+          title={turnRunning ? t("modelNextTurn") : undefined}
         >
           {modelContent}
         </Picker>

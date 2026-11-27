@@ -164,14 +164,12 @@ export function defaultChoice(
   return { provider, model };
 }
 
-// defaultMode is the remembered mode while the catalog lists it, else ask,
-// else the least permissive.
-export function defaultMode(
-  catalog: AgentCatalog,
-  prefs: StartPrefs,
-): PermissionMode | undefined {
-  if (prefs.mode && catalog.modes.includes(prefs.mode)) return prefs.mode;
-  if (catalog.modes.includes("ask")) return "ask";
+// defaultMode is the mode every new session starts in: plan, else the most
+// careful the catalog offers (its list runs from least to most permissive).
+// Never remembered: a session started in a looser mode must not make the
+// next one start there.
+export function defaultMode(catalog: AgentCatalog): PermissionMode | undefined {
+  if (catalog.modes.includes("plan")) return "plan";
   return catalog.modes[0];
 }
 

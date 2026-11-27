@@ -286,6 +286,8 @@ function ToolRowView({ row, live }: { row: ToolRow; live: boolean }) {
     (row.input !== undefined ||
       fin?.rawResult !== undefined ||
       fin?.output !== undefined);
+  // A command: the row's line cuts it, the whole of it opens below, wrapped.
+  const command = kind === "bash" && row.command !== undefined;
   const head = (
     <>
       <span className="verb">{verb(row, running)}</span>
@@ -295,12 +297,17 @@ function ToolRowView({ row, live }: { row: ToolRow; live: boolean }) {
   return (
     <div className={row.nested ? "trow nested" : "trow"} data-testid={row.key}>
       <TraceIcon spin={running} name={kindIcons[kind]} />
-      {generic ? (
+      {generic || command ? (
         <div className="ttext">
           <Toggle open={open} onToggle={() => setOpen(!open)}>
             {head}
           </Toggle>
-          {open && <UnknownToolDetails row={row} />}
+          {open &&
+            (generic ? (
+              <UnknownToolDetails row={row} />
+            ) : (
+              <pre className="cmd cmd-wrap">{row.command}</pre>
+            ))}
         </div>
       ) : (
         <span className="ttext">{head}</span>

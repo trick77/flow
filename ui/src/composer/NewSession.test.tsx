@@ -1,5 +1,6 @@
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -150,7 +151,7 @@ describe("NewSession", () => {
       screen.getByRole("button", { name: "Model: Claude Code, Opus 5.5" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Permission mode: Ask" }),
+      screen.getByRole("button", { name: "Permission mode: Plan" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Runs in the riptide sandbox")).toBeInTheDocument();
 
@@ -162,18 +163,18 @@ describe("NewSession", () => {
       provider: "claude",
       claudeAuth: "subscription_token",
       model: "claude-opus-5-5",
-      mode: "ask",
+      mode: "plan",
       message: {
         clientId: "0193a8f2-0000-7000-8000-000000000009",
         text: "Fix the test",
       },
     });
     expect(props.onCreated.mock.calls[0][0].summary.id).toBe("s-new");
+    // The mode is not remembered.
     expect(JSON.parse(window.localStorage.getItem(PREFS_KEY)!)).toEqual({
       projectId: "p1",
       provider: "claude",
       model: "claude-opus-5-5",
-      mode: "ask",
     });
   });
 
@@ -223,6 +224,17 @@ describe("NewSession", () => {
       model: "claude-haiku-5-5",
       mode: "full_access",
     });
+
+    // The next new session keeps the project and model, and starts in plan.
+    cleanup();
+    view();
+    await box();
+    expect(
+      screen.getByRole("button", { name: "Model: Claude Code, Haiku 5.5" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Permission mode: Plan" }),
+    ).toBeInTheDocument();
   });
 
   it("starts from what this browser used last, while it is still valid", async () => {
@@ -231,7 +243,7 @@ describe("NewSession", () => {
       JSON.stringify({
         projectId: "p2",
         model: "claude-haiku-5-5",
-        mode: "plan",
+        mode: "full_access",
       }),
     );
     serve();
@@ -244,6 +256,7 @@ describe("NewSession", () => {
     expect(
       screen.getByRole("button", { name: "Model: Claude Code, Haiku 5.5" }),
     ).toBeInTheDocument();
+    // A mode an earlier version remembered does not apply: plan, always.
     expect(
       screen.getByRole("button", { name: "Permission mode: Plan" }),
     ).toBeInTheDocument();
@@ -430,7 +443,7 @@ describe("NewSession", () => {
       screen.getByRole("button", { name: "Model: Claude Code, Opus 5.5" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Permission mode: Ask" }),
+      screen.getByRole("button", { name: "Permission mode: Plan" }),
     ).toBeInTheDocument();
   });
 

@@ -1,15 +1,16 @@
-import type { PermissionMode, Provider } from "../api/types.gen";
+import type { Provider } from "../api/types.gen";
 
 // What a new session starts with, as this browser last used it. Only a
 // convenience: storage may be missing, full, blocked or hold anything, and
-// every value is checked against the live lists before it is used.
+// every value is checked against the live lists before it is used. The mode
+// is not among them: every session starts in plan mode (a mode stored by an
+// earlier version is ignored).
 export interface StartPrefs {
   projectId?: string;
   // The model's provider: two agents may offer the same model id. Prefs
   // stored before it was kept have none; the model then goes by id alone.
   provider?: Provider;
   model?: string;
-  mode?: PermissionMode;
 }
 
 export const PREFS_KEY = "flow.newSession";
@@ -25,7 +26,6 @@ export function loadPrefs(storage?: Storage): StartPrefs {
       projectId: str(o.projectId),
       provider: str(o.provider) as Provider | undefined,
       model: str(o.model),
-      mode: str(o.mode) as PermissionMode | undefined,
     };
   } catch {
     return {};

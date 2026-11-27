@@ -8,14 +8,20 @@ describe("start prefs", () => {
       projectId: "p1",
       provider: "opencode",
       model: "m",
-      mode: "auto",
     });
     expect(loadPrefs()).toEqual({
       projectId: "p1",
       provider: "opencode",
       model: "m",
-      mode: "auto",
     });
+  });
+
+  it("does not read a mode an earlier version stored", () => {
+    window.localStorage.setItem(
+      PREFS_KEY,
+      JSON.stringify({ projectId: "p1", model: "m", mode: "full_access" }),
+    );
+    expect(loadPrefs()).not.toHaveProperty("mode");
   });
 
   it("reads nothing from an empty, broken or odd store", () => {
@@ -31,7 +37,6 @@ describe("start prefs", () => {
     expect(loadPrefs()).toEqual({
       projectId: undefined,
       model: "m",
-      mode: undefined,
     });
   });
 

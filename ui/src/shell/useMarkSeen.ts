@@ -52,6 +52,12 @@ export function useMarkSeen({
     };
   }, []);
 
+  // Seen, then unseen again at the same seq (a sandbox stop cut the turn off:
+  // no new event, the row says unseen): the same seq is marked again.
+  useEffect(() => {
+    if (!unseen) sent.current = 0;
+  }, [unseen]);
+
   useEffect(() => {
     const want =
       unseen &&

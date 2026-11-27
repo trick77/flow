@@ -41,9 +41,10 @@ import { loadPrefs, savePrefs } from "./prefs";
 // first), the model, the permission mode and the first message. The models
 // and modes come from the agent catalog; without an agent that can run it
 // points to Settings instead. The project of the session on screen is the
-// default, else the one used last in this browser; the last model and mode
-// used are the defaults next time. onCreated gets the session the moment the
-// server has made it.
+// default, else the one used last in this browser; the last model used is the
+// default next time. Every session starts in plan mode (defaultMode), never in
+// the one picked last. onCreated gets the session the moment the server has
+// made it.
 //
 // The app keeps it mounted while another view shows (hidden): the draft and
 // a start under way survive a look elsewhere.
@@ -115,7 +116,7 @@ export function NewSession({
     : undefined;
   const modes = (catalog?.modes ?? []).filter((m) => m in modeKeys);
   const chosenMode =
-    mode ?? (catalog ? defaultMode({ ...catalog, modes }, prefs) : undefined);
+    mode ?? (catalog ? defaultMode({ ...catalog, modes }) : undefined);
   const auths = choice?.provider.claudeAuths ?? [];
   const chosenAuth =
     choice?.provider.provider === "claude"
@@ -172,7 +173,6 @@ export function NewSession({
           projectId: project.id,
           provider: choice.provider.provider,
           model: choice.model.id,
-          mode: chosenMode,
         });
         onCreated(session);
       },

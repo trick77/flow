@@ -1124,6 +1124,26 @@ svg.i {
   color: var(--color-faint);
   user-select: none;
 }
+/* A command the owner decides on or reads in full: wrapped, never scrolled
+   sideways; whitespace kept, a long token broken where it must. */
+.cmd-wrap {
+  overflow-x: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ttext > .cmd-wrap {
+  margin: 6px 0 2px;
+  font-size: 0.75rem;
+}
+/* An expandable row's line: cut with an ellipsis, the chevron stays in view. */
+.ttext > .fold-btn {
+  max-width: 100%;
+}
+.ttext > .fold-btn > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .cwd {
   margin-top: 8px;
   color: var(--color-muted-2);
@@ -1245,8 +1265,15 @@ svg.i {
   color: var(--color-muted);
   font-size: 0.8125rem;
 }
+.working > span {
+  min-width: 0;
+}
+.working .faint {
+  color: var(--color-faint);
+}
 .working .what {
   color: var(--color-trace-title);
+  overflow-wrap: anywhere;
 }
 .dots {
   display: flex;

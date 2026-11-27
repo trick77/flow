@@ -179,8 +179,16 @@ export type TimelineItem =
   | ResumedItem
   | NoticeItem;
 
+// The agent thinks right now: the open turn's latest activity is a thinking
+// estimate (Claude's system/thinking_tokens). tokens: its running estimate
+// for the current thinking block, when the message carried one.
+export interface Thinking {
+  tokens?: number;
+}
+
 export interface Folded {
   items: TimelineItem[];
+  thinking?: Thinking;
   // The latest session.status in the log.
   status?: SessionStatus;
   // A turn.started without its turn.ended.
@@ -205,6 +213,79 @@ export function stillOpen(
   if (item.resolved !== undefined) return false;
   return item.turn === undefined || !ended.has(item.turn);
 }
+
+// Claude Code's interrupt marker: the user message it records when a turn is
+// stopped. The turn's outcome says so already.
+const INTERRUPT_MARKERS = new Set([
+  "[Request interrupted by user]",
+  "[Request interrupted by user for tool use]",
+]);
+
+function interruptMarker(raw: unknown): boolean {
+  if (raw === null || typeof raw !== "object") return false;
+  const content = (raw as { message?: { content?: unknown } }).message?.content;
+  const texts =
+    typeof content === "string"
+      ? [content]
+      : Array.isArray(content) && content.length > 0
+        ? content.map((b: unknown) =>
+            b !== null &&
+            typeof b === "object" &&
+            (b as { type?: unknown }).type === "text" &&
+            typeof (b as { text?: unknown }).text === "string"
+              ? (b as { text: string }).text
+              : null,
+          )
+        : [];
+  return (
+    texts.length > 0 &&
+    texts.every((t) => t !== null && INTERRUPT_MARKERS.has(t.trim()))
+  );
+}
+
+// Claude's CLI bookkeeping the timeline does not show (it stays in the log):
+// a queued command's lifecycle, a rate limit check that passed (a refusal or
+// a warning is a notice), the interrupt marker. Every other provider message
+// keeps its generic row: nothing unknown is hidden.
+const HIDDEN_PASSTHROUGH = new Set(["command_lifecycle", "rate_limit_event"]);
+
+export function hiddenPassthrough(
+  provider: Provider,
+  name: string,
+  raw: unknown,
+): boolean {
+  if (provider !== "claude") return false;
+  if (HIDDEN_PASSTHROUGH.has(name)) return true;
+  return name === "user" && interruptMarker(raw);
+}
+
+// THINKING_TOKENS is Claude's live thinking estimate: one indicator for the
+// running turn, not a row per message.
+export const THINKING_TOKENS = "system/thinking_tokens";
+
+// thinkingTokens is the message's running estimate, when it has a sane one.
+function thinkingTokens(raw: unknown): number | undefined {
+  const n =
+    raw !== null && typeof raw === "object"
+      ? (raw as { estimated_tokens?: unknown }).estimated_tokens
+      : undefined;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0
+    ? Math.round(n)
+    : undefined;
+}
+
+// Kinds that show the agent doing something else than thinking: an estimate
+// before them is over.
+const ACTIVITY_KINDS = new Set<string>([
+  "assistant.text",
+  "assistant.thinking",
+  "tool.started",
+  "tool.finished",
+  "permission.requested",
+  "question.asked",
+  "plan.proposed",
+  "turn.ended",
+]);
 
 // foldEvents turns a session's stream into timeline items. Pure: the same
 // state gives the same items, with keys stable across calls (turn, toolId,
@@ -271,7 +352,11 @@ export function foldEvents(state: StreamState): Folded {
     return g;
   };
 
+  // The latest thinking estimate, until the agent does something else.
+  let thinking: { turn?: string; tokens?: number } | undefined;
+
   for (const e of state.events) {
+    if (thinking && ACTIVITY_KINDS.has(e.kind)) thinking = undefined;
     switch (e.kind) {
       case "session.started":
         out.provider = e.data.provider;
@@ -377,6 +462,18 @@ export function foldEvents(state: StreamState): Folded {
         break;
       }
       case "provider.passthrough": {
+        const d = e.data;
+        if (
+          d.provider === "claude" &&
+          d.name === THINKING_TOKENS &&
+          d.rawTruncated !== true
+        ) {
+          thinking = { turn: e.turn, tokens: thinkingTokens(d.raw) };
+          break;
+        }
+        // Checked before foldFor: a hidden message makes no empty fold.
+        if (hiddenPassthrough(d.provider, d.name, d.raw)) break;
+        thinking = undefined;
         const f = foldFor(e);
         f.rows.push({
           type: "raw",
@@ -521,6 +618,16 @@ export function foldEvents(state: StreamState): Folded {
       text: b.text,
       live: true,
     });
+  }
+
+  // Only for the running turn, and not while its answer streams already.
+  if (
+    thinking?.turn !== undefined &&
+    folds.get(thinking.turn)?.running === true &&
+    state.live.length === 0
+  ) {
+    out.thinking =
+      thinking.tokens === undefined ? {} : { tokens: thinking.tokens };
   }
 
   for (let i = toolOrder.length - 1; i >= 0; i--) {

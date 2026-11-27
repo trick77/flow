@@ -80,7 +80,7 @@ export function PermissionCard({
       </div>
       <div className="card-b">
         {body !== undefined && (
-          <pre className="cmd">
+          <pre className="cmd cmd-wrap">
             {r.command !== undefined && (
               <span className="pr">{t("commandPrompt")}</span>
             )}

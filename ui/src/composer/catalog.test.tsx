@@ -86,9 +86,13 @@ describe("agent catalog", () => {
       ),
     ).toBeUndefined();
 
-    expect(defaultMode(catalog, {})).toBe("plan");
-    expect(defaultMode(catalog, { mode: "auto" })).toBe("auto");
-    expect(defaultMode({ ...catalog, modes: ["plan", "ask"] }, {})).toBe("ask");
+    // Plan, whatever was used before; without plan the most careful offered.
+    expect(defaultMode(catalog)).toBe("plan");
+    expect(defaultMode({ ...catalog, modes: ["ask", "plan", "auto"] })).toBe(
+      "plan",
+    );
+    expect(defaultMode({ ...catalog, modes: ["ask", "auto"] })).toBe("ask");
+    expect(defaultMode({ ...catalog, modes: [] })).toBeUndefined();
 
     expect(defaultAuth(claude)).toBe("api_key");
     expect(
