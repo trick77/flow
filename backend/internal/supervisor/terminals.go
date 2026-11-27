@@ -147,15 +147,18 @@ func (s *Supervisor) EnsureTerminal(ctx context.Context, t flowdproto.TerminalSp
 
 // termProps are a terminal unit's limits and environment.
 func termProps(l flowdproto.Limits) []string {
-	mem, cpu := l.MemoryMaxBytes, l.CPUQuotaPercent
+	mem, cpu, tasks := l.MemoryMaxBytes, l.CPUQuotaPercent, l.TasksMax
 	if mem <= 0 {
 		mem = termMemoryMax
 	}
 	if cpu <= 0 {
 		cpu = termCPUQuota
 	}
+	if tasks <= 0 {
+		tasks = termTasksMax
+	}
 	return []string{fmt.Sprintf("MemoryMax=%d", mem), fmt.Sprintf("CPUQuota=%d%%", cpu),
-		"TasksMax=" + strconv.Itoa(termTasksMax), "Environment=LANG=C.UTF-8"}
+		"TasksMax=" + strconv.Itoa(tasks), "Environment=LANG=C.UTF-8"}
 }
 
 // terminal is a terminal's state: its own answer while it runs, else the exit status it left.

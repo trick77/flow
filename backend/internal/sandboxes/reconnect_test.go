@@ -3,8 +3,10 @@ package sandboxes
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/sandbox"
@@ -53,6 +55,152 @@ func TestWarm_failedReconnectKeepsTheSandboxWarm(t *testing.T) {
 	}
 	if _, err := r.m.Warm(ctx, pid); err != nil {
 		t.Errorf("Warm after the fetch recovered: %v", err)
+	}
+}
+
+// The same through Ensure, which may start the sandbox: a reconnect to a running, warm sandbox that fails for a
+// passing reason started nothing and leaves it warm.
+func TestEnsure_failedReconnectKeepsTheSandboxWarm(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	if _, err := r.m.Ensure(ctx, pid); err != nil {
+		t.Fatal(err)
+	}
+	fails := &atomic.Int32{}
+	fails.Store(1)
+	r.m.Dialer = failingRepoDialer{d: r.d, fails: fails}
+	r.m.Forget(pid) // as after Flow's restart
+	if _, err := r.m.Ensure(ctx, pid); err == nil {
+		t.Fatal("Ensure with a failing fetch: no error")
+	}
+	if d := r.m.Describe(ctx, pid); d.State != "warm" {
+		t.Errorf("state after a failed reconnect: %s", d.State)
+	}
+	if _, err := r.m.Warm(ctx, pid); err != nil {
+		t.Errorf("Warm after the fetch recovered: %v", err)
+	}
+}
+
+// failingState fails every State look while on is set, as Incus does when it does not answer just now.
+type failingState struct {
+	*sandboxfake.Runtime
+	on atomic.Bool
+}
+
+func (f *failingState) State(ctx context.Context, name string) (sandbox.State, error) {
+	if f.on.Load() {
+		return sandbox.State{}, errors.New("incus: timeout")
+	}
+	return f.Runtime.State(ctx, name)
+}
+
+// A State look that fails proves nothing about a cached connection: it stays and is answered.
+func TestWarm_failedStateLookKeepsTheConnection(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	api, err := r.m.Ensure(ctx, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := &failingState{Runtime: r.rt}
+	rt.on.Store(true)
+	r.m.Runtime = rt
+	if again, err := r.m.Warm(ctx, pid); err != nil || again != api {
+		t.Errorf("Warm on a failed look: %v", err)
+	}
+	if r.m.cached(pid).api != api {
+		t.Error("the connection was dropped")
+	}
+}
+
+// leavingStop is a runtime whose Stop sees the caller leave (a page reload) at its start.
+type leavingStop struct {
+	*sandboxfake.Runtime
+	leave context.CancelFunc
+}
+
+func (l leavingStop) Stop(ctx context.Context, name string, wait time.Duration) error {
+	l.leave()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return l.Runtime.Stop(ctx, name, wait)
+}
+
+// A stop runs to its end when its caller leaves: the sandbox is recorded stopped, not failed or stopping.
+func TestStop_callerLeaves(t *testing.T) {
+	r := newRig(t)
+	if _, err := r.m.Ensure(t.Context(), pid); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	r.m.Runtime = leavingStop{Runtime: r.rt, leave: cancel}
+	if err := r.m.Stop(ctx, pid); err != nil {
+		t.Errorf("stop: %v", err)
+	}
+	if d := r.m.Describe(t.Context(), pid); d.State != "stopped" {
+		t.Errorf("state after the caller left: %+v", d)
+	}
+}
+
+// While a bring-up holds the project, Warm answers at once (not warm, may run) and an Ensure whose caller leaves
+// returns instead of waiting minutes for the lock.
+func TestLock_bringUpHoldsNoWaiter(t *testing.T) {
+	r := newRig(t)
+	unlock := r.m.lock(pid)
+	r.m.setBringing(pid, true)
+	defer unlock()
+	warm, ensure := make(chan error, 1), make(chan error, 1)
+	go func() {
+		_, err := r.m.Warm(t.Context(), pid)
+		warm <- err
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	go func() {
+		_, err := r.m.Ensure(ctx, pid)
+		ensure <- err
+	}()
+	for _, w := range []struct {
+		c    chan error
+		want error
+	}{{warm, ErrMayRun}, {ensure, context.DeadlineExceeded}} {
+		select {
+		case err := <-w.c:
+			if !errors.Is(err, w.want) {
+				t.Errorf("waiter during a bring-up: %v, want %v", err, w.want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("a waiter stayed parked behind the bring-up")
+		}
+	}
+}
+
+// The same with a real bring-up held midway (cloning): Warm answers at once, and the bring-up ends warm.
+func TestWarm_answersDuringABringUp(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	gate := repoGate{entered: make(chan struct{}), once: &sync.Once{}, release: make(chan struct{})}
+	r.m.Dialer = gateDialer{d: r.d, gate: gate}
+	up := make(chan error, 1)
+	go func() { _, err := r.m.Ensure(ctx, pid); up <- err }()
+	<-gate.entered
+	warm := make(chan error, 1)
+	go func() { _, err := r.m.Warm(ctx, pid); warm <- err }()
+	select {
+	case err := <-warm:
+		if !errors.Is(err, ErrMayRun) {
+			t.Errorf("Warm during a bring-up: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("Warm waited for the bring-up")
+	}
+	close(gate.release)
+	if err := <-up; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.Warm(ctx, pid); err != nil {
+		t.Errorf("Warm after the bring-up: %v", err)
 	}
 }
 

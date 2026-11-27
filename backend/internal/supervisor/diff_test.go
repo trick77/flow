@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -105,6 +106,64 @@ func TestDiff(t *testing.T) {
 	if len(d.Files) != 2 || d.Files[0].Path != "new.txt" || d.Files[1].Path != "zz-last.txt" ||
 		len(d.Files[1].Hunks) != 1 || strings.Join(d.Files[1].Hunks[0].Lines, ",") != "+last" {
 		t.Errorf("after a type change: %+v", d.Files)
+	}
+}
+
+// changing edits a file of the base in the work tree right after the first `git diff`, as an agent working during a review
+// refresh does.
+type changing struct {
+	ExecRunner
+	wt   string
+	done bool
+}
+
+func (c *changing) Run(ctx context.Context, cmd Cmd) ([]byte, error) {
+	out, err := c.ExecRunner.Run(ctx, cmd)
+	if cmd.Name == "git" && slices.Contains(cmd.Args, "diff") && !c.done {
+		c.done = true
+		_ = os.WriteFile(filepath.Join(c.wt, "README"), []byte("agent\n"), 0o644)
+	}
+	return out, err
+}
+
+// A work tree changing while the diff is read never puts one file's hunks under another's name.
+func TestDiff_oneSnapshot(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, err := r.api.EnsureSession(ctx, sessionSpec("s1", "demo", "trick77/toolkit")); err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(r.root, layout.Worktree("demo", "toolkit"))
+	if err := os.WriteFile(filepath.Join(wt, "b.txt"), []byte("bee\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Options{Root: r.root, Run: &changing{wt: wt}})
+	d, err := s.Diff(ctx, "s1", "trick77/toolkit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Files) == 0 {
+		t.Fatal("no files")
+	}
+	for _, f := range d.Files {
+		want := map[string]string{"README": "+agent", "b.txt": "+bee"}[f.Path]
+		if len(f.Hunks) != 1 || !slices.Contains(f.Hunks[0].Lines, want) || f.Added != 1 {
+			t.Errorf("%s: %+v", f.Path, f)
+		}
+	}
+}
+
+// splitDiff takes the lists and the patch of one combined output apart, a rename included.
+func TestSplitDiff(t *testing.T) {
+	b := ":000000 100644 0000000 3e75765 A\x00n.txt\x00:100644 100644 bca70f3 bca70f3 R100\x00old name\x00y.txt\x00" +
+		"1\t0\tn.txt\x000\t0\t\x00old name\x00y.txt\x00\x00diff --git a/n.txt b/n.txt\n"
+	names, counts, patch, cut := splitDiff([]byte(b))
+	if string(names) != "A\x00n.txt\x00R100\x00old name\x00y.txt\x00" || cut ||
+		string(counts) != "1\t0\tn.txt\x000\t0\t\x00old name\x00y.txt\x00" || string(patch) != "diff --git a/n.txt b/n.txt\n" {
+		t.Errorf("names %q counts %q patch %q cut %v", names, counts, patch, cut)
+	}
+	if _, _, _, cut := splitDiff([]byte(b[:60])); !cut {
+		t.Error("output ending inside the lists is not cut")
 	}
 }
 

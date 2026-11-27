@@ -110,6 +110,44 @@ func TestAddWorktree_failedAddLeavesNothing(t *testing.T) {
 	}
 }
 
+// movingBase moves the base ref to a new commit right after `git worktree add`, as another session's fetch does once
+// the checkout's lock is free.
+type movingBase struct {
+	t        *testing.T
+	checkout string
+}
+
+func (m *movingBase) Run(ctx context.Context, c Cmd) ([]byte, error) {
+	out, err := ExecRunner{}.Run(ctx, c)
+	if err == nil && len(c.Args) > 1 && c.Args[0] == "worktree" && c.Args[1] == "add" {
+		next := gitOut(m.t, m.checkout, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit-tree", "origin/master^{tree}", "-p", "origin/master", "-m", "upstream")
+		gitRun(m.t, m.checkout, "update-ref", "refs/remotes/origin/master", next)
+	}
+	return out, err
+}
+
+// The recorded base is the commit the branch was cut from, also when the ref moves right after the add and when an
+// existing worktree is adopted later.
+func TestAddWorktree_baseIsTheCutCommit(t *testing.T) {
+	r := newRig(t)
+	checkout := filepath.Join(r.root, layout.Checkout("toolkit"))
+	s := New(Options{Root: r.root, Run: &movingBase{t: t, checkout: checkout}, Units: r.units,
+		CloneBase: "file://" + r.base, Log: slog.New(slog.DiscardHandler)})
+	ctx := context.Background()
+	w := flowdproto.WorktreeSpec{Repo: "trick77/toolkit", Branch: "flow/demo", BaseRef: "origin/master"}
+	st, err := s.addWorktree(ctx, "demo", w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := gitOut(t, filepath.Join(r.root, layout.Worktree("demo", "toolkit")), "rev-parse", "HEAD")
+	if st.BaseSHA != cut {
+		t.Errorf("base %s, the branch was cut from %s", st.BaseSHA, cut)
+	}
+	if st, err = s.addWorktree(ctx, "demo", w); err != nil || st.BaseSHA != cut {
+		t.Errorf("adopted: base %s (%v), the branch was cut from %s", st.BaseSHA, err, cut)
+	}
+}
+
 // mkdirAgent never follows a link planted at its name (flowd chowns as root).
 func TestMkdirAgent_refusesALink(t *testing.T) {
 	root := t.TempDir()

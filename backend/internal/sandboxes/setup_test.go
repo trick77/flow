@@ -77,6 +77,24 @@ func TestSetup_runsAtBuildInOrder(t *testing.T) {
 	if page, _ := r.m.SetupLog(ctx, pidTwo, 4); len(page.Lines) != 2 || page.Lines[0].N != 5 {
 		t.Errorf("after 4: %+v", page.Lines)
 	}
+	// The end first: the last lines, numbered as in the whole log; more than the log holds is all of it.
+	if tail, _ := r.m.SetupLogTail(ctx, pidTwo, 2); len(tail.Lines) != 2 || tail.Lines[0].N != 5 ||
+		tail.Lines[1].Text != "done" {
+		t.Errorf("tail 2: %+v", tail.Lines)
+	}
+	if tail, _ := r.m.SetupLogTail(ctx, pidTwo, 50); len(tail.Lines) != 6 || tail.Lines[0].N != 1 {
+		t.Errorf("tail 50: %+v", tail.Lines)
+	}
+	for q, want := range map[string]int{"tail=3": http.StatusOK, "tail=0": http.StatusBadRequest,
+		"tail=2&after=1": http.StatusBadRequest} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/projects/"+pidTwo+"/sandbox/setup-log?"+q, nil)
+		req.SetPathValue("projectId", pidTwo)
+		(&API{Manager: r.m}).GetSetupLog(w, req)
+		if w.Code != want || want == http.StatusOK && !strings.Contains(w.Body.String(), `"n":4`) {
+			t.Errorf("%s: %d %s", q, w.Code, w.Body)
+		}
+	}
 
 	// Ask again after a stop: flowd reports the jobs that ran, so nothing starts.
 	if err := r.m.Stop(ctx, pidTwo); err != nil {

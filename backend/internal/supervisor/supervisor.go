@@ -422,17 +422,24 @@ func (s *Supervisor) addWorktree(ctx context.Context, session string, w flowdpro
 		checkout := s.p(layout.Checkout(name))
 		_, statErr := os.Stat(dir)
 		existed := statErr == nil
+		// The base is resolved under the lock and the worktree cut from that commit: a fetch by another session
+		// moves the ref once the lock is free, and the recorded base must be the commit the branch starts from.
 		unlock := s.lock(checkout)
-		err := s.newWorktree(ctx, checkout, dir, w)
-		if err != nil {
-			s.dropWorktree(ctx, checkout, dir, existed)
+		sha, err := s.git(ctx, checkout, "rev-parse", "--verify", w.BaseRef+"^{commit}")
+		if err == nil {
+			if err = s.newWorktree(ctx, checkout, dir, w, sha); err != nil {
+				s.dropWorktree(ctx, checkout, dir, existed)
+			}
 		}
 		unlock()
 		if err != nil {
 			return st, err
 		}
+		st.BaseSHA = sha
+		return st, nil
 	}
-	sha, err := s.git(ctx, dir, "rev-parse", w.BaseRef)
+	// An existing worktree (a retry, a lost spec): its base is where its branch left the ref, not where the ref is now.
+	sha, err := s.git(ctx, dir, "merge-base", "HEAD", w.BaseRef)
 	if err != nil {
 		return st, err
 	}
@@ -447,19 +454,19 @@ func (s *Supervisor) addWorktree(ctx context.Context, session string, w flowdpro
 // branch of that name left by an earlier session is never taken over as it is: it would put the new session on a
 // stale commit while its recorded base says otherwise. One without commits of its own (all reachable from the base)
 // is reset to the base; one with commits of its own is refused and kept, since only the owner may drop work.
-func (s *Supervisor) newWorktree(ctx context.Context, checkout, dir string, w flowdproto.WorktreeSpec) error {
-	_, err := s.git(ctx, checkout, "worktree", "add", "--quiet", "-b", w.Branch, dir, w.BaseRef)
+func (s *Supervisor) newWorktree(ctx context.Context, checkout, dir string, w flowdproto.WorktreeSpec, base string) error {
+	_, err := s.git(ctx, checkout, "worktree", "add", "--quiet", "-b", w.Branch, dir, base)
 	if err == nil || !strings.Contains(err.Error(), "a branch named '"+w.Branch+"' already exists") {
 		return err
 	}
-	own, err := s.ownCommits(ctx, checkout, w.BaseRef, w.Branch)
+	own, err := s.ownCommits(ctx, checkout, base, w.Branch)
 	if err != nil {
 		return err
 	}
 	if own > 0 {
 		return invalid("branch %s holds %d commits not in %s: left for the owner, not reused", w.Branch, own, w.BaseRef)
 	}
-	_, err = s.git(ctx, checkout, "worktree", "add", "--quiet", "-B", w.Branch, dir, w.BaseRef)
+	_, err = s.git(ctx, checkout, "worktree", "add", "--quiet", "-B", w.Branch, dir, base)
 	return err
 }
 
@@ -877,7 +884,18 @@ func (s *Supervisor) removeWorktree(ctx context.Context, checkout, dir string, w
 	if _, err := s.git(ctx, checkout, "rev-parse", "--verify", "--quiet", "refs/heads/"+w.Branch); err != nil {
 		return false, nil //nolint:nilerr // no such branch (removed before): done
 	}
-	own, err := s.ownCommits(ctx, checkout, w.BaseRef, w.Branch)
+	// A base ref gone since (fetch --prune after an upstream rename) counts from the recorded base commit; without
+	// one the branch stays, which only leaves the owner a branch to delete.
+	base := w.BaseRef
+	if _, err := s.git(ctx, checkout, "rev-parse", "--verify", "--quiet", base+"^{commit}"); err != nil {
+		if base = w.BaseSHA; base == "" {
+			return false, nil
+		}
+	}
+	own, err := s.ownCommits(ctx, checkout, base, w.Branch)
+	if err != nil && base != w.BaseRef {
+		return false, nil //nolint:nilerr // the recorded base is unreadable too: the branch stays
+	}
 	if err != nil || own > 0 {
 		return false, err
 	}

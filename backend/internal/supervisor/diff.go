@@ -85,27 +85,24 @@ func (s *Supervisor) Diff(ctx context.Context, id, repo string) (apitypes.Diff, 
 	if _, err := run(64<<10, "add", "--all", "--intent-to-add", "--", "."); err != nil {
 		return apitypes.Diff{}, err
 	}
-	diffArgs := []string{"diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv"}
-	names, err := run(diffMaxListBytes, append(diffArgs, "--name-status", "-z", base, "--")...)
+	// One invocation: the file list, the counts and the patch are one snapshot of a work tree the agent may be
+	// changing, so a file can never get its neighbour's hunks.
+	limit := 2*diffMaxListBytes + diffMaxPatch
+	raw, err := run(limit, "diff", "-M", "--no-color", "--no-ext-diff", "--no-textconv", "--raw", "--numstat", "-p",
+		"--unified=3", "-z", base, "--")
 	if err != nil {
 		return apitypes.Diff{}, err
 	}
-	counts, err := run(diffMaxListBytes, append(diffArgs, "--numstat", "-z", base, "--")...)
-	if err != nil {
-		return apitypes.Diff{}, err
-	}
-	patch, err := run(diffMaxPatch, append(diffArgs, "--unified=3", base, "--")...)
-	if err != nil {
-		return apitypes.Diff{}, err
-	}
+	rawCut := len(raw) > limit
+	names, counts, patch, listCut := splitDiff(raw[:min(len(raw), limit)])
 	out := apitypes.Diff{Repo: w.Repo, BaseRef: w.BaseRef, BaseSHA: base, Files: []apitypes.DiffFile{}}
 	files, sections, cut := parseNameStatus(names)
-	out.Truncated = cut || len(files) > diffMaxFiles
+	out.Truncated = cut || listCut || len(files) > diffMaxFiles
 	if len(files) > diffMaxFiles {
 		files = files[:diffMaxFiles]
 	}
 	applyNumstat(files, counts)
-	applyPatch(files, sections, patch, len(patch) > diffMaxPatch)
+	applyPatch(files, sections, patch, listCut || rawCut || len(patch) > diffMaxPatch)
 	out.Files = files
 	return out, nil
 }
@@ -114,6 +111,62 @@ func randomHex() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// splitDiff splits `git diff --raw --numstat -p -z` into the `--name-status -z` form of its raw part, its numstat
+// part and its patch. The output is raw entries (":modes shas STATUS\0path\0", a second path for a rename or copy),
+// one numstat entry per raw entry, a NUL, then the patch (measured). cut: the output ends inside the lists.
+func splitDiff(b []byte) (names, counts, patch []byte, cut bool) {
+	field := func(i int) (string, int, bool) {
+		j := bytes.IndexByte(b[i:], 0)
+		if j < 0 {
+			return "", i, false
+		}
+		return string(b[i : i+j]), i + j + 1, true
+	}
+	i, n := 0, 0
+	for i < len(b) && b[i] == ':' {
+		meta, next, ok := field(i)
+		if !ok {
+			return names, nil, nil, true
+		}
+		status := meta[strings.LastIndexByte(meta, ' ')+1:]
+		paths := 1
+		if status != "" && (status[0] == 'R' || status[0] == 'C') {
+			paths = 2
+		}
+		entry := append([]byte(status), 0)
+		for range paths {
+			p, nx, ok := field(next)
+			if !ok {
+				return names, nil, nil, true
+			}
+			entry, next = append(append(entry, p...), 0), nx
+		}
+		names, i = append(names, entry...), next
+		n++
+	}
+	start := i
+	for range n {
+		f, next, ok := field(i)
+		if !ok {
+			return names, b[start:i], nil, true
+		}
+		i = next
+		if strings.HasSuffix(f, "\t") { // a rename: old and new path follow
+			for range 2 {
+				if _, next, ok = field(i); !ok {
+					return names, b[start:i], nil, true
+				}
+				i = next
+			}
+		}
+	}
+	counts = b[start:i]
+	if i < len(b) && b[i] == 0 {
+		i++
+	}
+	return names, counts, b[i:], false
 }
 
 // parseNameStatus reads `git diff --name-status -z`: a status, then one path (two for a rename or copy). sections
