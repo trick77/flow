@@ -5,6 +5,8 @@ import {
   type FoldItem,
   type GateRow,
   type PermissionItem,
+  type PlanItem,
+  type QuestionItem,
   type ToolRow,
 } from "./fold";
 import { emptyStream, reduceStream, type StreamState } from "./state";
@@ -119,12 +121,23 @@ describe("foldEvents on the kind fixtures", () => {
       "text",
       "todo",
       "permission",
+      "question",
+      "plan",
       "files",
       "resumed",
       "notice",
     ]) {
       expect(types, t).toContain(t);
     }
+  });
+
+  it("resolves the fixture's question and plan", () => {
+    const q = folded.items.find((i) => i.type === "question") as QuestionItem;
+    expect(q.open).toBe(false);
+    expect(q.resolved?.answers?.[0].optionIds).toEqual(["o0"]);
+    const p = folded.items.find((i) => i.type === "plan") as PlanItem;
+    expect(p.resolved?.decision).toBe("approved");
+    expect(folded.pendingQuestion).toBeUndefined();
   });
 
   it("nests subagent tools and pairs queued, started and finished gates", () => {
@@ -280,5 +293,122 @@ describe("foldEvents edge cases", () => {
       state: "queued",
       position: 1,
     });
+  });
+});
+
+describe("foldEvents: questions, plans, the queue", () => {
+  const question = {
+    requestId: "q1",
+    questions: [
+      {
+        id: "a",
+        text: "Which key?",
+        multiSelect: false,
+        options: [{ id: "o1", label: "SHA" }],
+      },
+    ],
+  };
+  const plan = { requestId: "p1", plan: "1. Do it" };
+  const turn = (id: string, seq: number) =>
+    mk("turn.started", { messageId: `m-${id}` }, { seq, turn: id });
+  const end = (id: string, seq: number) =>
+    mk(
+      "turn.ended",
+      { outcome: "interrupted", durationMs: 5 },
+      { seq, turn: id },
+    );
+
+  it("keeps an unanswered question of the running turn pending", () => {
+    const f = foldRaw([
+      turn("t1", 1),
+      mk("question.asked", question, { seq: 2, turn: "t1" }),
+      mk("question.asked", question, { seq: 3, turn: "t1" }),
+      mk("plan.proposed", plan, { seq: 4, turn: "t1" }),
+    ]);
+    const q = f.items.filter((i) => i.type === "question");
+    expect(q).toHaveLength(1);
+    expect(q[0]).toMatchObject({ key: "question:q1", open: true });
+    expect(f.pendingQuestion?.request.requestId).toBe("q1");
+    expect(f.items.find((i) => i.type === "plan")).toMatchObject({
+      key: "plan:p1",
+      open: true,
+    });
+  });
+
+  it("closes requests that were resolved or whose turn ended", () => {
+    const answered = foldRaw([
+      turn("t1", 1),
+      mk("question.asked", question, { seq: 2, turn: "t1" }),
+      mk(
+        "question.resolved",
+        { requestId: "q1", outcome: "answered", text: "tree hash" },
+        { seq: 3, turn: "t1" },
+      ),
+      mk("plan.proposed", plan, { seq: 4, turn: "t1" }),
+      mk(
+        "plan.resolved",
+        { requestId: "p1", decision: "rejected", feedback: "smaller" },
+        { seq: 5, turn: "t1" },
+      ),
+      mk("question.resolved", { requestId: "gone", outcome: "expired" }),
+      mk("plan.resolved", { requestId: "gone", decision: "expired" }),
+    ]);
+    expect(answered.pendingQuestion).toBeUndefined();
+    expect(answered.items.find((i) => i.type === "question")).toMatchObject({
+      open: false,
+      resolved: { text: "tree hash" },
+    });
+    expect(answered.items.find((i) => i.type === "plan")).toMatchObject({
+      open: false,
+      resolved: { decision: "rejected" },
+    });
+
+    const cut = foldRaw([
+      turn("t1", 1),
+      mk("question.asked", question, { seq: 2, turn: "t1" }),
+      mk("plan.proposed", plan, { seq: 3, turn: "t1" }),
+      end("t1", 4),
+    ]);
+    expect(cut.pendingQuestion).toBeUndefined();
+    const cutItems = cut.items.filter(
+      (i) => i.type === "question" || i.type === "plan",
+    );
+    expect(cutItems.map((i) => [i.type, i.open, i.resolved])).toEqual([
+      ["question", false, undefined],
+      ["plan", false, undefined],
+    ]);
+  });
+
+  it("keeps the queue in order, front first, each id once", () => {
+    const q = (id: string, seq: number, front?: boolean) =>
+      mk(
+        "message.queued",
+        { messageId: id, text: `text ${id}`, origin: "user", front },
+        { seq },
+      );
+    const f = foldRaw([
+      q("a", 1),
+      q("b", 2),
+      q("c", 3),
+      // Sent now: logged again with front, it moves to the head.
+      q("c", 4, true),
+      mk("message.dequeued", { messageId: "a", reason: "removed" }, { seq: 5 }),
+    ]);
+    expect(f.queue.map((m) => m.messageId)).toEqual(["c", "b"]);
+    expect(f.queue[0]).toEqual({
+      messageId: "c",
+      text: "text c",
+      origin: "user",
+    });
+
+    const delivered = foldRaw([
+      q("a", 1),
+      mk(
+        "message.user",
+        { messageId: "a", text: "text a", origin: "user" },
+        { seq: 2 },
+      ),
+    ]);
+    expect(delivered.queue).toEqual([]);
   });
 });

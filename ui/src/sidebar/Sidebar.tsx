@@ -36,9 +36,10 @@ function SessionRow({
   const name = project?.name ?? "";
   return (
     <button
-      className="srow"
+      className={session.unseen ? "srow unseen" : "srow"}
       type="button"
       aria-current={selected ? "true" : undefined}
+      aria-description={session.unseen ? t("unseen") : undefined}
       onClick={() => onSelect(session.id)}
     >
       <span className="s-proj">
@@ -58,7 +59,10 @@ function SessionRow({
         <span>{session.branch}</span>
         {session.repos.length > 1 && (
           <span className="s-repos">
-            {t("repoCount", { count: session.repos.length })}
+            {t("repoCount", {
+              count: session.repos.length,
+              n: formatNumber(session.repos.length),
+            })}
           </span>
         )}
       </span>
@@ -103,6 +107,8 @@ export function Sidebar({
       if (!isSearchShortcut(e)) return;
       e.preventDefault();
       e.stopPropagation();
+      // A held key repeats keydown: only the first press toggles.
+      if (e.repeat) return;
       setSearching((s) => !s);
     };
     window.addEventListener("keydown", onKey, true);

@@ -331,6 +331,11 @@ svg.i {
 .srow[aria-current="true"] .s-title {
   color: var(--color-ink);
 }
+/* Activity the owner has not seen yet. */
+.srow.unseen .s-title {
+  color: var(--color-ink-bright);
+  font-weight: 530;
+}
 .s-right {
   display: flex;
   align-items: center;
@@ -454,6 +459,35 @@ svg.i {
   white-space: nowrap;
   color: var(--color-ink-bright);
   font-weight: 500;
+}
+/* The title renames on a click: a button that looks like the title. */
+.ttl-btn {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0 -4px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  font: inherit;
+  color: inherit;
+  cursor: text;
+}
+.ttl-btn:hover {
+  background: var(--color-raised);
+}
+.crumb .ttl-edit {
+  flex: 1 1 auto;
+  min-width: 8rem;
+  max-width: 32rem;
+  height: 26px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  border: 1px solid var(--color-accent-strong);
+  border-radius: 6px;
+  background: var(--color-raised);
+  font: inherit;
+  outline: none;
 }
 .chip {
   display: inline-flex;
@@ -809,6 +843,161 @@ svg.i {
   color: var(--color-danger);
   font-size: 0.8125rem;
 }
+.card-error.q-error {
+  margin: 0;
+  padding: 0 12px 10px;
+}
+
+/* question card (mock: .q-opts, .q-opt, .radio) */
+.q-block + .q-block {
+  border-top: 1px solid var(--color-border);
+  padding-top: 10px;
+}
+.q-text {
+  margin: 0;
+  padding: 0 12px 8px;
+  color: var(--color-ink-bright);
+}
+.q-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 12px 12px;
+}
+.q-opt {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    background-color 0.12s,
+    border-color 0.12s;
+}
+.q-opt:hover {
+  background: var(--color-raised);
+}
+.q-opt:has(input:checked) {
+  border-color: var(--color-accent);
+  background: var(--color-raised);
+}
+.q-opt:has(input:focus-visible) {
+  outline: 2px solid var(--color-accent-strong);
+  outline-offset: 2px;
+}
+.q-opt:has(input:disabled) {
+  cursor: default;
+}
+.q-opt input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  pointer-events: none;
+}
+.q-opt .grow {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.q-opt .radio,
+.q-opt .box {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+  border: 1.5px solid var(--color-border-strong);
+}
+.q-opt .radio {
+  border-radius: 50%;
+}
+.q-opt .box {
+  border-radius: 4px;
+}
+.q-opt .box svg.i {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2.6;
+  opacity: 0;
+}
+.q-opt input:checked + .radio {
+  border-color: var(--color-accent-strong);
+}
+.q-opt input:checked + .radio::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-accent-strong);
+}
+.q-opt input:checked + .box {
+  border-color: var(--color-accent-strong);
+  background: var(--color-accent-strong);
+  color: var(--color-bg);
+}
+.q-opt input:checked + .box svg.i {
+  opacity: 1;
+}
+.q-opt .t {
+  color: var(--color-ink-bright);
+}
+.q-opt .d {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+.q-other {
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-ink-bright);
+  font-size: 0.8125rem;
+  outline: none;
+}
+.q-other::placeholder {
+  color: var(--color-muted-2);
+}
+.q-other:focus-visible {
+  border-color: var(--color-accent-strong);
+}
+
+/* plan card: the plan as Markdown, a little smaller than an answer */
+.plan-body {
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  color: var(--color-ink-warm);
+}
+.card .plan-body h4 {
+  margin-top: 0.25rem;
+}
+.plan-feedback {
+  flex-direction: column;
+  align-items: stretch;
+}
+.plan-fb {
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 11px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-raised);
+  color: var(--color-ink-bright);
+  font-size: 0.875rem;
+  line-height: 1.35rem;
+  resize: vertical;
+  outline: none;
+}
+.plan-fb:focus-visible {
+  border-color: var(--color-accent-strong);
+}
 .btn {
   display: inline-flex;
   align-items: center;
@@ -913,6 +1102,10 @@ svg.i {
 .pill-sun {
   background: var(--color-sun-tint);
   color: var(--color-sun);
+}
+.pill-cold {
+  background: var(--color-cold-tint);
+  color: var(--color-cold);
 }
 .cmd {
   margin: 0;

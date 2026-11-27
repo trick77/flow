@@ -10,6 +10,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import type { Project, SessionSummary } from "../api/types.gen";
+import { formatNumber } from "../i18n/format";
 import { AgentPill } from "../shell/AgentPill";
 import { projectBadge } from "../shell/badge";
 import { Icon } from "../shell/Icon";
@@ -69,7 +70,7 @@ export function SearchPalette({
     () => new Map(projects.map((p) => [p.id, p.name])),
     [projects],
   );
-  const results = useMemo(
+  const { items: results, total } = useMemo(
     () => searchSessions(sessions, (pid) => names.get(pid) ?? "", query),
     [sessions, names, query],
   );
@@ -197,9 +198,17 @@ export function SearchPalette({
         <div className="pal-body" style={{ height }}>
           <div ref={content} className="pal-content">
             <div className="pal-h" aria-hidden="true">
-              {typed
-                ? t("searchMatches", { count: results.length })
-                : t("searchRecent")}
+              {!typed
+                ? t("searchRecent")
+                : total > results.length
+                  ? t("searchMatchesFirst", {
+                      shown: formatNumber(results.length),
+                      n: formatNumber(total),
+                    })
+                  : t("searchMatches", {
+                      count: total,
+                      n: formatNumber(total),
+                    })}
             </div>
             {results.length === 0 && (
               <p className="pal-empty" role="status">

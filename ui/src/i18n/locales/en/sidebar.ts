@@ -12,8 +12,10 @@ export const sidebar = {
   searchPlaceholder: "Search by title, project or branch",
   searchEsc: "Esc",
   searchRecent: "Recent sessions",
-  searchMatches_one: "{{count}} match",
-  searchMatches_other: "{{count}} matches",
+  searchMatches_one: "{{n}} match",
+  searchMatches_other: "{{n}} matches",
+  // More matches than the palette lists.
+  searchMatchesFirst: "First {{shown}} of {{n}} matches",
   searchMatchesLabel: "Matching sessions",
   searchNone: "No session matches.",
   searchNoSessions: "No sessions yet.",
@@ -35,6 +37,8 @@ export const sidebar = {
   statusIdle: "Idle",
   branch: "Branch",
   // After the branch of a session working in more than one repository.
-  repoCount_one: "· {{count}} repo",
-  repoCount_other: "· {{count}} repos",
+  repoCount_one: "· {{n}} repo",
+  repoCount_other: "· {{n}} repos",
+  // A session with activity the owner has not seen (its title is bold).
+  unseen: "New activity",
 };

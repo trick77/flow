@@ -12,22 +12,8 @@ import {
   type Provider,
 } from "../contract/events.gen";
 import { Icon } from "../shell/Icon";
+import { modeNames as modeKeys, useAgentName } from "./agentName";
 import type { PermissionItem } from "./fold";
-
-const modeKeys = {
-  plan: "modePlan",
-  ask: "modeAsk",
-  accept_edits: "modeAcceptEdits",
-  auto: "modeAuto",
-  full_access: "modeFullAccess",
-} as const satisfies Record<PermissionMode, string>;
-
-function useAgentName(provider?: Provider): string {
-  const { t } = useTranslation("timeline");
-  if (provider === "claude") return t("agentClaude");
-  if (provider === "opencode") return t("agentOpencode");
-  return t("agentUnknown");
-}
 
 // Resolved is the compact row a request leaves once decided.
 function Resolved({ item }: { item: PermissionItem }) {

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { Picker } from "./Picker";
 
@@ -80,5 +80,49 @@ describe("Picker", () => {
     fireEvent.click(button());
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps focus in the menu on a click beside the options", () => {
+    picker();
+    fireEvent.click(button());
+    // fireEvent returns false when the default (moving focus) is prevented.
+    expect(fireEvent.mouseDown(screen.getByText("Red"))).toBe(false);
+    expect(fireEvent.mouseDown(screen.getByRole("menu"))).toBe(false);
+    expect(item(/Berry/)).toHaveFocus();
+    fireEvent.keyDown(item(/Berry/), { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("shows a note and can be disabled", () => {
+    render(
+      <Picker
+        label="Mode"
+        note="Capped"
+        value="a"
+        options={[{ value: "a", label: "A" }]}
+        onChange={vi.fn()}
+        disabled
+        title="Not now"
+      >
+        A
+      </Picker>,
+    );
+    const b = screen.getByRole("button", { name: "Mode" });
+    expect(b).toBeDisabled();
+    expect(b).toHaveAttribute("title", "Not now");
+    cleanup();
+    render(
+      <Picker
+        label="Mode"
+        note="Capped"
+        value="a"
+        options={[{ value: "a", label: "A" }]}
+        onChange={vi.fn()}
+      >
+        A
+      </Picker>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Mode" }));
+    expect(screen.getByText("Capped")).toBeInTheDocument();
   });
 });

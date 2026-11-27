@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { Provider } from "../contract/events.gen";
+import type { PermissionMode, Provider } from "../contract/events.gen";
 import { ActivityFold } from "./Activity";
 import {
   AssistantText,
@@ -14,17 +14,51 @@ import {
 } from "./Cards";
 import type { Folded, TimelineItem } from "./fold";
 import { PermissionCard } from "./PermissionCard";
+import { PlanCard } from "./PlanCard";
+import { QuestionCard } from "./QuestionCard";
+
+// What the question and plan cards need of the session besides its id.
+export interface CardContext {
+  // The catalog's permission modes and the session's cap and mode, for the
+  // mode an approved plan continues in.
+  modes?: readonly PermissionMode[];
+  modeCap?: PermissionMode;
+  mode?: PermissionMode;
+  // Hands a question over to the composer.
+  onAnswerInComposer?: () => void;
+}
 
 function Item({
   item,
   sessionId,
   provider,
+  ctx,
 }: {
   item: TimelineItem;
   sessionId: string;
   provider?: Provider;
+  ctx: CardContext;
 }) {
   switch (item.type) {
+    case "question":
+      return (
+        <QuestionCard
+          item={item}
+          sessionId={sessionId}
+          provider={provider}
+          onAnswerInComposer={ctx.onAnswerInComposer}
+        />
+      );
+    case "plan":
+      return (
+        <PlanCard
+          item={item}
+          sessionId={sessionId}
+          modes={ctx.modes}
+          modeCap={ctx.modeCap}
+          mode={ctx.mode}
+        />
+      );
     case "user":
       return <UserMessage item={item} />;
     case "fold":
@@ -56,12 +90,13 @@ export function Timeline({
   folded,
   working,
   provider,
+  ...ctx
 }: {
   sessionId: string;
   folded: Folded;
   working: boolean;
   provider?: Provider;
-}) {
+} & CardContext) {
   const { t } = useTranslation("timeline");
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -88,6 +123,7 @@ export function Timeline({
             item={item}
             sessionId={sessionId}
             provider={provider ?? folded.provider}
+            ctx={ctx}
           />
         ))}
         {working && <WorkingIndicator tool={folded.openTool} />}

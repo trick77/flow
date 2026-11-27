@@ -15,6 +15,11 @@ import type {
   SessionSummary,
 } from "../api/types.gen";
 
+// The fields of a session the owner changes with updateSession.
+export type SessionPatch = Partial<
+  Pick<SessionSummary, "title" | "model" | "mode">
+>;
+
 export interface Lists {
   sessions: SessionSummary[];
   projects: Project[];
@@ -98,6 +103,10 @@ export interface SessionsState extends Lists {
   // apply changes the lists by an answer of the owner's own request, without
   // waiting for the stream to echo it (applyAnswer).
   apply: (e: AppEvent) => void;
+  setSeen: (sessionId: string) => void;
+  patch: (sessionId: string, fields: SessionPatch) => void;
+  // reload asks for both lists again; it settles when they are applied.
+  reload: () => Promise<void>;
 }
 
 const empty: Lists = { sessions: [], projects: [] };
@@ -122,7 +131,7 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
   // Changes since the newest load started; null while no load is under way.
   const during = useRef<Change[] | null>(null);
 
-  const reload = useCallback(() => {
+  const reload = useCallback((): Promise<void> => {
     const gen = ++generation.current;
     during.current = [];
     // The sidebar works without project names; the failure is kept for the
@@ -135,7 +144,7 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
         return null;
       },
     );
-    Promise.all([listSessions(), projects]).then(
+    return Promise.all([listSessions(), projects]).then(
       ([sessions, projectItems]) => {
         if (gen !== generation.current) return;
         const replay = during.current ?? [];
@@ -160,10 +169,10 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
   }, []);
 
   useEffect(() => {
-    reload();
+    void reload();
     return streamAppEvents({
       EventSource,
-      onOpen: reload,
+      onOpen: () => void reload(),
       onEvent: (e) => {
         during.current?.push({ e, answer: false });
         setLists((prev) => applyAppEvent(prev, e));
@@ -187,5 +196,45 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
     setLists((prev) => applyAnswer(prev, e));
   }, []);
 
-  return { ...lists, loaded, error, projectsError, setStatus, apply };
+  // setSeen clears a session's unseen mark once the owner has seen it, before
+  // the stream's session.updated says so.
+  const setSeen = useCallback(
+    (sessionId: string) =>
+      setLists((prev) =>
+        prev.sessions.some((s) => s.id === sessionId && s.unseen)
+          ? {
+              ...prev,
+              sessions: prev.sessions.map((s) =>
+                s.id === sessionId ? { ...s, unseen: false } : s,
+              ),
+            }
+          : prev,
+      ),
+    [],
+  );
+
+  // patch applies the fields the owner just changed (the answer of an update):
+  // only those, so an older answer cannot set back a newer status.
+  const patch = useCallback(
+    (sessionId: string, fields: SessionPatch) =>
+      setLists((prev) => ({
+        ...prev,
+        sessions: prev.sessions.map((s) =>
+          s.id === sessionId ? { ...s, ...fields } : s,
+        ),
+      })),
+    [],
+  );
+
+  return {
+    ...lists,
+    loaded,
+    error,
+    projectsError,
+    setStatus,
+    setSeen,
+    patch,
+    apply,
+    reload,
+  };
 }

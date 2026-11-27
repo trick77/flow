@@ -15,17 +15,36 @@ describe("search shortcut", () => {
     expect(shortcutKey(false)).toBe("shortcutOther");
   });
 
-  it("takes Cmd+K and Ctrl+K, nothing else", () => {
-    expect(isSearchShortcut(key({ key: "k", metaKey: true }))).toBe(true);
-    expect(isSearchShortcut(key({ key: "K", ctrlKey: true }))).toBe(true);
-    expect(isSearchShortcut(key({ key: "k" }))).toBe(false);
-    expect(isSearchShortcut(key({ key: "j", metaKey: true }))).toBe(false);
+  it("takes Cmd+K and, off macOS, Ctrl+K, nothing else", () => {
+    expect(isSearchShortcut(key({ key: "k", metaKey: true }), false)).toBe(
+      true,
+    );
+    expect(isSearchShortcut(key({ key: "K", ctrlKey: true }), false)).toBe(
+      true,
+    );
+    expect(isSearchShortcut(key({ key: "k" }), false)).toBe(false);
+    expect(isSearchShortcut(key({ key: "j", metaKey: true }), false)).toBe(
+      false,
+    );
     expect(
-      isSearchShortcut(key({ key: "k", metaKey: true, shiftKey: true })),
+      isSearchShortcut(key({ key: "k", metaKey: true, shiftKey: true }), false),
     ).toBe(false);
     expect(
-      isSearchShortcut(key({ key: "k", ctrlKey: true, altKey: true })),
+      isSearchShortcut(key({ key: "k", ctrlKey: true, altKey: true }), false),
     ).toBe(false);
+  });
+
+  it("leaves Ctrl+K to the text fields on macOS", () => {
+    expect(isSearchShortcut(key({ key: "k", ctrlKey: true }), true)).toBe(
+      false,
+    );
+    expect(isSearchShortcut(key({ key: "k", metaKey: true }), true)).toBe(true);
+  });
+
+  it("ignores a keydown without a key", () => {
+    const e = key({ metaKey: true });
+    Object.defineProperty(e, "key", { value: undefined });
+    expect(isSearchShortcut(e, false)).toBe(false);
   });
 
   it("leaves Ctrl+K in the terminal to the shell", () => {
@@ -33,11 +52,11 @@ describe("search shortcut", () => {
     screen.className = "tdr-screen";
     const inner = document.createElement("textarea");
     screen.append(inner);
-    expect(isSearchShortcut(key({ key: "k", ctrlKey: true }, inner))).toBe(
-      false,
-    );
-    expect(isSearchShortcut(key({ key: "k", metaKey: true }, inner))).toBe(
-      true,
-    );
+    expect(
+      isSearchShortcut(key({ key: "k", ctrlKey: true }, inner), false),
+    ).toBe(false);
+    expect(
+      isSearchShortcut(key({ key: "k", metaKey: true }, inner), false),
+    ).toBe(true);
   });
 });

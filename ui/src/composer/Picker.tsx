@@ -34,11 +34,19 @@ export function Picker<T extends string>({
   children,
   className = "picker",
   placement = "up",
+  note,
+  disabled = false,
+  title,
 }: {
   // The button's accessible name.
   label: string;
   // A heading at the top of the menu.
   heading?: string;
+  // A line under the heading (why some options are disabled).
+  note?: string;
+  // The button cannot open the menu; title says why.
+  disabled?: boolean;
+  title?: string;
   value: T | undefined;
   options: readonly PickerOption<T>[];
   onChange: (value: T) => void;
@@ -116,6 +124,8 @@ export function Picker<T extends string>({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
+        disabled={disabled}
+        title={title}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={(e) => {
           if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -135,12 +145,17 @@ export function Picker<T extends string>({
           aria-label={label}
           ref={menu}
           onKeyDown={onMenuKey}
+          // A click on a heading, a separator, a disabled option or the
+          // padding would move focus to the body and leave the menu deaf to
+          // its keys: focus stays where it is (an option's click still picks).
+          onMouseDown={(e) => e.preventDefault()}
         >
           {heading && (
             <div className="pop-h" aria-hidden="true">
               {heading}
             </div>
           )}
+          {note && <div className="pop-h pop-note">{note}</div>}
           {options.map((o, i) => {
             const head =
               o.group !== undefined &&

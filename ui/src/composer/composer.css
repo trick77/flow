@@ -30,10 +30,62 @@ button.picker:hover,
 .picker .prov {
   margin-right: 1px;
 }
-/* A running session's model and mode: shown, not changeable (yet). Not
+/* A model and mode shown without a catalog to change them from. Not
    "fixed": that is Tailwind's position utility. */
 .picker.picker-ro {
   cursor: default;
+}
+button.picker:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+button.picker:disabled:hover {
+  background: transparent;
+  color: var(--color-ink-warm);
+}
+.pop-note {
+  margin-top: -4px;
+  color: var(--color-sun);
+}
+
+/* The queued messages above the composer (mock: .queued). */
+.queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 8px 8px;
+}
+.queued {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-ui);
+  background: var(--color-card);
+  font-size: 0.8125rem;
+  min-width: 0;
+}
+.queued .lbl {
+  flex: 0 0 auto;
+  color: var(--color-muted-2);
+  font-size: 0.75rem;
+}
+.queued .txt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-ink-warm);
+}
+.queued .acts {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.queue .queue-error {
+  margin: 0;
 }
 
 .crumb .crumb-pick {
@@ -242,6 +294,12 @@ button.picker:hover,
 }
 
 @media (max-width: 760px) {
+  .queued {
+    flex-wrap: wrap;
+  }
+  .queued .txt {
+    flex-basis: 60%;
+  }
   /* The stacked sidebar leaves little height: the question moves up. */
   .tl > .empty-start {
     margin-top: 4vh;

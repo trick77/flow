@@ -30,6 +30,54 @@ function row(key: string): HTMLElement {
 describe("Timeline", () => {
   const demo = fixtureEvents("demo.jsonl");
 
+  it("shows an open question and plan with the session's context", () => {
+    const onAnswerInComposer = vi.fn();
+    const folded = foldEvents(
+      stateOf([
+        mk("turn.started", { messageId: "m" }, { seq: 1, turn: "t" }),
+        mk(
+          "question.asked",
+          {
+            requestId: "q",
+            questions: [
+              {
+                id: "a",
+                text: "Which key?",
+                multiSelect: false,
+                options: [{ id: "o", label: "SHA" }],
+              },
+            ],
+          },
+          { seq: 2, turn: "t" },
+        ),
+        mk(
+          "plan.proposed",
+          { requestId: "p", plan: "1. Go" },
+          { seq: 3, turn: "t" },
+        ),
+      ]),
+    );
+    render(
+      <Timeline
+        sessionId="s1"
+        folded={folded}
+        working={false}
+        modes={["plan", "ask", "auto"]}
+        modeCap="ask"
+        mode="plan"
+        onAnswerInComposer={onAnswerInComposer}
+      />,
+    );
+    expect(row("question:q")).toHaveTextContent("Which key?");
+    fireEvent.click(
+      screen.getByRole("button", { name: en.timeline.answerInComposer }),
+    );
+    expect(onAnswerInComposer).toHaveBeenCalled();
+    // Capped at ask: the only mode to continue in, no picker.
+    expect(row("plan:p")).toHaveTextContent("Go");
+    expect(screen.queryByRole("button", { name: /^Continue in/ })).toBeNull();
+  });
+
   it("renders the finished demo turn, its fold collapsed until opened", () => {
     show(foldEvents(stateOf(demo)));
     expect(screen.getByRole("log", { name: en.timeline.label })).toBeVisible();
