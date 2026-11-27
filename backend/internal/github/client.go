@@ -58,11 +58,21 @@ type StatusError struct {
 func (e *StatusError) Error() string { return fmt.Sprintf("github: %s: status %d", e.Path, e.Status) }
 
 // Transient reports whether a refresh failure may pass by itself (network, GitHub's 5xx, rate limits, an answer
-// without an OAuth error): the stored authorization is kept and tried again. Only an OAuth error answer means
-// GitHub refused the refresh token.
+// without an OAuth error): the stored authorization is kept and tried again. An OAuth error answer is a refusal;
+// only Refused ones drop the authorization.
 func Transient(err error) bool {
 	var oe *OAuthError
 	return !errors.As(err, &oe)
+}
+
+// Refused reports whether a refresh failure says the refresh token is dead for good. GitHub's docs list no error
+// codes for a refresh ("Refreshing user access tokens" names none; "Troubleshooting OAuth app access token request
+// errors" covers only the code exchange): bad_refresh_token is what GitHub answers for a used, expired or revoked
+// refresh token (observed, github.com/orgs/community/discussions/24745), invalid_grant is RFC 6749 5.2's code for
+// "invalid, expired, revoked". Any other code is not taken as a refusal.
+func Refused(err error) bool {
+	var oe *OAuthError
+	return errors.As(err, &oe) && (oe.Code == "bad_refresh_token" || oe.Code == "invalid_grant")
 }
 
 // DeviceCode is GitHub's answer to the device code request.
@@ -89,8 +99,8 @@ type oauthError struct {
 	Interval int    `json:"interval"`
 }
 
-// post sends an OAuth form (in the body, never the URL) to the web host and decodes the JSON answer into v; an
-// "error" field is an *OAuthError, whatever the status.
+// post sends an OAuth form (in the body, never the URL) to the web host and decodes the JSON answer into v. A 5xx
+// or 429 is a *StatusError whatever its body; else an "error" field is an *OAuthError, whatever the status.
 func (c *Client) post(ctx context.Context, path string, form url.Values, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Web+path, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -106,6 +116,10 @@ func (c *Client) post(ctx context.Context, path string, form url.Values, v any) 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
 		return fmt.Errorf("github: %s: %w", path, err)
+	}
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		// GitHub away or rate limiting: transient, whatever the body says.
+		return &StatusError{Path: path, Status: resp.StatusCode}
 	}
 	var oe oauthError
 	if json.Unmarshal(body, &oe) == nil && oe.Error != "" {

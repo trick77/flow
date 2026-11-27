@@ -827,6 +827,7 @@ func (s *Supervisor) StopSession(ctx context.Context, id string, remove bool) er
 		return err
 	}
 	s.forgetLog(id)
+	s.forgetNotices(id)
 	// Safe to run again after any partial run: a worktree already gone counts as removed.
 	kept := false
 	for _, w := range sp.Worktrees {

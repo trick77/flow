@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http/httptest"
@@ -31,7 +32,43 @@ func TestMain(m *testing.M) {
 		gitCredential(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, sock, 10*time.Second)
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	dir, err := isolateGit()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolating git:", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// isolateGit keeps every git the tests run (ExecRunner, exec.Command, git running the helper) away from the
+// machine's own configuration, credential helpers and keychain: HOME and XDG_CONFIG_HOME in a temporary directory,
+// global and system config empty, no prompt, no askpass, no inherited GIT_* (a hook's GIT_DIR, say). A test that
+// needs a system config (flowd's) sets GIT_CONFIG_SYSTEM and GIT_CONFIG_NOSYSTEM=0 on its own command.
+func isolateGit() (string, error) {
+	dir, err := os.MkdirTemp("", "flow-git-test")
+	if err != nil {
+		return "", err
+	}
+	empty := filepath.Join(dir, "empty-gitconfig")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		return dir, err
+	}
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "GIT_") {
+			_ = os.Unsetenv(name)
+		}
+	}
+	_ = os.Unsetenv("SSH_ASKPASS")
+	for k, v := range map[string]string{"HOME": dir, "XDG_CONFIG_HOME": filepath.Join(dir, ".config"),
+		"GIT_CONFIG_GLOBAL": empty, "GIT_CONFIG_SYSTEM": empty, "GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_TERMINAL_PROMPT": "0"} {
+		if err := os.Setenv(k, v); err != nil {
+			return dir, err
+		}
+	}
+	return dir, nil
 }
 
 // credSupervisor is a flowd serving FlowdSocket under a short temporary root (unix socket paths are short).
@@ -153,7 +190,8 @@ func TestGitCredential_throughGit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := filepath.Join(t.TempDir(), "gitconfig")
+	work := t.TempDir()
+	cfg := filepath.Join(work, "gitconfig")
 	// The empty helper first drops any helper git brings along (a desktop git's keychain helper must never be asked
 	// by a test).
 	if err := os.WriteFile(cfg, []byte("[credential]\n\thelper =\n[credential \"https://github.com\"]\n\thelper = "+
@@ -162,8 +200,9 @@ func TestGitCredential_throughGit(t *testing.T) {
 	}
 	fill := func(in string) (string, error) {
 		cmd := exec.Command("git", "credential", "fill")
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+cfg,
-			"GIT_TERMINAL_PROMPT=0", helperSocketEnv+"="+sock, "GIT_ASKPASS=", "SSH_ASKPASS=")
+		// Outside any repository (no repository config), on the isolated environment TestMain set up.
+		cmd.Dir = work
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+cfg, helperSocketEnv+"="+sock)
 		cmd.Stdin = strings.NewReader(in)
 		out, err := cmd.CombinedOutput()
 		return string(out), err
@@ -238,30 +277,7 @@ func TestWriteGitHub(t *testing.T) {
 func TestRaiseNotice(t *testing.T) {
 	s, _, _ := credSupervisor(t)
 	id := "s1"
-	sock := s.p(layout.HostSocket(id))
-	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	l, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-	got := make(chan hostproto.Request, 10)
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			var req hostproto.Request
-			if json.NewDecoder(conn).Decode(&req) == nil {
-				got <- req
-				_ = json.NewEncoder(conn).Encode(hostproto.Response{ID: req.ID})
-			}
-			_ = conn.Close()
-		}
-	}()
+	got := noticeHost(t, s, id)
 	ctx := context.Background()
 	s.raiseNotice(ctx, id, NoticeGitHubDisconnected)
 	s.raiseNotice(ctx, id, NoticeGitHubDisconnected)
@@ -286,6 +302,76 @@ func TestRaiseNotice(t *testing.T) {
 	if strings.Join(codes, ",") != NoticeGitHubDisconnected+","+NoticeGitHubTokenExpired {
 		t.Errorf("codes %v", codes)
 	}
+	// A removed session's times go.
+	s.forgetNotices(id)
+	s.mu.Lock()
+	left := len(s.notices)
+	s.mu.Unlock()
+	if left != 0 {
+		t.Errorf("notice times left after the session went: %d", left)
+	}
+}
+
+// A notice the host did not take (not running yet, restarting) silences nothing: the next one is sent.
+func TestRaiseNotice_notDelivered(t *testing.T) {
+	s, _, _ := credSupervisor(t)
+	id := "s2"
+	ctx := context.Background()
+	s.raiseNotice(ctx, id, NoticeGitHubDisconnected) // no host listening
+	got := noticeHost(t, s, id)
+	s.raiseNotice(ctx, id, NoticeGitHubDisconnected)
+	select {
+	case req := <-got:
+		if req.Notice == nil || req.Notice.Code != NoticeGitHubDisconnected {
+			t.Errorf("request %+v", req)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the notice after an undelivered one was silenced")
+	}
+}
+
+// Every git this package's tests run sees no configuration but what the test gives it: none of the machine's
+// credential helpers, keychain or global settings. The listing itself is never printed.
+func TestGitIsolated(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	cmd := exec.Command("git", "config", "--list", "--show-origin")
+	cmd.Dir = t.TempDir()
+	out, err := cmd.Output()
+	if n := len(strings.TrimSpace(string(out))); n != 0 {
+		t.Errorf("git in tests reads configuration (%d bytes, not shown): %v", n, err)
+	}
+}
+
+// noticeHost listens as the session's host and hands over each request it gets, answering it accepted.
+func noticeHost(t *testing.T, s *Supervisor, id string) chan hostproto.Request {
+	t.Helper()
+	sock := s.p(layout.HostSocket(id))
+	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	got := make(chan hostproto.Request, 10)
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			var req hostproto.Request
+			if json.NewDecoder(conn).Decode(&req) == nil {
+				got <- req
+				_ = json.NewEncoder(conn).Encode(hostproto.Response{ID: req.ID})
+			}
+			_ = conn.Close()
+		}
+	}()
+	return got
 }
 
 func TestSessionFromCgroup(t *testing.T) {
@@ -333,7 +419,7 @@ func TestGitConfig_push(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_SYSTEM="+cfgPath, "GIT_CONFIG_GLOBAL=/dev/null",
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=0", "GIT_CONFIG_SYSTEM="+cfgPath,
 			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=t",
 			"GIT_COMMITTER_EMAIL=t@example.com")
 		out, err := cmd.CombinedOutput()
