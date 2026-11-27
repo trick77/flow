@@ -15,7 +15,7 @@ import type {
   Project,
   SandboxState,
 } from "../api/types.gen";
-import { formatDate, formatDateTime } from "../i18n/format";
+import { formatDate, formatDateTime, formatNumber } from "../i18n/format";
 import { Icon, projectBadge } from "../shell";
 import { Page } from "./Page";
 import { SetupLog } from "./SetupLog";
@@ -309,7 +309,10 @@ function ProjectCard({
         <div className="nm">
           <h2 className="name">{project.name}</h2>
           <div className="repo">
-            {t("repoCount", { count: project.repos.length })}
+            {t("repoCount", {
+              count: project.repos.length,
+              n: formatNumber(project.repos.length),
+            })}
           </div>
         </div>
         <span className={`sbx ${state}`}>{t(stateKey[state])}</span>
@@ -345,7 +348,7 @@ function ProjectCard({
       {failed && (
         <p className="pcard-err" role="alert">
           {failed === "project_has_sessions" && open > 0
-            ? t("openSessions", { count: open })
+            ? t("openSessions", { count: open, n: formatNumber(open) })
             : t(failed, { ns: "errors" })}
         </p>
       )}

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import type { Project } from "../api/types.gen";
 import { resources } from "../i18n/resources";
@@ -30,20 +30,44 @@ const lines = (from: number, n: number) =>
 afterEach(() => vi.unstubAllGlobals());
 
 describe("SetupLog", () => {
-  it("reads every page and shows the lines", async () => {
+  it("shows the end first, says it is truncated and loads earlier lines", async () => {
     const calls = serve([
+      { status: 200, body: { state: "failed", lines: lines(1501, 1000) } },
+      { status: 200, body: { state: "failed", lines: lines(501, 1000) } },
       { status: 200, body: { state: "failed", lines: lines(1, 1000) } },
-      { status: 200, body: { state: "failed", lines: lines(1001, 2) } },
     ]);
     render(<SetupLog projectId="p 1" />);
     expect(screen.getByRole("status")).toHaveTextContent(en.setupLogLoading);
     const log = await screen.findByLabelText(en.setupLog);
-    expect(log.textContent?.split("\n")).toHaveLength(1002);
-    expect(log.textContent).toMatch(/line 1002$/);
+    expect(log.textContent?.split("\n")).toHaveLength(1000);
+    expect(log.textContent).toMatch(/^line 1501\n/);
+    expect(log.textContent).toMatch(/line 2500$/);
+    expect(
+      screen.getByText("Truncated — showing the last 1'000 lines."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: en.setupLogEarlier }));
+    expect(
+      await screen.findByText("Truncated — showing the last 2'000 lines."),
+    ).toBeInTheDocument();
+    expect(log.textContent).toMatch(/^line 501\n/);
+    fireEvent.click(screen.getByRole("button", { name: en.setupLogEarlier }));
+    await waitFor(() => expect(screen.queryByText(/Truncated/)).toBeNull());
+    expect(log.textContent).toMatch(/^line 1\n/);
+    expect(log.textContent?.split("\n")).toHaveLength(2500);
     expect(calls).toEqual([
+      "/api/projects/p%201/sandbox/setup-log?tail=1000",
+      "/api/projects/p%201/sandbox/setup-log?after=500",
       "/api/projects/p%201/sandbox/setup-log",
-      "/api/projects/p%201/sandbox/setup-log?after=1000",
     ]);
+  });
+
+  it("says nothing of truncation for a log shown whole", async () => {
+    serve([{ status: 200, body: { state: "failed", lines: lines(1, 3) } }]);
+    render(<SetupLog projectId="p1" />);
+    expect(await screen.findByLabelText(en.setupLog)).toHaveTextContent(
+      "line 3",
+    );
+    expect(screen.queryByText(/Truncated/)).toBeNull();
   });
 
   it("says an empty log and a refusal", async () => {

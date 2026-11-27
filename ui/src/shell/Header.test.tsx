@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 
 import { resources } from "../i18n/resources";
 import { DrawerContext } from "./drawer";
@@ -47,6 +47,33 @@ describe("Header", () => {
     fireEvent.keyDown(field(), { key: "Enter" });
     expect(onRename).toHaveBeenCalledWith("Fix the flaky test");
     expect(screen.getByText("flow/fix")).toBeInTheDocument();
+  });
+
+  // A blur that arrives after Escape or Enter but before the re-render runs
+  // the same render's handlers (both in one act here).
+  it("finishes an edit once: no save after Escape, no second save after Enter", () => {
+    const onRename = vi.fn();
+    render(<Header title="T" branch="b" onRename={onRename} />);
+    const field = () =>
+      screen.getByRole("textbox", { name: en.shell.renameLabel });
+    fireEvent.click(screen.getByRole("button", { name: "T" }));
+    fireEvent.change(field(), { target: { value: "wrong name" } });
+    act(() => {
+      const f = field();
+      fireEvent.keyDown(f, { key: "Escape" });
+      fireEvent.blur(f);
+    });
+    expect(onRename).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "T" }));
+    fireEvent.change(field(), { target: { value: "right name" } });
+    act(() => {
+      const f = field();
+      fireEvent.keyDown(f, { key: "Enter" });
+      fireEvent.blur(f);
+    });
+    expect(onRename).toHaveBeenCalledTimes(1);
+    expect(onRename).toHaveBeenCalledWith("right name");
   });
 
   it("shows the sandbox chip for every state", () => {

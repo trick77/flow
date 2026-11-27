@@ -25,12 +25,23 @@ function Title({
 }) {
   const { t } = useTranslation("shell");
   const [draft, setDraft] = useState<string | null>(null);
+  // ended: this edit was finished already. A blur that reaches the field
+  // after Escape or Enter, before the re-render, still sees the typed draft
+  // (a browser may blur a focused field it removes); only the first finish
+  // counts.
+  const ended = useRef(false);
   if (!onRename) return <h2 className="ttl">{title}</h2>;
 
   const done = (save: boolean) => {
+    if (ended.current) return;
+    ended.current = true;
     const next = draft?.trim() ?? "";
     setDraft(null);
     if (save && next !== "" && next !== title) onRename(next);
+  };
+  const edit = () => {
+    ended.current = false;
+    setDraft(title);
   };
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && !e.nativeEvent.isComposing) {
@@ -64,7 +75,7 @@ function Title({
         className="ttl-btn"
         title={t("rename")}
         aria-description={t("rename")}
-        onClick={() => setDraft(title)}
+        onClick={edit}
       >
         {title}
       </button>
