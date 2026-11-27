@@ -4,15 +4,20 @@
 export {
   ApiError,
   errorCode,
+  getAuthSession,
   getSession,
   interruptTurn,
   listProjects,
   listSessions,
+  LOGIN_PATH,
+  logout,
+  onUnauthenticated,
   replyPermission,
   request,
   sendMessage,
 } from "./client";
 export {
+  onStreamGaveUp,
   streamAppEvents,
   streamSessionEvents,
   type AppStreamOptions,

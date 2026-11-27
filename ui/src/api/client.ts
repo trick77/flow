@@ -1,5 +1,6 @@
 import {
   ERROR_CODE_VALUES,
+  type AuthSession,
   type ErrorCode,
   type MessageAccepted,
   type MessageCreate,
@@ -49,6 +50,18 @@ async function failure(res: Response): Promise<ApiError> {
   return new ApiError(code, res.status, field);
 }
 
+const unauthenticatedListeners = new Set<() => void>();
+
+// onUnauthenticated calls fn whenever an API call answers unauthenticated (the
+// session expired or was cleared): the shell swaps to its sign-in screen.
+// Returns the unsubscribe.
+export function onUnauthenticated(fn: () => void): () => void {
+  unauthenticatedListeners.add(fn);
+  return () => {
+    unauthenticatedListeners.delete(fn);
+  };
+}
+
 // request is the one fetch every call goes through: JSON in, JSON out, a
 // non-2xx answer thrown as ApiError. 204 and 202-without-body give undefined.
 export async function request<T>(
@@ -72,7 +85,11 @@ export async function request<T>(
     throw new ApiError("internal", 0);
   }
   if (!res.ok) {
-    throw await failure(res);
+    const err = await failure(res);
+    if (err.code === "unauthenticated") {
+      unauthenticatedListeners.forEach((fn) => fn());
+    }
+    throw err;
   }
   if (res.status === 204) {
     return undefined as T;
@@ -82,6 +99,18 @@ export async function request<T>(
 }
 
 const seg = encodeURIComponent;
+
+// LOGIN_PATH starts a sign-in: a browser navigation, not a fetch (it
+// redirects to the identity provider).
+export const LOGIN_PATH = "/api/auth/login";
+
+export function getAuthSession(): Promise<AuthSession> {
+  return request<AuthSession>("GET", "/api/auth/session");
+}
+
+export function logout(): Promise<void> {
+  return request<void>("POST", "/api/auth/logout");
+}
 
 export function listProjects(): Promise<ProjectList> {
   return request<ProjectList>("GET", "/api/projects");

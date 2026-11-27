@@ -27,13 +27,32 @@ export interface ToolRow {
   pattern?: string;
   url?: string;
   description?: string;
+  // The raw input: all a tool the adapter does not know shows of its call.
+  input?: unknown;
+  inputTruncated?: boolean;
   // Called by a subagent (parentTool).
   nested: boolean;
   finished?: {
     status: ToolStatus;
     result?: ToolResult;
     durationMs?: number;
+    output?: string;
+    outputTruncated?: boolean;
+    rawResult?: unknown;
+    rawResultTruncated?: boolean;
   };
+}
+
+// A provider message the adapter does not map (provider.passthrough): its
+// name and the message as received. Nothing an agent emits is invisible.
+export interface RawRow {
+  type: "raw";
+  key: string;
+  provider: Provider;
+  name: string;
+  raw: unknown;
+  rawTruncated: boolean;
+  nested: boolean;
 }
 
 // One run of the check queue: gate.queued, gate.started, gate.finished.
@@ -48,7 +67,7 @@ export interface GateRow {
   durationMs?: number;
 }
 
-export type ActivityRow = ToolRow | GateRow;
+export type ActivityRow = ToolRow | GateRow | RawRow;
 
 export interface UserItem {
   type: "user";
@@ -254,6 +273,8 @@ export function foldEvents(state: StreamState): Folded {
           pattern: d.pattern,
           url: d.url,
           description: d.description,
+          input: d.input,
+          inputTruncated: d.inputTruncated,
           nested: e.parentTool !== undefined,
         };
         const f = foldFor(e);
@@ -269,8 +290,25 @@ export function foldEvents(state: StreamState): Folded {
             status: e.data.status,
             result: e.data.result,
             durationMs: e.data.durationMs,
+            output: e.data.output,
+            outputTruncated: e.data.outputTruncated,
+            rawResult: e.data.rawResult,
+            rawResultTruncated: e.data.rawResultTruncated,
           };
         }
+        break;
+      }
+      case "provider.passthrough": {
+        const f = foldFor(e);
+        f.rows.push({
+          type: "raw",
+          key: `raw:${e.seq ?? `${f.key}:${f.rows.length}`}`,
+          provider: e.data.provider,
+          name: e.data.name,
+          raw: e.data.raw,
+          rawTruncated: e.data.rawTruncated === true,
+          nested: e.parentTool !== undefined,
+        });
         break;
       }
       case "permission.requested": {
