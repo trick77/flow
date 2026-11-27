@@ -107,7 +107,7 @@ member. The spec's "waiting" is `question`/`plan`; "needs approval" is `approval
 | plan card | `plan.proposed`, `plan.resolved` |
 | todo list | `todo.updated` (whole list) |
 | subagent row | `tool.started` kind `subagent` + events with `parentTool` |
-| session-resumed divider | `session.resumed` |
+| session-resumed divider | `session.resumed` (`reason`: `message` the owner's message started the host; `sandbox_start` started after a sandbox start to close a cut-off turn; `command` started held to take a stop, reply, queue removal or settings change; `host_restart`, `upgrade`); a host started for `sandbox_start` or `command` leaves queued messages queued |
 | working indicator, "running make check" | status `working` + the open `tool.started` |
 | queued message, Send now, Remove | `message.queued`/`message.dequeued`; commands `message.send_now`, `message.remove` |
 | check-queue wait, "position 2, after riptide's" | `gate.queued` (`position`, `aheadRepo`), status `queued` |
