@@ -13,6 +13,17 @@ COPY sidecar/ ./sidecar/
 # here. The sidecar compiles to sidecar/dist, its tests left out.
 RUN npm --prefix ui run build && npm --prefix sidecar run build
 
+# --- Stage 1b: the sidecar as the sandboxes run it ---
+# Its compiled output with the production dependencies (the Claude Agent SDK),
+# installed apart from the build's node_modules. Without optional ones: they
+# are the SDK's per-platform CLI binaries, and the sandboxes run the image's own
+# CLI (pathToClaudeCodeExecutable); this directory serves amd64 and arm64 alike.
+FROM node:26-alpine AS sidecar
+WORKDIR /opt/flow/sidecar
+COPY sidecar/package.json sidecar/package-lock.json sidecar/.npmrc ./
+RUN npm ci --omit=dev --omit=optional
+COPY --from=node /app/sidecar/dist/ ./dist/
+
 # --- Stage 2: the server with the embedded SPA, and flowd (pure Go, no cgo) ---
 FROM golang:1.27-alpine AS build
 WORKDIR /app/backend
@@ -36,10 +47,10 @@ RUN for arch in amd64 arm64; do \
 FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /out/flow /flow
 COPY --from=build /out/opt/ /opt/flow/
-# The sidecar's compiled output with its package.json (ESM). It never runs
-# here: there is no node in this image; the server hands it to the sandboxes.
-COPY --from=node /app/sidecar/package.json /opt/flow/sidecar/package.json
-COPY --from=node /app/sidecar/dist/ /opt/flow/sidecar/dist/
+# The sidecar ready to run: dist/, package.json (ESM), lockfile, .npmrc and
+# node_modules. It never runs here: there is no node in this image; the
+# server hands it to the sandboxes.
+COPY --from=sidecar /opt/flow/sidecar/ /opt/flow/sidecar/
 # distroless nonroot's own uid, never 1000 (the host's first user).
 USER 65532:65532
 EXPOSE 8080

@@ -258,6 +258,32 @@ func TestSendMessage_textLimitAfterEncoding(t *testing.T) {
 	}
 }
 
+// The queued flag says what the host did with the message, not what the mirrored status said before it was sent.
+func TestSendMessage_queuedComesFromTheHost(t *testing.T) {
+	r := newRig(t)
+	accepted := func(body string) apitypes.MessageAccepted {
+		t.Helper()
+		resp, err := http.Post(r.srv.URL+"/s/"+r.id+"/messages", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var a apitypes.MessageAccepted
+		_ = json.NewDecoder(resp.Body).Decode(&a)
+		return a
+	}
+	if a := accepted(`{"clientId":"q1","text":"first"}`); a.Queued {
+		t.Error("a message to an idle session reported queued")
+	}
+	// The first turn now waits for its permission reply: the next message queues behind it.
+	if a := accepted(`{"clientId":"q2","text":"second"}`); !a.Queued {
+		t.Error("a message behind a running turn was not reported queued")
+	}
+	if a := accepted(`{"clientId":"q2","text":"second"}`); !a.Queued {
+		t.Error("a retry of a queued message was not reported queued")
+	}
+}
+
 func TestAppEvents(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

@@ -19,6 +19,7 @@ import (
 	"github.com/trick77/flow/internal/event"
 	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/layout"
+	"github.com/trick77/flow/internal/metering"
 	"github.com/trick77/flow/internal/projects"
 	"github.com/trick77/flow/internal/store"
 )
@@ -33,6 +34,14 @@ type Sandboxes interface {
 	Forget(projectID string)
 }
 
+// Meter takes each event of a session's log before the follower records its progress: one handed on just before
+// a crash is handed on again after it, so a Meter is idempotent by session and seq. An error stops this pass of
+// the follower, which retries from the same event. Forget ends a session's follow. *metering.Recorder is one.
+type Meter interface {
+	Observe(ctx context.Context, se metering.Session, e event.Event) error
+	Forget(sessionID string)
+}
+
 // Service is the sessions area's core: creation with worktrees, the host of a session, and following every
 // session's log to mirror its status into the database and onto the app event stream.
 type Service struct {
@@ -43,6 +52,8 @@ type Service struct {
 	Log       *slog.Logger
 	// Retry is the wait before a follower dials again.
 	Retry time.Duration
+	// Meter, when set, takes every event the follower reads (internal/metering).
+	Meter Meter
 
 	mu      sync.Mutex
 	base    context.Context
@@ -392,6 +403,9 @@ func (s *Service) follow(ctx context.Context, id string) {
 	// Ending frees the place, so a later Follow (a session created again under its id cannot be, but an unarchived
 	// one could) starts a new follower.
 	defer func() {
+		if s.Meter != nil {
+			s.Meter.Forget(id)
+		}
 		s.mu.Lock()
 		delete(s.follows, id)
 		s.mu.Unlock()
@@ -419,6 +433,8 @@ func (s *Service) follow(ctx context.Context, id string) {
 // mirror follows one stream from the row's last seq until it fails.
 func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session) {
 	last := se.LastSeq
+	ms := metering.Session{ID: se.ID, ProjectID: se.ProjectID, ParentID: se.ParentID, Provider: se.Provider,
+		ClaudeAuth: se.ClaudeAuth, Model: se.Model}
 	for e, err := range api.Events(ctx, se.ID, last) {
 		if err != nil {
 			if ctx.Err() == nil {
@@ -445,6 +461,14 @@ func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session) {
 		case event.KindSessionStarted:
 			if p, err := e.Payload(); err == nil {
 				m.ProviderSessionID = p.(*event.SessionStarted).ProviderSessionID
+			}
+		}
+		if s.Meter != nil {
+			if err := s.Meter.Observe(ctx, ms, e); err != nil {
+				if ctx.Err() == nil { // a shutdown cutting a write off is no error
+					s.Log.Error("meter", "session", se.ID, "seq", e.Seq, "err", err)
+				}
+				return
 			}
 		}
 		if err := s.Store.ApplyMirror(ctx, se.ID, m); err != nil {
