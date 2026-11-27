@@ -81,6 +81,7 @@ func Run(ctx context.Context, args []string, version string, log *slog.Logger) e
 	go func() {
 		select {
 		case <-h.Stopped():
+			h.waitReplies()
 			cancel()
 		case <-ctx.Done():
 		}
