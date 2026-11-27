@@ -80,6 +80,9 @@ func (ExecRunner) Run(ctx context.Context, c Cmd) ([]byte, error) {
 type Units interface {
 	// Start runs argv as a transient service unit of the agent user with the given systemd properties.
 	Start(ctx context.Context, unit string, argv []string, props []string) error
+	// StartRoot is Start for a unit that runs as root: a job's runner, which owns the job's log and result and runs
+	// the job's command as the agent user itself.
+	StartRoot(ctx context.Context, unit string, argv []string, props []string) error
 	State(ctx context.Context, unit string) (flowdproto.UnitState, error)
 	// List names the loaded units matching a glob such as flow-session-*.
 	List(ctx context.Context, glob string) ([]string, error)
@@ -95,9 +98,19 @@ type Systemd struct{ Run Runner }
 // MemoryMax (measured, systemd 257: "Failed with result 'oom-kill'"), so an agent's oversized build would take its
 // session host down with it; with continue only that process dies and the host reports the failed command.
 func (s Systemd) Start(ctx context.Context, unit string, argv []string, props []string) error {
-	args := []string{"--unit=" + unit, "--uid=" + strconv.Itoa(layout.AgentUID), "--gid=" + strconv.Itoa(layout.AgentGID),
-		"--collect", "--service-type=exec", "--quiet", "-p", "Restart=no", "-p", "MemorySwapMax=0",
-		"-p", "OOMPolicy=continue", "--setenv=HOME=" + layout.Home}
+	return s.start(ctx, unit, argv, props, []string{"--uid=" + strconv.Itoa(layout.AgentUID),
+		"--gid=" + strconv.Itoa(layout.AgentGID)})
+}
+
+// StartRoot implements Units: as Start, without the agent user.
+func (s Systemd) StartRoot(ctx context.Context, unit string, argv []string, props []string) error {
+	return s.start(ctx, unit, argv, props, nil)
+}
+
+func (s Systemd) start(ctx context.Context, unit string, argv, props, user []string) error {
+	args := append([]string{"--unit=" + unit}, user...)
+	args = append(args, "--collect", "--service-type=exec", "--quiet", "-p", "Restart=no", "-p", "MemorySwapMax=0",
+		"-p", "OOMPolicy=continue", "--setenv=HOME="+layout.Home)
 	for _, p := range props {
 		args = append(args, "-p", p)
 	}

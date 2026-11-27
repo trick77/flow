@@ -1,5 +1,5 @@
 // Package flowdclient is Flow's HTTP implementation of flowdproto.API and flowdproto.Dialer (bearer token,
-// Flow-Protocol header, SSE with Last-Event-ID, terminals over WebSocket, diffs). Jobs, control and ports are not
+// Flow-Protocol header, SSE with Last-Event-ID, terminals over WebSocket, diffs, jobs). Control and ports are not
 // part of the walking skeleton and answer ErrUnsupported. Owner: flowd runtime area (docs/ownership.md).
 package flowdclient
 
@@ -265,19 +265,24 @@ func (c *Client) Control(context.Context) iter.Seq2[flowdproto.ControlRequest, e
 // ReplyControl implements flowdproto.API.
 func (c *Client) ReplyControl(context.Context, flowdproto.ControlReply) error { return ErrUnsupported }
 
-// StartJob implements flowdproto.API.
-func (c *Client) StartJob(context.Context, flowdproto.JobSpec) (flowdproto.JobState, error) {
-	return flowdproto.JobState{}, ErrUnsupported
+// StartJob implements flowdproto.API: it returns once the job's unit runs (or the job is known), never waiting for
+// its end, so no job outlasts callTimeout; Job tells when it ended.
+func (c *Client) StartJob(ctx context.Context, j flowdproto.JobSpec) (flowdproto.JobState, error) {
+	var st flowdproto.JobState
+	return st, c.call(ctx, http.MethodPut, "/v1/jobs/"+url.PathEscape(j.ID), j, &st)
 }
 
 // Job implements flowdproto.API.
-func (c *Client) Job(context.Context, string) (flowdproto.JobState, error) {
-	return flowdproto.JobState{}, ErrUnsupported
+func (c *Client) Job(ctx context.Context, id string) (flowdproto.JobState, error) {
+	var st flowdproto.JobState
+	return st, c.call(ctx, http.MethodGet, "/v1/jobs/"+url.PathEscape(id), nil, &st)
 }
 
 // JobLog implements flowdproto.API.
-func (c *Client) JobLog(context.Context, string, int) ([]flowdproto.LogLine, error) {
-	return nil, ErrUnsupported
+func (c *Client) JobLog(ctx context.Context, id string, after int) ([]flowdproto.LogLine, error) {
+	var lines []flowdproto.LogLine
+	return lines, c.call(ctx, http.MethodGet, "/v1/jobs/"+url.PathEscape(id)+"/log?after="+strconv.Itoa(max(after, 0)),
+		nil, &lines)
 }
 
 // EnsureTerminal implements flowdproto.API.

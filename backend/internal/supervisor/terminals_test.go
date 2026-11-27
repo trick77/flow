@@ -67,6 +67,10 @@ func newTermUnits() *termUnits {
 		props: map[string][]string{}, argv: map[string][]string{}}
 }
 
+func (u *termUnits) StartRoot(context.Context, string, []string, []string) error {
+	return errors.New("not a terminal")
+}
+
 func (u *termUnits) Start(_ context.Context, unit string, argv, props []string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()

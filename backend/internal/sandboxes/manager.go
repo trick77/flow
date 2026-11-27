@@ -97,10 +97,16 @@ type Manager struct {
 	// ActiveSessions counts a project's sessions that are not archived, asked again under the project's lock by
 	// Delete and Rebuild: a session made after the API's own count must not lose its sandbox. nil counts none.
 	ActiveSessions func(ctx context.Context, projectID string) (int, error)
+	// SetupTimeout is each setup script's time limit (0: flowdproto.JobTimeout); SetupLimits bound its unit, as a
+	// session's (setup.go).
+	SetupTimeout time.Duration
+	SetupLimits  flowdproto.Limits
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
 	apis  map[string]cachedAPI
+	// dialed is the flowd each project's last bring-up greeted (logAPI).
+	dialed map[string]cachedAPI
 	// addrMu guards setting up Addresses (addrReady).
 	addrMu    sync.Mutex
 	addrReady bool
@@ -203,10 +209,13 @@ func (m *Manager) busy(ctx context.Context, name string) ([]netip.Addr, error) {
 	return out, nil
 }
 
-// failCode is the error code a failed bring-up records: a missing or re-made host bridge and a full memory ceiling
-// have their own, everything else is sandbox_unavailable (the returned error's detail names the cause).
+// failCode is the error code a failed bring-up records: a missing or re-made host bridge, a full memory ceiling and
+// a failed setup script have their own, everything else is sandbox_unavailable (the returned error's detail names
+// the cause).
 func failCode(err error) apitypes.ErrorCode {
 	switch {
+	case errors.Is(err, ErrSetupFailed):
+		return apitypes.ErrorCodeSandboxSetupFailed
 	case errors.Is(err, sandbox.ErrNetworkMissing):
 		return apitypes.ErrorCodeSandboxNetworkMissing
 	case errors.Is(err, ErrMemoryCeiling):
@@ -441,7 +450,8 @@ func InstanceName(projectID string) string {
 	return "flow-" + hexID[max(len(hexID)-12, 0):]
 }
 
-// bringTimeout bounds one bring-up (create, start, deliver flowd, clone the project's repositories).
+// bringTimeout bounds one bring-up (create, start, deliver flowd, clone the project's repositories); a bring-up
+// that may run setup scripts gets setupBudget on top.
 const bringTimeout = 15 * time.Minute
 
 // Ensure brings the project's sandbox to warm and returns its flowd.
@@ -454,8 +464,13 @@ func (m *Manager) Ensure(ctx context.Context, projectID string) (flowdproto.API,
 func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (flowdproto.API, error) {
 	defer m.lock(projectID)()
 	// Bring-up runs to its end on its own context: a caller that leaves (a page reload) must not leave a healthy
-	// sandbox marked failed, nor a half-made one.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bringTimeout)
+	// sandbox marked failed, nor a half-made one. One that may bring the sandbox up (no connection cached) may run
+	// the setup scripts too.
+	limit := bringTimeout
+	if mayStart && m.cached(projectID).api == nil {
+		limit += m.setupBudget(context.WithoutCancel(ctx), projectID)
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), limit)
 	defer cancel()
 	sb, err := m.Store.ByProject(ctx, projectID)
 	if err == nil && sb.State == StateDeleting {
@@ -506,10 +521,12 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 	if err != nil {
 		return nil, err
 	}
-	if sb.State != StateWarm {
+	// Setup scripts run in a bring-up that finds the sandbox not warm, never on a reconnect to a warm one (setup.go).
+	setup := sb.State != StateWarm
+	if setup {
 		m.setState(ctx, &sb, StateSetup, "")
 	}
-	c, err := m.bring(ctx, &sb, mayStart)
+	c, err := m.bring(ctx, &sb, mayStart, setup)
 	if errors.Is(err, ErrNotWarm) {
 		m.setState(ctx, &sb, StateStopped, "")
 		return nil, err
@@ -534,8 +551,8 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 // bring brings the instance up. A missing bridge fails it before anything is created, started or delivered: Flow
 // records the error and waits for the next bring-up, it never retries by itself. A running instance cut off from
 // the bridge or carrying another address than its assigned one is restarted when mayStart, else reported; without
-// mayStart a stopped instance is ErrNotWarm, never started.
-func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cachedAPI, error) {
+// mayStart a stopped instance is ErrNotWarm, never started. setup: run the repositories' setup scripts (greet).
+func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart, setup bool) (cachedAPI, error) {
 	t0 := time.Now()
 	if !m.Network.Configured() {
 		return cachedAPI{}, errors.New("sandbox network not configured")
@@ -628,13 +645,13 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 		}
 	}
 	releaseCreate()
-	api, err := m.greet(ctx, sb, addr, started, t0)
+	api, err := m.greet(ctx, sb, addr, started, setup, t0)
 	return cachedAPI{api: api, addr: addr}, err
 }
 
 // greet waits for the guest to have its address, then for flowd (delivering it when its version differs), makes
-// sure the project's checkouts exist and records the sandbox warm.
-func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, started bool, t0 time.Time) (flowdproto.API, error) {
+// sure the project's checkouts exist, runs their setup scripts when setup is set, and records the sandbox warm.
+func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, started, setup bool, t0 time.Time) (flowdproto.API, error) {
 	st, err := m.poll(ctx, func() (sandbox.State, bool, error) {
 		st, err := m.Runtime.State(ctx, sb.Instance)
 		return st, st.IPv4 == addr.String(), err
@@ -648,6 +665,7 @@ func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, start
 	}
 	api := m.Dialer.Dial(flowdproto.Endpoint{Sandbox: sb.Instance, Address: net.JoinHostPort(addr.String(),
 		strconv.Itoa(flowdproto.Port)), Token: token})
+	m.noteDialed(sb.ProjectID, cachedAPI{api: api, addr: addr})
 	rel, err := m.Release(st.Arch)
 	if err != nil {
 		return nil, err
@@ -677,9 +695,19 @@ func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, start
 	if err != nil {
 		return nil, err
 	}
+	var scripts []flowdproto.RepoState
 	for _, r := range repos {
-		if _, err := api.EnsureRepo(ctx, flowdproto.RepoSpec{Repo: r.FullName, DefaultBranch: r.DefaultBranch}); err != nil {
+		rs, err := api.EnsureRepo(ctx, flowdproto.RepoSpec{Repo: r.FullName, DefaultBranch: r.DefaultBranch})
+		if err != nil {
 			return nil, fmt.Errorf("repo %s: %w", r.FullName, err)
+		}
+		if rs.SetupScript {
+			scripts = append(scripts, rs)
+		}
+	}
+	if setup {
+		if err := m.runSetup(ctx, sb, api, scripts); err != nil {
+			return nil, err
 		}
 	}
 	now := time.Now()
@@ -1146,8 +1174,7 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	return nil
 }
 
-// API implements httpapi.Sandboxes: state, start, stop and rebuild (setup logs answer not_implemented until flowd
-// runs setup jobs).
+// API implements httpapi.Sandboxes: state, start, stop, rebuild and the setup log (setup.go).
 type API struct {
 	httpapi.NotImplemented
 	Manager *Manager

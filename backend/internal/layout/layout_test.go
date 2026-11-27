@@ -21,6 +21,9 @@ func TestPaths(t *testing.T) {
 		TerminalUnit("t1"):           "flow-term-t1.service",
 		JobUnit("j1"):                "flow-job-j1.service",
 		JobLog("j1"):                 "/var/lib/flow/jobs/j1.log",
+		JobResult("setup-ship"):      "/var/lib/flow/jobs/setup-ship.json",
+		JobEnvFile("setup-ship"):     "/run/flow/session-env/job-setup-ship.env",
+		SetupJobID("ship"):           "setup-ship",
 	} {
 		if got != want {
 			t.Errorf("got %s, want %s", got, want)

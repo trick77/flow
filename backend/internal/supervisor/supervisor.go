@@ -317,8 +317,8 @@ func (s *Supervisor) EnsureRepo(ctx context.Context, r flowdproto.RepoSpec) (flo
 	if err != nil {
 		return flowdproto.RepoState{}, err
 	}
-	_, setup := os.Stat(filepath.Join(dir, ".flow", "setup.sh"))
-	return flowdproto.RepoState{Repo: r.Repo, Path: layout.Checkout(name), HeadSHA: head, SetupScript: setup == nil}, nil
+	return flowdproto.RepoState{Repo: r.Repo, Path: layout.Checkout(name), HeadSHA: head,
+		SetupScript: regularSetupScript(dir)}, nil
 }
 
 // checkoutState is what inspect found at a main checkout's place.

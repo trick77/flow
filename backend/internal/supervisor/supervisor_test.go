@@ -32,6 +32,8 @@ type procUnits struct {
 	running map[string]context.CancelFunc
 	done    map[string]chan struct{}
 	started []string
+	// rootProps are the systemd properties of each root unit started.
+	rootProps map[string][]string
 }
 
 func newUnits() *procUnits {
@@ -51,6 +53,34 @@ func (u *procUnits) Start(_ context.Context, unit string, argv, _ []string) erro
 	go func() {
 		defer close(done)
 		_ = host.Run(ctx, argv[2:], "test", slog.New(slog.DiscardHandler))
+		u.mu.Lock()
+		delete(u.running, unit)
+		u.mu.Unlock()
+	}()
+	return nil
+}
+
+// StartRoot runs a job's runner in this process, as Start runs a host; its props are kept for the tests.
+func (u *procUnits) StartRoot(_ context.Context, unit string, argv, props []string) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if argv[1] != "job" {
+		return errors.New("not a job")
+	}
+	if _, ok := u.running[unit]; ok {
+		return errors.New("unit " + unit + " already loaded")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	u.running[unit], u.done[unit] = cancel, done
+	u.started = append(u.started, unit)
+	if u.rootProps == nil {
+		u.rootProps = map[string][]string{}
+	}
+	u.rootProps[unit] = props
+	go func() {
+		defer close(done)
+		_ = RunJob(ctx, argv[2:], slog.New(slog.DiscardHandler))
 		u.mu.Lock()
 		delete(u.running, unit)
 		u.mu.Unlock()

@@ -470,7 +470,7 @@ func (s *Service) Host(ctx context.Context, id string) (flowdproto.API, error) {
 }
 
 // ensureHost is Host without the lock (callers hold it): reason goes into a started host's session.resumed, and
-// sandbox_start has it leave its queue as it is. started: this call started the host. mayStart false never starts
+// sandbox_start and command have it leave its queue as it is. started: this call started the host. mayStart false never starts
 // a stopped sandbox (Warm instead of Ensure): its sandboxes.ErrNotWarm or sandboxes.ErrNotFound is returned as is,
 // any other failure of Warm as sandbox_unavailable.
 func (s *Service) ensureHost(ctx context.Context, id string, reason event.ResumeReason, mayStart bool) (flowdproto.API, bool, error) {
@@ -518,7 +518,7 @@ func (s *Service) ensureHost(ctx context.Context, id string, reason event.Resume
 // CommandHeld sends a command that must not set the session's queue moving. A host Command starts drains the queue
 // first (its head runs before the command arrives): a removal would send the very message it removes, a send-now
 // would interrupt whatever ran first, a settings change would come after queued turns started under the old ones.
-// So a host that is down is started as for a lost turn (it leaves the queue as it is), gets the command, and, with
+// So a host that is down is started held (session.resumed command: it leaves the queue as it is), gets the command, and, with
 // stopAfter, is stopped again when this call started it: the next message's start then drains the queue in order.
 // Under the session's lock throughout. Like Command it starts a stopped sandbox; mayStart false sends nothing
 // there (ran false), as CommandIfRunning: the sandbox is asked under the lock, so one stopped while this call
@@ -530,7 +530,7 @@ func (s *Service) CommandHeld(ctx context.Context, id, cmdID string, kind event.
 		return flowdproto.CommandResult{}, false, err
 	}
 	defer s.Lock(id)()
-	api, started, err := s.ensureHost(ctx, id, event.ResumeReasonSandboxStart, mayStart)
+	api, started, err := s.ensureHost(ctx, id, event.ResumeReasonCommand, mayStart)
 	if !mayStart && (errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound)) {
 		return flowdproto.CommandResult{}, false, nil
 	}

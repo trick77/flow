@@ -49,6 +49,8 @@ type Config struct {
 	// Session bounds each session host unit and everything its agent runs (systemd MemoryMax, CPUQuota, TasksMax;
 	// MemorySwapMax=0 always).
 	Session SessionLimits
+	// SetupTimeout is the time limit of each repository's .flow/setup.sh (its unit gets Session's limits).
+	SetupTimeout time.Duration
 	// SessionReplay makes session hosts play the recorded demo turn instead of starting the agent: demos, and
 	// machines without a Claude credential. Read at each host start.
 	SessionReplay bool
@@ -85,6 +87,11 @@ const minSessionSecret = 32
 // provider's own session lasts.
 const DefaultSessionTTL = 12 * time.Hour
 
+// DefaultSetupTimeout is a setup script's time limit when BACKEND_SETUP_TIMEOUT is unset: room for installing a
+// project's toolchain and dependencies on a cold cache, short enough that a hung script fails the bring-up the same
+// working session.
+const DefaultSetupTimeout = 20 * time.Minute
+
 // Addr is BACKEND_ADDR as Load reads it (trimmed, empty is unset). The healthcheck subcommand probes it before
 // anything else is set up, so a broken rest of the environment cannot fail the probe.
 func Addr(getenv func(string) string) string {
@@ -109,6 +116,7 @@ func Load(getenv func(string) string) (Config, error) {
 		SandboxMemory:   int64(r.Int("BACKEND_SANDBOX_MEMORY_MIB", DefaultSandboxMemoryMiB)) << 20,
 		SandboxCPUs:     r.Int("BACKEND_SANDBOX_CPUS", DefaultSandboxCPUs),
 		SessionReplay:   r.Bool("BACKEND_SESSION_REPLAY", false),
+		SetupTimeout:    r.Duration("BACKEND_SETUP_TIMEOUT", DefaultSetupTimeout),
 		HomeVolume:      r.String("BACKEND_HOME_VOLUME", "flow-home"),
 		// Where backend/Containerfile puts them.
 		FlowdDir:   r.String("BACKEND_FLOWD_DIR", "/opt/flow"),
@@ -116,6 +124,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	cfg.SandboxMemoryTotal, cfg.SandboxMemoryHeadroom = loadSandboxMemoryTotal(r, cfg.SandboxMemory)
 	cfg.Session = loadSessionLimits(r, cfg.SandboxMemory, cfg.SandboxCPUs)
+	if cfg.SetupTimeout <= 0 {
+		r.Fail("BACKEND_SETUP_TIMEOUT: want a duration above zero")
+	}
 	checkAddrOffSandboxNetwork(r, cfg.Addr, cfg.SandboxNetwork)
 	// net.Listen would refuse it too, but only after the rest of startup ran.
 	host, _, err := net.SplitHostPort(cfg.Addr)

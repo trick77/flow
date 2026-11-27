@@ -230,7 +230,8 @@ type SessionSpec struct {
 	// for contract fixtures from real runs. Off by default; read at each host start.
 	Record bool `json:"record,omitempty"`
 	// ResumeReason goes into the session.resumed of a host this call starts (empty: message). sandbox_start starts
-	// it only to log a turn a sandbox stop cut off as lost: the host leaves queued messages queued.
+	// it only to log a turn a sandbox stop cut off as lost, command only to take a held command (stop, reply, queue
+	// removal, settings): either way the host leaves queued messages queued.
 	ResumeReason event.ResumeReason `json:"resumeReason,omitempty"`
 }
 
@@ -355,25 +356,46 @@ const (
 )
 
 // JobSpec starts a job; idempotent by ID (a running or finished job with the ID is reported, not started again).
+// A job whose unit ended without recording a result (the sandbox stopped under it) is started again.
 type JobSpec struct {
 	ID   string  `json:"id"`
 	Kind JobKind `json:"kind"`
 	// Repo is owner/name for JobSetup, the config repository for JobConfigSync.
 	Repo string `json:"repo"`
+	// Limits bound the job's unit as a session's (zero: unset); TimeoutSeconds ends it (0: flowd's default,
+	// JobTimeout).
+	Limits         Limits `json:"limits,omitzero"`
+	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
 }
 
-// JobState is a job as flowd sees it.
+// JobTimeout is a job's time limit when its spec names none.
+const JobTimeout = 20 * time.Minute
+
+// JobLogPage bounds the lines one JobLog call returns; the caller asks again after the last one.
+const JobLogPage = 1000
+
+// JobState is a job as flowd sees it. Done: it recorded a result (ExitCode, TimedOut); not Done with a Unit that
+// is neither active nor activating: it ended without one (interrupted).
 type JobState struct {
 	ID       string    `json:"id"`
 	Kind     JobKind   `json:"kind"`
 	Unit     UnitState `json:"unit"`
 	Done     bool      `json:"done"`
 	ExitCode int       `json:"exitCode"`
+	// TimedOut: the job ran past its time limit and was ended.
+	TimedOut bool `json:"timedOut,omitempty"`
 	// Lines is the number of log lines so far.
 	Lines int `json:"lines"`
-	// Commit and Files report a finished config sync.
+	// Commit is the checkout's HEAD a setup script ran from, or a finished config sync's; Script the setup script's
+	// git blob. Files reports a finished config sync.
 	Commit string `json:"commit,omitempty"`
+	Script string `json:"script,omitempty"`
 	Files  int    `json:"files,omitempty"`
+}
+
+// Running reports whether the job's unit still runs.
+func (j JobState) Running() bool {
+	return !j.Done && (j.Unit == UnitActive || j.Unit == UnitActivating)
 }
 
 // LogLine is one line of a job's output, numbered from 1.
@@ -475,7 +497,7 @@ type API interface {
 	ReplyControl(ctx context.Context, r ControlReply) error
 	StartJob(ctx context.Context, j JobSpec) (JobState, error)
 	Job(ctx context.Context, id string) (JobState, error)
-	// JobLog returns the job's log lines after line after.
+	// JobLog returns the job's log lines after line after, at most JobLogPage.
 	JobLog(ctx context.Context, id string, after int) ([]LogLine, error)
 	EnsureTerminal(ctx context.Context, t TerminalSpec) (TerminalState, error)
 	// AttachTerminal connects to a running terminal; a valid size resizes it before the scrollback is replayed.

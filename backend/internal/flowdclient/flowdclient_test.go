@@ -72,9 +72,6 @@ func TestUnsupportedAndErrors(t *testing.T) {
 	}
 	unsupported := []error{
 		c.ReplyControl(ctx, flowdproto.ControlReply{}),
-		func() error { _, err := c.StartJob(ctx, flowdproto.JobSpec{}); return err }(),
-		func() error { _, err := c.Job(ctx, "j"); return err }(),
-		func() error { _, err := c.JobLog(ctx, "j", 0); return err }(),
 	}
 	for _, err := range c.Control(ctx) {
 		unsupported = append(unsupported, err)

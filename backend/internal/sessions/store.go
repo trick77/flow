@@ -40,11 +40,10 @@ type Mirror struct {
 	ModeCap string
 }
 
-// Patch is what the owner changes on a session row; "" keeps a field. A title is the owner's (title_source owner).
+// Patch is what the owner changes on a session row directly; "" keeps a field. A title is the owner's (title_source
+// owner). Model and mode are the log's, written by the mirror only.
 type Patch struct {
 	Title string
-	Model string
-	Mode  string
 }
 
 // Store keeps session and worktree rows.

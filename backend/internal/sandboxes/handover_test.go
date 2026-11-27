@@ -344,6 +344,9 @@ type fakeUnits struct{}
 func (fakeUnits) Start(context.Context, string, []string, []string) error {
 	return errors.New("no units")
 }
+func (fakeUnits) StartRoot(context.Context, string, []string, []string) error {
+	return errors.New("no units")
+}
 func (fakeUnits) State(context.Context, string) (flowdproto.UnitState, error) {
 	return flowdproto.UnitMissing, nil
 }
