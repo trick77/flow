@@ -18,6 +18,11 @@ func TestDev(t *testing.T) {
 	if w.Code != http.StatusFound {
 		t.Errorf("login %d", w.Code)
 	}
+	w = httptest.NewRecorder()
+	Dev{}.AuthLogout(w, httptest.NewRequest("POST", "/api/auth/logout", nil))
+	if w.Code != http.StatusNoContent {
+		t.Errorf("logout %d", w.Code)
+	}
 }
 
 // Dev mode admits whoever reaches loopback, so it must keep browsers' other pages out: a non-loopback Host (DNS
@@ -37,11 +42,19 @@ func TestDevGuard(t *testing.T) {
 		{"cross-port write", "DELETE", "127.0.0.1:8080", "http://127.0.0.1:9999", http.StatusForbidden},
 		{"opaque origin write", "POST", "127.0.0.1:8080", "null", http.StatusForbidden},
 		{"unreadable origin", "POST", "127.0.0.1:8080", "%zz", http.StatusForbidden},
+		// A WebSocket handshake is a GET: a page elsewhere must not open one either.
+		{"cross-origin websocket", "GET", "127.0.0.1:8080", "http://evil.example", http.StatusForbidden},
+		{"same-origin websocket", "GET", "127.0.0.1:8080", "http://127.0.0.1:8080", http.StatusOK},
+		{"cross-origin write by Referer", "POST", "127.0.0.1:8080", "referer:http://evil.example/x", http.StatusForbidden},
+		{"same-origin write by Referer", "POST", "127.0.0.1:8080", "referer:http://127.0.0.1:8080/x", http.StatusOK},
 	} {
 		r := httptest.NewRequest(c.method, "/api/sessions", nil)
 		r.Host = c.host
-		if c.origin != "" {
+		if ref, ok := strings.CutPrefix(c.origin, "referer:"); ok {
+			r.Header.Set("Referer", ref)
+		} else if c.origin != "" {
 			r.Header.Set("Origin", c.origin)
+			r.Header.Set("Upgrade", "websocket")
 		}
 		w := httptest.NewRecorder()
 		Dev{}.Require(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(w, r)
