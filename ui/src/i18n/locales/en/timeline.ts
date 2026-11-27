@@ -60,6 +60,11 @@ export const timeline = {
   toolDenied: "denied",
   toolInterrupted: "interrupted",
   pullRequest: "pull request #{{n}}",
+  // Generic rows: provider messages and tools nobody maps yet.
+  passthrough: "Provider message",
+  rawInput: "Input",
+  rawResult: "Result",
+  rawTruncated: "Shortened: the start of the content only.",
   gateRunning: "Running the checks",
   gateRan: "Ran the checks",
   gateWaiting: "Waiting for the check queue",
@@ -108,11 +113,32 @@ export const timeline = {
   todos: "Todos",
   todosDone: "{{done}} of {{total}}",
   workingNow: "Working…",
+  // One sentence per notice code (docs/events.md, "Notice codes"). Codes are
+  // free-form strings: an unknown one shows noticeUnknown.
   notices: {
     context_compacted: "The conversation was compacted to free up context.",
+    context_compaction_failed: "Compacting the conversation failed.",
     rate_limited: "Rate limited. The agent waits and retries.",
+    rate_limit_warning: "The agent is close to its rate limit.",
     api_retry: "The model provider did not answer. Retrying.",
     auth_required: "The agent needs to sign in again.",
+    provider_error: "The model provider answered with an error.",
+    mode_change_failed:
+      "The mode could not be changed. The previous one stays.",
+    model_change_failed: "The model could not be changed.",
+    draft_too_large: "An agent event was too large to show.",
+    request_too_large:
+      "A request was too large to show. The agent was told no.",
+    sidecar_translate_failed:
+      "A message from the agent could not be read. It is shown as received.",
+    sidecar_bad_command: "The agent adapter refused a command.",
+    sidecar_command_skipped: "The agent adapter skipped a command.",
+    sidecar_shutting_down: "The agent is stopping and took no new command.",
+    sidecar_busy: "The agent was still busy and did not take the message.",
+    sidecar_reply_not_pending:
+      "That request was no longer open. The reply was not delivered.",
+    github_token_expired:
+      "The GitHub token expired. Flow renews it; git and gh fail until then.",
   },
   noticeUnknown: "Notice: {{code}}",
 };

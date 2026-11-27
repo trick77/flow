@@ -1,7 +1,7 @@
 import { FakeEventSource } from "../test/fakeEventSource";
 import type { TypedEvent } from "../contract/events.gen";
 import type { AppEvent } from "./types.gen";
-import { streamAppEvents, streamSessionEvents } from ".";
+import { onStreamGaveUp, streamAppEvents, streamSessionEvents } from ".";
 
 function ev(seq: number | undefined, kind: string, data: unknown) {
   return {
@@ -116,6 +116,23 @@ describe("streamSessionEvents", () => {
     fourth.fail(true);
     vi.advanceTimersByTime(100);
     expect(FakeEventSource.instances).toHaveLength(5);
+  });
+
+  it("tells listeners when the browser gives up, not while it retries", () => {
+    const gaveUp = vi.fn();
+    const off = onStreamGaveUp(gaveUp);
+    streamSessionEvents("s1", {
+      EventSource: FakeEventSource,
+      onEvent: () => {},
+    });
+    FakeEventSource.last().fail(false);
+    expect(gaveUp).not.toHaveBeenCalled();
+    FakeEventSource.last().fail(true);
+    expect(gaveUp).toHaveBeenCalledTimes(1);
+    off();
+    vi.advanceTimersByTime(1000);
+    FakeEventSource.last().fail(true);
+    expect(gaveUp).toHaveBeenCalledTimes(1);
   });
 
   it("starts after a given seq", () => {

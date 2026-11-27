@@ -1,10 +1,13 @@
 import {
   ApiError,
   errorCode,
+  getAuthSession,
   getSession,
   interruptTurn,
   listProjects,
   listSessions,
+  logout,
+  onUnauthenticated,
   replyPermission,
   sendMessage,
 } from ".";
@@ -110,5 +113,36 @@ describe("API client", () => {
       expect(errorCode(err)).toBe("internal");
     }
     expect(errorCode(new Error("x"))).toBe("internal");
+  });
+
+  it("reads the auth session and signs out", async () => {
+    fetchMock.mockResolvedValueOnce(
+      respond(200, { signedIn: true, mode: "oidc", name: "Owner" }),
+    );
+    fetchMock.mockResolvedValueOnce(respond(204));
+    await expect(getAuthSession()).resolves.toEqual({
+      signedIn: true,
+      mode: "oidc",
+      name: "Owner",
+    });
+    await expect(logout()).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/auth/session");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/auth/logout");
+    expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+  });
+
+  it("tells listeners about unauthenticated answers only", async () => {
+    const heard = vi.fn();
+    const off = onUnauthenticated(heard);
+    fetchMock.mockResolvedValueOnce(respond(403, { code: "forbidden" }));
+    fetchMock.mockResolvedValueOnce(respond(401, { code: "unauthenticated" }));
+    fetchMock.mockResolvedValueOnce(respond(401, { code: "unauthenticated" }));
+    await listSessions().catch(() => {});
+    expect(heard).not.toHaveBeenCalled();
+    await listSessions().catch(() => {});
+    expect(heard).toHaveBeenCalledTimes(1);
+    off();
+    await listSessions().catch(() => {});
+    expect(heard).toHaveBeenCalledTimes(1);
   });
 });

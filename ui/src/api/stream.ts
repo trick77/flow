@@ -17,6 +17,19 @@ export type EventSourceCtor = new (url: string) => EventSourceLike;
 // Last-Event-ID.
 const CLOSED = 2;
 
+const gaveUpListeners = new Set<() => void>();
+
+// onStreamGaveUp calls fn whenever the browser gives up on a stream. An
+// EventSource never shows the status that ended it, so a 401 (an expired
+// session) looks like any other failure: the shell asks the session endpoint.
+// Returns the unsubscribe.
+export function onStreamGaveUp(fn: () => void): () => void {
+  gaveUpListeners.add(fn);
+  return () => {
+    gaveUpListeners.delete(fn);
+  };
+}
+
 export interface StreamOptions {
   EventSource?: EventSourceCtor;
   // First wait before recreating a closed stream; doubles up to maxBackoffMs.
@@ -84,6 +97,7 @@ function openStream<T>(o: GenericStream<T>): () => void {
     es.addEventListener("error", () => {
       if (closed || source !== es || es.readyState !== CLOSED) return;
       es.close();
+      gaveUpListeners.forEach((fn) => fn());
       timer = setTimeout(() => {
         timer = undefined;
         connect();

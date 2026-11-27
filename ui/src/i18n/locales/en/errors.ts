@@ -22,4 +22,8 @@ export const errors: Record<ErrorCode, string> = {
   provider_unavailable: "This agent is not signed in or has no API key.",
   repo_in_use: "A session still works in this repository.",
   too_many_sessions: "Too many sessions are running. Wait for one to finish.",
+  sandbox_network_missing:
+    "The sandbox network is missing on the server. Run the host setup again.",
+  sandbox_memory_full:
+    "The running sandboxes use all the memory Flow may give them. Stop one first.",
 };

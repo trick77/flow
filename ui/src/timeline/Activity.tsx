@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { TOOL_KIND_VALUES, type ToolKind } from "../contract/events.gen";
 import { formatNumber } from "../i18n/format";
 import { Icon, type IconName } from "../shell/Icon";
-import type { ActivityRow, FoldItem, GateRow, ToolRow } from "./fold";
+import type { ActivityRow, FoldItem, GateRow, RawRow, ToolRow } from "./fold";
 import { useFormatDuration, useNow } from "./time";
 
 const kindIcons: Record<ToolKind, IconName> = {
@@ -191,17 +191,140 @@ function TraceIcon({ spin, name }: { spin: boolean; name: IconName }) {
   );
 }
 
+// rawText is raw content as the owner reads it: a string as is (a truncated
+// payload is the start of its JSON), anything else as indented JSON.
+export function rawText(v: unknown): string {
+  if (typeof v === "string") return v;
+  return JSON.stringify(v, null, 2) ?? "";
+}
+
+// RawBlock is one labelled piece of raw content, marked when the writer cut it.
+function RawBlock({
+  label,
+  value,
+  truncated,
+}: {
+  label?: string;
+  value: unknown;
+  truncated?: boolean;
+}) {
+  const { t } = useTranslation("timeline");
+  return (
+    <>
+      {label && <div className="verb">{label}</div>}
+      <pre className="cmd">{rawText(value)}</pre>
+      {truncated && <div className="tsrc">{t("rawTruncated")}</div>}
+    </>
+  );
+}
+
+// Toggle is the collapsible header of a generic row: its text and a chevron.
+function Toggle({
+  open,
+  onToggle,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      className="fold-btn"
+      type="button"
+      aria-expanded={open}
+      onClick={onToggle}
+    >
+      <span>{children}</span>
+      <span className="chev" />
+    </button>
+  );
+}
+
+// UnknownToolDetails is all Flow has of a tool the adapter does not know: its
+// input and its result, as the provider gave them.
+function UnknownToolDetails({ row }: { row: ToolRow }) {
+  const { t } = useTranslation("timeline");
+  const fin = row.finished;
+  return (
+    <>
+      {row.input !== undefined && (
+        <RawBlock
+          label={t("rawInput")}
+          value={row.input}
+          truncated={row.inputTruncated}
+        />
+      )}
+      {fin?.rawResult !== undefined ? (
+        <RawBlock
+          label={t("rawResult")}
+          value={fin.rawResult}
+          truncated={fin.rawResultTruncated}
+        />
+      ) : (
+        fin?.output !== undefined && (
+          <RawBlock
+            label={t("rawResult")}
+            value={fin.output}
+            truncated={fin.outputTruncated}
+          />
+        )
+      )}
+    </>
+  );
+}
+
 function ToolRowView({ row, live }: { row: ToolRow; live: boolean }) {
   const verb = useToolVerb();
+  const [open, setOpen] = useState(false);
   const running = live && !row.finished;
+  const kind = knownKind(row.kind);
+  const fin = row.finished;
+  // A tool the adapter does not know: name, input and result, collapsible.
+  const generic =
+    kind === "other" &&
+    (row.input !== undefined ||
+      fin?.rawResult !== undefined ||
+      fin?.output !== undefined);
+  const head = (
+    <>
+      <span className="verb">{verb(row, running)}</span>
+      <ToolTarget row={row} />
+    </>
+  );
   return (
     <div className={row.nested ? "trow nested" : "trow"} data-testid={row.key}>
-      <TraceIcon spin={running} name={kindIcons[knownKind(row.kind)]} />
-      <span className="ttext">
-        <span className="verb">{verb(row, running)}</span>
-        <ToolTarget row={row} />
-      </span>
+      <TraceIcon spin={running} name={kindIcons[kind]} />
+      {generic ? (
+        <div className="ttext">
+          <Toggle open={open} onToggle={() => setOpen(!open)}>
+            {head}
+          </Toggle>
+          {open && <UnknownToolDetails row={row} />}
+        </div>
+      ) : (
+        <span className="ttext">{head}</span>
+      )}
       <ToolSummary row={row} />
+    </div>
+  );
+}
+
+// RawRowView is a provider message nobody maps yet: the provider's name for
+// it, the message itself on demand.
+function RawRowView({ row }: { row: RawRow }) {
+  const { t } = useTranslation("timeline");
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={row.nested ? "trow nested" : "trow"} data-testid={row.key}>
+      <TraceIcon spin={false} name="box" />
+      <div className="ttext">
+        <Toggle open={open} onToggle={() => setOpen(!open)}>
+          <span className="verb">{t("passthrough")}</span>
+          <span className="mono">{row.name}</span>
+        </Toggle>
+        {open && <RawBlock value={row.raw} truncated={row.rawTruncated} />}
+      </div>
     </div>
   );
 }
@@ -253,11 +376,14 @@ function GateRowView({ row, live }: { row: GateRow; live: boolean }) {
 }
 
 function Row({ row, live }: { row: ActivityRow; live: boolean }) {
-  return row.type === "gate" ? (
-    <GateRowView row={row} live={live} />
-  ) : (
-    <ToolRowView row={row} live={live} />
-  );
+  switch (row.type) {
+    case "gate":
+      return <GateRowView row={row} live={live} />;
+    case "raw":
+      return <RawRowView row={row} />;
+    case "tool":
+      return <ToolRowView row={row} live={live} />;
+  }
 }
 
 // FoldLabel is "Worked for 2m 14s", or while the turn runs "Working for ...",

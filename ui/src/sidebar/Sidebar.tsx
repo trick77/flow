@@ -8,6 +8,7 @@ import type {
 } from "../api/types.gen";
 import { formatNumber } from "../i18n/format";
 import { Icon } from "../shell/Icon";
+import { UserMenu } from "../shell/UserMenu";
 import { groupSessions, SECTION_ORDER, type SectionId } from "./group";
 
 const sectionKeys = {
@@ -137,6 +138,7 @@ export function Sidebar({
             </section>
           ))}
       </nav>
+      <UserMenu />
     </aside>
   );
 }
