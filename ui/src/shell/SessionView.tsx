@@ -4,7 +4,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -90,6 +92,109 @@ function SandboxNotice({
         <div className="row-inline">
           <button type="button" className="btn sm primary" onClick={start}>
             {t("startSandbox")}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// MoreMenu holds the diff panel toggle and Archive on phones (COMPACT), so
+// the session title keeps its room in the header. Choosing an item closes
+// the menu and puts the focus back on its button; Up and Down move, Escape
+// closes.
+function MoreMenu({
+  buttonRef,
+  panelOpen,
+  onTogglePanel,
+  onArchive,
+}: {
+  buttonRef: RefObject<HTMLButtonElement | null>;
+  panelOpen: boolean;
+  onTogglePanel: () => void;
+  onArchive: () => void;
+}) {
+  const { t } = useTranslation("shell");
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    menu.current?.querySelector<HTMLElement>('[role^="menuitem"]')?.focus();
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const choose = (action: () => void) => {
+    setOpen(false);
+    buttonRef.current?.focus();
+    action();
+  };
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+      buttonRef.current?.focus();
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const items = [
+      ...(menu.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ??
+        []),
+    ];
+    if (items.length === 0) return;
+    e.preventDefault();
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    items[(i + step + items.length) % items.length].focus();
+  };
+
+  return (
+    <div className="more-wrap" ref={wrap} onKeyDown={onKeyDown}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="icon-btn"
+        aria-label={t("more")}
+        title={t("more")}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <Icon name="more" />
+      </button>
+      {open && (
+        <div
+          className="pop down more-pop"
+          role="menu"
+          aria-label={t("moreMenu")}
+          ref={menu}
+        >
+          <button
+            type="button"
+            className="opt"
+            role="menuitemcheckbox"
+            aria-checked={panelOpen}
+            aria-controls={panelOpen ? PANEL_ID : undefined}
+            onClick={() => choose(onTogglePanel)}
+          >
+            <Icon name="panelRight" />
+            <span className="grow">{t("panelItem")}</span>
+          </button>
+          <button
+            type="button"
+            className="opt"
+            role="menuitem"
+            onClick={() => choose(onArchive)}
+          >
+            <Icon name="archive" />
+            <span className="grow">{t("archive")}</span>
           </button>
         </div>
       )}
@@ -230,7 +335,18 @@ export function SessionView({
   const detail = useSessionDetail(session.id, rev);
   const overlay = useMediaQuery(OVERLAY);
   const narrow = useMediaQuery(NARROW);
+  const compact = useMediaQuery(COMPACT);
+  // The panel's toggle, or on phones the menu holding it: the focus goes back
+  // there when the panel closes.
   const panelToggle = useRef<HTMLButtonElement>(null);
+  const togglePanel = () => {
+    if (!panelOpen) refresh();
+    setPanelOpen((o) => !o);
+  };
+  const toggleAsking = () => {
+    setAsking((a) => !a);
+    setFailed(null);
+  };
   const openRepo = (repoId: string) => {
     setDiffRepo(repoId);
     if (!panelOpen) refresh();
@@ -273,34 +389,39 @@ export function SessionView({
                 pressed={terminalOpen}
                 onToggle={() => setTerminalOpen((o) => !o)}
               />
-              <button
-                ref={panelToggle}
-                type="button"
-                className="icon-btn"
-                aria-label={t("togglePanel")}
-                title={t("togglePanel")}
-                aria-pressed={panelOpen}
-                aria-controls={panelOpen ? PANEL_ID : undefined}
-                onClick={() => {
-                  if (!panelOpen) refresh();
-                  setPanelOpen((o) => !o);
-                }}
-              >
-                <Icon name="panelRight" />
-              </button>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label={t("archive")}
-                title={t("archive")}
-                aria-expanded={asking}
-                onClick={() => {
-                  setAsking((a) => !a);
-                  setFailed(null);
-                }}
-              >
-                <Icon name="archive" />
-              </button>
+              {compact ? (
+                <MoreMenu
+                  buttonRef={panelToggle}
+                  panelOpen={panelOpen}
+                  onTogglePanel={togglePanel}
+                  onArchive={toggleAsking}
+                />
+              ) : (
+                <>
+                  <button
+                    ref={panelToggle}
+                    type="button"
+                    className="icon-btn"
+                    aria-label={t("togglePanel")}
+                    title={t("togglePanel")}
+                    aria-pressed={panelOpen}
+                    aria-controls={panelOpen ? PANEL_ID : undefined}
+                    onClick={togglePanel}
+                  >
+                    <Icon name="panelRight" />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    aria-label={t("archive")}
+                    title={t("archive")}
+                    aria-expanded={asking}
+                    onClick={toggleAsking}
+                  >
+                    <Icon name="archive" />
+                  </button>
+                </>
+              )}
               {nav}
             </>
           }
@@ -419,6 +540,9 @@ export function SessionView({
 
 // OVERLAY: up to this width the review panel lies over the session.
 const OVERLAY = "(max-width: 1180px)";
+// COMPACT: phones, where the diff panel toggle and Archive share one menu
+// (shell.css hides the sandbox and repos chips at the same width).
+const COMPACT = "(max-width: 420px)";
 
 // useSessionDetail reads the session's worktrees (getSession), again when
 // rev changes; a failure leaves the last ones (or none) and its code.

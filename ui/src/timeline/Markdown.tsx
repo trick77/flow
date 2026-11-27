@@ -70,9 +70,12 @@ export function parseBlocks(src: string): Block[] {
     const fence = FENCE.exec(line);
     if (fence) {
       const marker = fence[1];
+      // Only a run of the same character, at least as long, and nothing
+      // after it closes: a fenced example inside the block (```js) does not.
+      const closing = new RegExp(`^\\s*${marker[0]}{${marker.length},}\\s*$`);
       const body: string[] = [];
       i++;
-      while (i < lines.length && !lines[i].trim().startsWith(marker)) {
+      while (i < lines.length && !closing.test(lines[i])) {
         body.push(lines[i]);
         i++;
       }

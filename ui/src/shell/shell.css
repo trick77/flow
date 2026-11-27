@@ -213,6 +213,19 @@
     display: none;
   }
 }
+/* Phones: the diff panel toggle and Archive in one menu (SessionView). */
+.more-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+.pop.down.more-pop {
+  left: auto;
+  right: 0;
+  width: 220px;
+}
+.more-pop .opt {
+  align-items: center;
+}
 
 /* A session and its review panel side by side; the panel overlays the
    session on tighter screens (panel.css). */
