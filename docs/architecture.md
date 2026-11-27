@@ -61,7 +61,7 @@ sandbox (Incus system container, one per project)
   agent once the setting is off. `deploy/dev-flow.sh` turns it on unless the running Flow has a Claude credential.
 - **Claude sidecar** (`internal/host/claude`). Started on the first message as `node <release>/sidecar/dist/main.js
   [--record <log dir>/sdk.jsonl]` (`layout.NodeBin`, the bundle beside the host's resolved flowd binary, recording
-  when `SessionSpec.record`), cwd = session directory, own process group. First stdin line `sidecar.start`
+  when `SessionSpec.record`), cwd = the agent's working directory (below), own process group. First stdin line `sidecar.start`
   (`StartSpec`): `sessionId`, `resume`, `cwd`, current `model`/`mode`/`modeCap`, `claudeAuth`, `claudeExecutable` =
   `layout.ClaudeCLI`, `settingsPath` = `layout.Settings`, `mcpServers.flow` = `{stdio, <flowd> mcp,
   env BACKEND_MCP_TOKEN}` once `flowd mcp` exists (none until then), `version` (the sidecar sets
@@ -75,6 +75,23 @@ sandbox (Incus system container, one per project)
   lower cap pulls the mode in force down; the host logs and sends that mode). **Provisional:** what Claude Code does
   with `sessionId` for a session it has (an init with no transcript written yet) and with `resume` for one it lacks
   is not verified.
+- **Agent working directory** (owner decision, deviates from the spec's "cwd = session directory"). A session made
+  with one repository works in that worktree, one made with several in the session directory: in the session
+  directory a single-repo agent wrote files beside its repository and `git status` found no repository (first real
+  run). flowd chooses it once, before the first start, and keeps it as `host.Spec.cwd`: Claude Code stores its
+  transcript by working directory, so a resume must find the same one. A spec without the field whose log exists
+  (a session from before, or a spec lost or rewritten by an older flowd) keeps the directory the log's first
+  `session.started` names, else the session directory. `session.started.cwd`, the sidecar's `cwd` (tool and request
+  `path` relative to it) and a session terminal's start directory (flowd moves it there) all follow it. When the
+  agent's directory is not the session's one worktree, `sidecar.start` carries `appendSystemPrompt`, a note listing
+  each worktree (path, repo, branch, base ref) appended to Claude Code's preset prompt, and `additionalDirectories`
+  = the worktrees outside the working directory (a repository added to a single-repo session). Both come from the
+  log's `worktree.added` at each sidecar start, so a repository added while the sidecar runs reaches the agent at
+  its next start, not mid-process (the SDK's runtime `register_repo_root` takes only subdirectories of known roots). The
+  append goes with `snapshot: false`: by default Claude Code records the first request's prompt and ignores a
+  different append on a later start (sdk.d.ts, `systemPrompt`). **Provisional:** that a resumed session already
+  recorded honours the new append is not verified. Single-repo sessions now read project settings and `.mcp.json`
+  from the worktree.
 - **Sidecar environment.** Built from an allow-list of the host unit's own environment (PATH, HOME, user, shell,
   locale, TZ, TMPDIR, TERM, git identity, and the image's unit defaults GOMODCACHE, GOPATH, GOCACHE,
   npm_config_cache, PLAYWRIGHT_BROWSERS_PATH, DISABLE_AUTOUPDATER, OPENCODE_DISABLE_AUTOUPDATE; layout values fill in
@@ -226,7 +243,7 @@ sandbox (Incus system container, one per project)
 | Where | What | Why |
 |---|---|---|
 | root fs `/home/flow/work/<repo>` | main checkouts | per project; source of worktrees only |
-| root fs `/home/flow/work/.sessions/<name>/<repo>` | worktrees, agent cwd = session dir | spec |
+| root fs `/home/flow/work/.sessions/<name>/<repo>` | worktrees; agent cwd = the one worktree, or the session dir with several | spec; "Agent working directory" |
 | root fs `/var/lib/flow/sessions/<id>/events.jsonl` | logs | outside work trees: no git noise, survives worktree removal |
 | root fs `/var/lib/flow/sessions/<id>/spec.json`, `/var/lib/flow/session-dirs/<name>` | host spec; which session id owns a session directory | the log is served with no host running; no session adopts another's worktrees |
 | root fs `/opt/flow/releases/<v>/`, `/etc/flow/` | flowd, sidecar, config, Claude settings layer | versioned, root-owned |
@@ -372,7 +389,11 @@ and without a ban chain, then end to end with Flow itself.
   DNAT'd traffic before any policy), kept by the unit `flow-sandbox-published.service` (inserts it after Docker,
   before Incus; no ExecStop, so a Docker stop leaves it: measured without a gap across restarts and a simulated
   boot), effective only while FORWARD jumps to `DOCKER-USER` before `DOCKER-FORWARD` (the scripts check; once seen
-  reversed in the lab until Docker restarted); Incus ordered after Docker;
+  reversed in the lab until Docker restarted); Incus ordered after Docker; Incus' API on the sandbox network's
+  gateway (`INCUS_LISTEN`, `172.30.0.1:8443`): Flow's container cannot reach the host's loopback, sandboxes are
+  refused there by `flow-sb-host`, containers on any Docker network connect to it (both measured with Flow in its
+  container); without a trusted client certificate Incus answers them only as an untrusted client (Incus' trust
+  model, not measured);
   the restricted project, which needs `restricted.devices.nic=allow` (a restricted project refuses NICs on an
   unmanaged bridge; measured). Owner's risk, measured on Incus 6.0.4: `allow` also lets the certificate's holder
   attach a NIC to any host bridge (other Docker networks, filtering off) and use macvlan, ipvlan, routed, p2p and
@@ -409,13 +430,26 @@ and without a ban chain, then end to end with Flow itself.
   connection is handed out only while the instance runs, carries its address and is a port of the bridge.
 - **Limits.** Per sandbox `BACKEND_SANDBOX_MEMORY_MIB` 6144 (one project's full check peaks at about 4 GiB, page
   cache included; 4 GiB was the floor) and `BACKEND_SANDBOX_CPUS` 4 (half the target host's threads), set at create
-  and again before every start, so the ceiling counts what the instance will run with (0 lifts the limit there). Per session unit (the host
+  and again before every start, so a changed setting reaches a stopped sandbox (0 lifts the limit there). Per session unit (the host
   and everything its agent runs): `BACKEND_SESSION_MEMORY_MIB` (default the sandbox's less 1 GiB: a check plus
   Claude Code, with room for flowd, Docker's daemon and a terminal), `BACKEND_SESSION_CPU_PERCENT` (default all but
   one of the sandbox's CPUs × 100), `BACKEND_SESSION_TASKS_MAX` 4096, `MemorySwapMax=0`; never above the sandbox's.
-- **Memory.** `BACKEND_SANDBOX_MEMORY_TOTAL_MIB` caps the memory limits of all running sandboxes together: a start
-  past it is refused (`sandbox_memory_full`); the default 14 GiB holds two 6 GiB sandboxes. Incus' project `limits.memory` was rejected as the default: it counts stopped instances too
-  (measured) and would cap how many sandboxes exist; host-setup sets it only with `INCUS_PROJECT_MEMORY=1`.
+- **Memory admission.** A limit is a cap, not a reservation (owner decision: no fixed allocation): idle sandboxes
+  hold a fraction of theirs (measured: empty 96 MiB, one idle session 240 MiB, three 763 MiB). A sandbox is created
+  and started only while the measured memory of all running sandboxes plus `BACKEND_SANDBOX_MEMORY_HEADROOM_MIB`
+  (default `BACKEND_SANDBOX_MEMORY_MIB`: room for one full build to begin) fits under
+  `BACKEND_SANDBOX_MEMORY_TOTAL_MIB` (default 14 GiB; unset is the default, 0 turns the check off), else
+  `sandbox_memory_full` with a log line stating measured, headroom and total. Checked before the create (about 40 s;
+  a refused sandbox leaves no instance) and again at the start, under one lock with it. Measured = the working set
+  from Incus' metrics (`/1.0/metrics`): `MemTotal − MemFree` (the cgroup's `memory.current`) less `Inactive_file`.
+  The instance state's `memory.usage` is `memory.current` with the page cache in it (measured, Incus 6.0.4: an idle
+  sandbox just booted 270 MiB, 210 MiB of it inactive file cache): reclaimable cache must not refuse a start, so
+  it is not used. Active file cache is counted (hot, reclaimed only under pressure), as Kubernetes' working set
+  does. An instance the metrics do not measure (refused, or missing) counts with its `memory.usage`, cache
+  included: too much rather than nothing, never an open door, never a block for good; an instance list that fails
+  refuses the start (`sandbox_unavailable`) until the next one. Incus' project `limits.memory` was rejected as the
+  default: it counts stopped instances too (measured) and would cap how many sandboxes exist; host-setup sets it
+  only with `INCUS_PROJECT_MEMORY=1`.
 
 ## Lifecycles
 
@@ -489,7 +523,7 @@ after an archive. A stopped host restarts on the next message with resume and lo
 | host crash | sidecar dies with it; turn lost | flowd restarts it on the next message: `turn.ended {lost}`, open requests `expired`, `session.resumed` |
 | sidecar exit or broken pipe | during a turn: `notice {message_may_not_have_run}`, `turn.ended {error, adapter_exited}`, open request `expired`; between turns: nothing | the host lives on; the owner re-sends if needed; the next message starts a sidecar with `resume` |
 | opencode serve restart | the host's event stream breaks | host reconnects, resyncs from the message list (OpenCode's `/api/event` has no replay, [openapi.json](https://github.com/anomalyco/opencode/blob/dev/packages/protocol/openapi.json)) |
-| sandbox stop | all units end | on start, hosts are not started until needed; logs show `lost` turns |
+| sandbox stop | all units end | Flow sets a cut-off turn's row `failed` and keeps it open (`turn_started_at`); on start, only the hosts of those sessions start at once (two at a time, after the sandbox is warm) and log the turn `lost`; every other host starts when needed |
 | host (machine) reboot | Incus starts nothing by default; Flow reconciles | sandboxes start on demand; `BootID` change tells Flow every unit is gone |
 | Incus restart | units survive (spike 11) | Flow holds no exec, so Incus restarts in about 2 s |
 | host bridge `flowbr0` missing | the sandbox is `failed`, nothing created or started, no retry | host-setup.sh makes the network again; the next start brings the sandbox up |

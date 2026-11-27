@@ -73,7 +73,7 @@ provider reported none, not a free turn (the generator binds optional numbers as
 
 The host derives `session.status` and writes it on change; Flow mirrors it into `sessions.status`. A sandbox stop
 ends the host without a `turn.ended`: Flow, finding the sandbox stopped, sets an open turn's row to `failed` (the
-host logs the turn `lost` on its next start):
+host logs the turn `lost` on its next start, which the sandbox's next bring-up makes at once):
 
 | Status | When |
 |---|---|
