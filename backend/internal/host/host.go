@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strconv"
 	"sync"
@@ -64,7 +65,14 @@ type Host struct {
 	status event.SessionStatus
 	// model is what the session is set to: the spec's, then the log's last settings change; each turn.started
 	// carries it, so metering attributes a turn to the model it ran on.
-	model        string
+	model string
+	// mode and modeCap are the session's now (spec, then session.settings and approved plans): what a restarted
+	// agent is started with.
+	mode, modeCap event.PermissionMode
+	// costUSD sums the turns' reported costs; provider is set once the log shows the provider ran a turn (see
+	// providerKinds). Both go into a restarted agent's start: resume and the cost its totals continue from.
+	costUSD      float64
+	provider     bool
 	started      bool
 	turn         string
 	turns        int
@@ -115,7 +123,8 @@ func New(cfg Config) (*Host, error) {
 		return nil, err
 	}
 	h := &Host{cfg: cfg, w: w, seen: map[string]bool{}, status: event.SessionStatusIdle, blocks: map[string]string{},
-		subs: map[chan hostproto.Frame]struct{}{}, stop: make(chan struct{}), model: cfg.Spec.Session.Model}
+		subs: map[chan hostproto.Frame]struct{}{}, stop: make(chan struct{}), model: cfg.Spec.Session.Model,
+		mode: cfg.Spec.Session.Mode, modeCap: cfg.Spec.Session.ModeCap}
 	h.recover(events)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -149,15 +158,12 @@ func (h *Host) recover(events []event.Event) {
 		if err != nil {
 			continue
 		}
+		h.observe(e.Kind, e.Turn, p)
 		switch p := p.(type) {
 		case *event.SessionStarted:
 			h.started = true
 		case *event.SessionStatusChanged:
 			h.status = p.Status
-		case *event.SessionSettings:
-			if p.Model != "" {
-				h.model = p.Model
-			}
 		case *event.TurnStarted:
 			h.turns++
 			h.turn, h.turnStart = e.Turn, e.TS
@@ -239,8 +245,80 @@ func (h *Host) tryWrite(e event.Event) error {
 	if err != nil {
 		return err
 	}
+	if p, err := e.Payload(); err == nil {
+		h.observe(e.Kind, e.Turn, p)
+	}
 	h.broadcast(hostproto.Frame{Appended: e.Seq})
 	return nil
+}
+
+// NoticeProviderSession is the host's marker that the provider has the session: logged once, inside the turn in
+// which the adapter first reported the provider's init (its session.started draft). It is the only evidence for a
+// resume, and only turns ended after it count toward the prior cost: the host's own session.started proves nothing
+// (written before any agent ran), and the replay adapter, also in logs from before the marker existed, never
+// reports an init.
+const NoticeProviderSession = "provider_session"
+
+// observe keeps what a restarted agent is started with up to date with every logged event (on recovery and as
+// written): model, mode, cap, the summed cost and whether the provider has a session.
+func (h *Host) observe(_ event.EventKind, turn string, p any) {
+	switch p := p.(type) {
+	case *event.Notice:
+		if p.Code == NoticeProviderSession && turn != "" {
+			h.provider = true
+		}
+	case *event.SessionSettings:
+		if p.Model != "" {
+			h.model = p.Model
+		}
+		if p.Mode != "" {
+			h.mode = p.Mode
+		}
+		if p.ModeCap != "" {
+			h.modeCap = p.ModeCap
+		}
+	case *event.PlanResolved:
+		if p.Decision == event.PlanDecisionApproved && p.Mode != "" {
+			h.mode = p.Mode
+		}
+	case *event.TurnEnded:
+		if p.CostUSD != nil && h.provider {
+			h.costUSD += *p.CostUSD
+		}
+	}
+}
+
+// modeRank orders the modes from least to most permissive (the contract's order).
+func modeRank(m event.PermissionMode) int { return slices.Index(event.PermissionModeValues, m) }
+
+// capped is mode held to cap: an agent never starts or runs above its session's cap (the SDK refuses
+// bypassPermissions without the start flag the cap decides).
+func capped(mode, modeCap event.PermissionMode) event.PermissionMode {
+	if modeCap != "" && modeRank(modeCap) >= 0 && modeRank(mode) > modeRank(modeCap) {
+		return modeCap
+	}
+	return mode
+}
+
+// AgentState is what the host knows about the session's agent, for (re)starting it.
+type AgentState struct {
+	// Resume: the provider has the session already (NoticeProviderSession in the log).
+	Resume bool
+	// PriorCostUSD sums the costs the provider reported for its turns; turns without one add nothing, so their
+	// spend lands in the next reported turn, as within one agent process.
+	PriorCostUSD float64
+	Model        string
+	// Mode is held to ModeCap.
+	Mode    event.PermissionMode
+	ModeCap event.PermissionMode
+}
+
+// AgentState reports the session's agent state now.
+func (h *Host) AgentState() AgentState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return AgentState{Resume: h.provider, PriorCostUSD: math.Round(h.costUSD*1e9) / 1e9, Model: h.model,
+		Mode: capped(h.mode, h.modeCap), ModeCap: h.modeCap}
 }
 
 func (h *Host) broadcast(f hostproto.Frame) {
@@ -384,14 +462,36 @@ func (h *Host) apply(c event.Command, p any) error {
 		if err := h.resolve(event.KindPlanProposed, p.RequestID); err != nil {
 			return err
 		}
+		if p.Mode != "" {
+			p.Mode = capped(p.Mode, h.modeCap) // the plan goes on in the mode the cap allows
+			if b, err := json.Marshal(p); err == nil {
+				c.Data = b
+			}
+		}
 		h.append(event.KindPlanResolved, cmd, event.PlanResolved{RequestID: p.RequestID,
 			Decision: event.PlanDecision(p.Decision), Feedback: p.Feedback, Mode: p.Mode})
 		h.setStatus(event.SessionStatusWorking)
 		h.send(c)
 	case *event.SettingsSet:
-		h.append(event.KindSessionSettings, cmd, event.SessionSettings{Model: p.Model, Mode: p.Mode, ModeCap: p.ModeCap})
-		if p.Model != "" {
-			h.model = p.Model
+		// A cap below the mode in force pulls the mode down with it; the log and the agent get the mode in force.
+		modeCap := h.modeCap
+		if p.ModeCap != "" {
+			modeCap = p.ModeCap
+		}
+		mode := h.mode
+		if p.Mode != "" {
+			mode = p.Mode
+		}
+		if m := capped(mode, modeCap); m != mode {
+			p.Mode = m
+		}
+		// Written first: a change the log does not hold must not reach the agent either.
+		if err := h.tryAppend(event.KindSessionSettings, cmd, h.turn, event.SessionSettings{Model: p.Model,
+			Mode: p.Mode, ModeCap: p.ModeCap}); err != nil {
+			return &CommandError{Code: hostproto.CodeInvalid, Detail: err.Error()}
+		}
+		if b, err := json.Marshal(p); err == nil {
+			c.Data = b
 		}
 		h.send(c)
 	case *event.WorktreeAdd:
@@ -407,8 +507,10 @@ func (h *Host) apply(c event.Command, p any) error {
 	case *event.GateUpdate:
 		h.gate(cmd, p)
 	case *event.HostShutdown:
+		// The adapter hears the shutdown in the host's own mode: when idle it lets the turn finish, else it stops now.
 		if h.turn != "" && p.WhenIdle {
 			h.shutdownIdle = true
+			h.send(c)
 			return nil
 		}
 		if h.turn != "" {
@@ -418,6 +520,7 @@ func (h *Host) apply(c event.Command, p any) error {
 			h.interrupt(cmd)
 			h.endTurn(event.TurnEnded{Outcome: event.TurnOutcomeInterrupted}, cmd)
 		}
+		h.send(c)
 		h.requestStop()
 	default:
 		return &CommandError{Code: hostproto.CodeUnknown, Detail: string(c.Kind)}
@@ -565,7 +668,18 @@ func (h *Host) Draft(d event.EventDraft) {
 		return
 	case event.KindSessionStarted:
 		if h.started {
-			return // the host announced the session itself
+			// The host announced the session itself; the adapter's is the provider's init: the first one inside a
+			// turn is the durable proof that the provider has the session (resume from now on).
+			if h.turn != "" && !h.provider {
+				var s event.SessionStarted
+				_ = json.Unmarshal(d.Data, &s)
+				n := event.Notice{Code: NoticeProviderSession, Level: event.NoticeLevelInfo}
+				if s.ProviderSessionID != "" {
+					n.Params = map[string]string{"providerSessionId": s.ProviderSessionID}
+				}
+				h.append(event.KindNotice, "", n)
+			}
+			return
 		}
 		h.started = true
 	case event.KindTurnEnded:

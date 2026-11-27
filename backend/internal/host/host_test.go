@@ -23,7 +23,7 @@ const sid = "0193a8f2-9000-7000-8000-0000000000d1"
 
 func spec() Spec {
 	return Spec{Session: flowdproto.SessionSpec{ID: sid, Name: "demo", Provider: event.ProviderClaude,
-		Model: "claude-opus-5-5", Mode: event.PermissionModeAcceptEdits},
+		Model: "claude-opus-5-5", Mode: event.PermissionModeAcceptEdits, Replay: true},
 		Dir: "/home/flow/work/.sessions/demo",
 		Worktrees: []flowdproto.WorktreeState{{Repo: "trick77/toolkit", Branch: "flow/demo",
 			Path: "/home/flow/work/.sessions/demo/toolkit", BaseRef: "origin/master", BaseSHA: "abc"}}}

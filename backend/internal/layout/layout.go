@@ -15,7 +15,9 @@ import (
 )
 
 // AgentUser is the unprivileged account agents, hosts and terminals run as. Not 1000: that uid belongs to the
-// host's first user, and files on a shifted volume keep their raw uid on the host.
+// host's first user. The home volume is not shifted (idmapped mounts: "Required idmapping abilities not available"
+// on the lab's dir pool, measured), so Incus maps it like the root filesystems: every sandbox shares the project's
+// one idmap (never security.idmap.isolated), and the volume's files carry host uid 1000000 + 65532 (measured).
 const (
 	AgentUser = "flow"
 	AgentUID  = 65532
@@ -34,6 +36,15 @@ const (
 	Config   = "/etc/flow/flowd.json" // flowd's config and token, pushed by Flow, root 0600
 	Unit     = "/etc/systemd/system/flowd.service"
 	Settings = "/etc/flow/claude-settings.json" // the Flow settings layer for Claude Code (--settings)
+	// NodeBin runs the sidecar (Node 26 or newer); ClaudeCLI is the image's Claude Code, never updated in place.
+	NodeBin   = "/usr/bin/node"
+	ClaudeCLI = "/usr/local/bin/claude"
+	// SidecarDir is the sidecar bundle's directory inside a release, beside its flowd: package.json, dist/main.js
+	// and the production node_modules. A host finds it next to its own (resolved) executable.
+	SidecarDir = "sidecar"
+	// SidecarArchive is the bundle as Flow pushes it into a release (tar, gzip): one file through the Incus file
+	// API instead of thousands. flowd unpacks it into SidecarDir at its start, before it answers, and removes it.
+	SidecarArchive = "sidecar.tar.gz"
 	// NetworkConfig is eth0's systemd-networkd unit, written by Flow through the file API before every start
 	// (sandbox.NIC.GuestFiles): the static address Flow assigned. Named to sort before the image's own units.
 	NetworkConfig = "/etc/systemd/network/00-flow-eth0.network"
@@ -41,15 +52,30 @@ const (
 
 // Home volume, mounted at HomeVolume in every sandbox.
 const (
-	HomeVolume    = "/srv/flow-home"
-	ClaudeConfig  = HomeVolume + "/claude"       // CLAUDE_CONFIG_DIR: login, settings, transcripts
-	XDGConfig     = HomeVolume + "/config"       // XDG_CONFIG_HOME: opencode/ (gh uses GHConfigDir)
-	XDGData       = HomeVolume + "/data"         // XDG_DATA_HOME: opencode's data
-	AgentConfig   = HomeVolume + "/agent-config" // checkout of the owner's config repository
-	GoModCache    = HomeVolume + "/cache/go-mod" // GOMODCACHE
-	NPMCache      = HomeVolume + "/cache/npm"    // npm_config_cache
-	PlaywrightDir = HomeVolume + "/cache/ms-playwright"
+	HomeVolume   = "/srv/flow-home"
+	ClaudeConfig = HomeVolume + "/claude"       // CLAUDE_CONFIG_DIR: login, settings, transcripts
+	XDGConfig    = HomeVolume + "/config"       // XDG_CONFIG_HOME: opencode/ (gh uses GHConfigDir)
+	XDGData      = HomeVolume + "/data"         // XDG_DATA_HOME: opencode's data
+	AgentConfig  = HomeVolume + "/agent-config" // checkout of the owner's config repository
+	GoModCache   = HomeVolume + "/cache/go-mod" // GOMODCACHE
+	NPMCache     = HomeVolume + "/cache/npm"    // npm_config_cache
 )
+
+// HomeDirs are the agent-owned directories flowd makes on the home volume (at its start and on every environment
+// push), parents first. A new volume's root is root 0711, so the agent can make none of them itself; root must
+// never run go or npm there either, or it leaves directories in the shared caches the agent cannot write.
+// ClaudeConfig is 0700: it holds a subscription login.
+var HomeDirs = []struct {
+	Path string
+	Mode uint32
+}{
+	{ClaudeConfig, 0o700}, {XDGConfig, 0o755}, {XDGData, 0o755}, {AgentConfig, 0o755},
+	{HomeVolume + "/cache", 0o755}, {GoModCache, 0o755}, {NPMCache, 0o755},
+}
+
+// PlaywrightDir holds Playwright's browsers: in the image (owned by the agent user), not on the home volume, which
+// is not mounted when the image is built.
+const PlaywrightDir = "/opt/ms-playwright"
 
 // /run (tmpfs).
 const (
@@ -64,6 +90,10 @@ const (
 	// the owner edits them (flowd restarts opencode serve at idle then). Never ANTHROPIC_API_KEY: that one is set per
 	// session, only for sessions started in API-key mode.
 	ProviderEnv = Credentials + "/providers.env"
+	// SessionEnvDir (root 0700, so not below Credentials, which is the agent user's) holds one EnvironmentFile per
+	// session host unit (SessionEnvFile), root 0600, rewritten on every host start: the one Claude credential of the
+	// session's mode, the git identity, the MCP token. systemd reads it as root.
+	SessionEnvDir = Run + "/session-env"
 	// FlowdSocket takes local requests: git's credential helper (asked on every git operation), the MCP server, the
 	// gate shim.
 	FlowdSocket = Run + "/flowd.sock"
@@ -111,6 +141,13 @@ func EventLog(sessionID string) string { return path.Join(Logs, sessionID, "even
 // host reads it on every start, and flowd serves the log from disk with no host running.
 func SessionSpecFile(sessionID string) string { return path.Join(Logs, sessionID, "spec.json") }
 
+// SDKRecording is the file name, beside a session's log, a recording sidecar (SessionSpec.Record) appends the raw
+// SDK messages to, for contract fixtures.
+const SDKRecording = "sdk.jsonl"
+
+// SessionEnvFile is the EnvironmentFile of a session's host unit.
+func SessionEnvFile(sessionID string) string { return path.Join(SessionEnvDir, sessionID+".env") }
+
 // SessionClaim names the session id that owns a session directory: flowd never puts a second session's worktrees
 // into a directory another session id claimed, and frees the claim when it removes the worktrees.
 func SessionClaim(name string) string { return path.Join(State, "session-dirs", name) }
@@ -120,6 +157,10 @@ func HostSocket(sessionID string) string { return path.Join(Run, "sessions", ses
 
 // TerminalSocket is where a terminal unit serves its PTY.
 func TerminalSocket(id string) string { return path.Join(Run, "terminals", id+".sock") }
+
+// TerminalExitFile is where a terminal records its shell's exit status (JSON {"code":N}) before its unit ends, for a
+// client attaching after that; tmpfs, gone at reboot like the terminal itself.
+func TerminalExitFile(id string) string { return path.Join(Run, "terminals", id+".exit") }
 
 // Release is the directory of one delivered flowd version.
 func Release(version string) string { return path.Join(Releases, version) }
