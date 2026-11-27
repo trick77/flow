@@ -93,8 +93,8 @@
     "/api/connections/github/device/poll": {
       "post": {
         "tags": ["connections"], "operationId": "pollGitHubDeviceFlow", "x-flow-area": "connections",
-        "summary": "Poll GitHub device flow", "description": "Pending until the owner confirmed on GitHub.",
-        "responses": { "200": { "$ref": "#/components/responses/GitHubConnection" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "summary": "Poll GitHub device flow", "description": "Pending until the owner confirmed on GitHub. Flow asks GitHub at most at GitHub's interval; a poll in between answers pending from memory.",
+        "responses": { "200": { "$ref": "#/components/responses/GitHubConnection" }, "502": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/connections/github": {
@@ -123,9 +123,9 @@
     "/api/github/repos": {
       "get": {
         "tags": ["connections"], "operationId": "listGitHubRepos", "x-flow-area": "connections",
-        "summary": "Repositories on GitHub", "description": "Repositories the GitHub App installation can reach, for adding to a project.",
+        "summary": "Repositories on GitHub", "description": "Repositories the GitHub App installation can reach, for adding to a project: in every installation the owner can see, sorted by name, at most 1000. 409 github_not_connected without a connection.",
         "parameters": [{ "name": "query", "in": "query", "required": false, "description": "Filter by name.", "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "The repositories.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitHubRepoList" } } } }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "responses": { "200": { "description": "The repositories.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitHubRepoList" } } } }, "409": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/projects": {
@@ -538,14 +538,21 @@
           "configRepo": { "type": "string", "description": "Empty string clears it." }
         }
       },
-      "GitHubState": { "type": "string", "enum": ["disconnected", "pending", "connected", "expired"] },
+      "GitHubState": {
+        "type": "string",
+        "description": "disconnected: no connection (in a poll answer: the code was denied or Flow holds none). pending: a device code is out (in a poll answer: not confirmed yet). connected: Flow holds a renewable authorization. expired: the authorization can no longer be renewed, the owner connects again (in a poll answer: the device code expired).",
+        "enum": ["disconnected", "pending", "connected", "expired"]
+      },
       "GitHubConnection": {
-        "type": "object", "required": ["state"],
+        "type": "object", "required": ["state", "available"],
         "properties": {
           "state": { "$ref": "#/components/schemas/GitHubState" },
+          "available": { "type": "boolean", "description": "false: the server has no GitHub App configured (BACKEND_GITHUB_CLIENT_ID); state is then disconnected." },
           "login": { "type": "string" },
-          "tokenExpiresAt": { "type": "string", "format": "date-time" },
-          "refreshExpiresAt": { "type": "string", "format": "date-time" }
+          "connectedAt": { "type": "string", "format": "date-time", "description": "When the owner connected." },
+          "tokenExpiresAt": { "type": "string", "format": "date-time", "description": "When the current 8-hour user token ends; Flow renews it before." },
+          "refreshExpiresAt": { "type": "string", "format": "date-time", "description": "When the authorization ends unless renewed: the owner connects again by then." },
+          "intervalSeconds": { "type": "integer", "description": "Poll answers only: the interval in force after GitHub asked to slow down." }
         }
       },
       "ClaudeSignIn": {

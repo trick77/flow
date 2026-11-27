@@ -139,7 +139,10 @@ type ProfileUpdate struct {
 	ConfigRepo string `json:"configRepo,omitempty"`
 }
 
-// GitHubState is part of the contract.
+// GitHubState: disconnected: no connection (in a poll answer: the code was denied or Flow holds none). pending:
+// a device code is out (in a poll answer: not confirmed yet). connected: Flow holds a renewable authorization.
+// expired: the authorization can no longer be renewed, the owner connects again (in a poll answer: the device
+// code expired).
 type GitHubState string
 
 // GitHubState values.
@@ -155,10 +158,18 @@ var GitHubStateValues = []GitHubState{GitHubStateDisconnected, GitHubStatePendin
 
 // GitHubConnection is part of the contract.
 type GitHubConnection struct {
-	State            GitHubState `json:"state"`
-	Login            string      `json:"login,omitempty"`
-	TokenExpiresAt   *time.Time  `json:"tokenExpiresAt,omitempty"`
-	RefreshExpiresAt *time.Time  `json:"refreshExpiresAt,omitempty"`
+	State GitHubState `json:"state"`
+	// false: the server has no GitHub App configured (BACKEND_GITHUB_CLIENT_ID); state is then disconnected.
+	Available bool   `json:"available"`
+	Login     string `json:"login,omitempty"`
+	// When the owner connected.
+	ConnectedAt *time.Time `json:"connectedAt,omitempty"`
+	// When the current 8-hour user token ends; Flow renews it before.
+	TokenExpiresAt *time.Time `json:"tokenExpiresAt,omitempty"`
+	// When the authorization ends unless renewed: the owner connects again by then.
+	RefreshExpiresAt *time.Time `json:"refreshExpiresAt,omitempty"`
+	// Poll answers only: the interval in force after GitHub asked to slow down.
+	IntervalSeconds int `json:"intervalSeconds,omitempty"`
 }
 
 // ClaudeSignIn: Whether the home volume holds a Claude login; Flow never reads the token.

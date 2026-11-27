@@ -69,14 +69,31 @@ export interface ProfileUpdate {
   configRepo?: string;
 }
 
+/**
+ * disconnected: no connection (in a poll answer: the code was denied or Flow holds none). pending: a
+ * device code is out (in a poll answer: not confirmed yet). connected: Flow holds a renewable
+ * authorization. expired: the authorization can no longer be renewed, the owner connects again (in a
+ * poll answer: the device code expired).
+ */
 export type GitHubState = "disconnected" | "pending" | "connected" | "expired";
 export const GIT_HUB_STATE_VALUES: readonly GitHubState[] = ["disconnected", "pending", "connected", "expired"];
 
 export interface GitHubConnection {
   state: GitHubState;
+  /**
+   * false: the server has no GitHub App configured (BACKEND_GITHUB_CLIENT_ID); state is then
+   * disconnected.
+   */
+  available: boolean;
   login?: string;
+  /** When the owner connected. */
+  connectedAt?: string;
+  /** When the current 8-hour user token ends; Flow renews it before. */
   tokenExpiresAt?: string;
+  /** When the authorization ends unless renewed: the owner connects again by then. */
   refreshExpiresAt?: string;
+  /** Poll answers only: the interval in force after GitHub asked to slow down. */
+  intervalSeconds?: number;
 }
 
 /** Whether the home volume holds a Claude login; Flow never reads the token. */
