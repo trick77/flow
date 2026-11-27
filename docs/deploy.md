@@ -153,6 +153,32 @@ Open `https://<BACKEND_PUBLIC_FQDN>/` and sign in. Without a known subject: set 
 `sign-in refused: not the configured owner` (`docker compose logs flow`), put it into
 `BACKEND_OIDC_ALLOWED_SUBJECT` and `docker compose up -d` again.
 
+## GitHub App
+
+Private repositories, pushes and `gh` go through a GitHub App the owner registers once; agents then act as the
+owner (commits and pull requests are the owner's). Without it only public repositories work. Register at
+github.com → Settings → Developer settings → GitHub Apps → New GitHub App:
+
+| Field | Value |
+|---|---|
+| GitHub App name | anything free, e.g. `flow-<your login>` |
+| Homepage URL | `https://<BACKEND_PUBLIC_FQDN>` |
+| Callback URL | empty; "Request user authorization (OAuth) during installation" off |
+| Expire user authorization tokens | on (8-hour tokens, Flow renews them) |
+| Enable Device Flow | on |
+| Webhook | "Active" off, no URL |
+| Repository permissions | Contents: read and write (clone, push branches); Pull requests: read and write (open and update pull requests); Workflows: read and write (edit `.github/workflows/`); Actions: read-only (read runs and logs); Metadata: read-only (implied). Nothing else, no Administration |
+| Organization and account permissions | none |
+| Where can this GitHub App be installed? | Only on this account |
+
+Then on the App's page: Install App → your account → "Only select repositories", pick the repositories Flow may
+reach (more can be added later; listGitHubRepos and new projects see them at once). Generate neither a client
+secret nor a private key: Flow needs neither. Put the App's Client ID (`Iv23…`, not the numeric App ID) into
+`.env` as `BACKEND_GITHUB_CLIENT_ID` and `docker compose up -d`; then Settings → GitHub → Connect in Flow, enter
+the code on github.com/login/device. The authorization lasts six months from the last renewal; Flow renews it
+every 8 hours while it runs. Disconnecting in Flow forgets the tokens; to revoke the authorization on GitHub too:
+Settings → Applications → Authorized GitHub Apps.
+
 ## Update
 
 ```sh
