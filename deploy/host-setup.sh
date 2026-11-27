@@ -29,6 +29,11 @@
 #      on $INCUS_LISTEN (default: $BRIDGE's gateway, which Flow's container reaches and sandboxes do not). The
 #      project's default profile gets its root disk on that pool; a root disk on another pool is refused, never
 #      re-pointed.
+#      The pool is a loop file of $POOL_SIZE, or with POOL_PATH an existing btrfs filesystem the owner made and
+#      mounted himself (docs/deploy.md, "Sizing a dedicated host"), handed to Incus by path (`source=<path>`, as
+#      Incus' storage pool how-to documents it). This setup never formats, wipes or mounts anything. Refused unless
+#      the path exists, is a directory on btrfs, is not on a non-btrfs root filesystem, and is empty (or holds what
+#      an earlier run with this manifest started); a pool made on another path is refused, never moved.
 #   5. systemd drop-in: incus.service starts after Docker has made $BRIDGE (else autostart fails three times and
 #      leaves the sandboxes stopped; measured), waiting at most 120 s. The unit flow-incus-listen.service (bound to
 #      docker.service like the rule's unit, after incus.service) makes Incus listen on $INCUS_LISTEN once the
@@ -65,8 +70,8 @@
 # Settings (environment): BACKEND_SANDBOX_BRIDGE, _SUBNET, _RANGE, _GATEWAY, BACKEND_INCUS_POOL
 # and BACKEND_INCUS_PROJECT as Flow reads them (PROJECT overrides the latter); DOCKER_NETWORK, DOCKER_RANGE,
 # BAN_CHAIN (empty: none), BAN_REQUIRE, BAN_WAIT, INCUS_LISTEN, CONTAINER_ADDRESS, INCUS_DIR, CERT_DIR, CERT_OWNER,
-# POOL_DRIVER (btrfs, or dir where loop devices are refused), POOL_SIZE, STATE_DIR, OTHER_CHURN. Defaults in
-# host-lib.sh.
+# POOL_DRIVER (btrfs, or dir where loop devices are refused), POOL_SIZE, POOL_PATH, STATE_DIR, OTHER_CHURN.
+# Defaults in host-lib.sh.
 set -eu
 
 SCRIPT=host-setup
@@ -122,6 +127,78 @@ else
 		apt_candidate "$pkg" ||
 			die "package $pkg cannot be installed (no candidate in apt's lists): run apt-get update, or install Incus (no managed network) first"
 	done
+fi
+
+# The pool on the owner's btrfs filesystem (POOL_PATH), checked before anything changes, in a dry run too. Nothing
+# here or later formats, wipes or mounts: the filesystem and its mount are the owner's.
+pool_path_check() {
+	[ "$POOL_DRIVER" = btrfs ] || die "POOL_PATH needs POOL_DRIVER=btrfs"
+	command -v findmnt >/dev/null 2>&1 || die "findmnt not found (POOL_PATH needs it)"
+	# One spelling for the manifest and Incus' source.
+	[ "$POOL_PATH" = / ] || POOL_PATH="${POOL_PATH%/}"
+	case "$POOL_PATH" in
+	/*) ;;
+	*) die "POOL_PATH must be an absolute path: $POOL_PATH" ;;
+	esac
+	rec="$(pool_path_line "$POOL")"
+	[ -z "$rec" ] || [ "$rec" = "$POOL_PATH" ] ||
+		die "the setup made pool $POOL on $rec (manifest $MANIFEST), POOL_PATH says $POOL_PATH: a pool is never moved"
+	[ -e "$POOL_PATH" ] || die "POOL_PATH $POOL_PATH does not exist (create and mount the btrfs filesystem first: docs/deploy.md, 'Sizing a dedicated host')"
+	[ -d "$POOL_PATH" ] || die "POOL_PATH $POOL_PATH is not a directory"
+	fstype="$(stat -f -c %T "$POOL_PATH")"
+	[ "$fstype" = btrfs ] ||
+		die "POOL_PATH $POOL_PATH is on $fstype, not btrfs (nothing mounted there? a device missing at boot: docs/deploy.md, 'Sizing a dedicated host')"
+	# The filesystem the path lies on: not the root filesystem, unless that is btrfs itself.
+	fs_root="$(findmnt -nro TARGET -T "$POOL_PATH")"
+	if [ "$fs_root" = / ] && [ "$(findmnt -nro FSTYPE --mountpoint /)" != btrfs ]; then
+		die "POOL_PATH $POOL_PATH lies on the root filesystem, which is not btrfs"
+	fi
+	if command -v incus >/dev/null 2>&1 && incus storage show "$POOL" </dev/null >/dev/null 2>&1; then
+		src="$(incus storage get "$POOL" source </dev/null)"
+		[ "$(incus storage show "$POOL" </dev/null | awk '$1 == "driver:" { print $2 }')" = btrfs ] && [ "$src" = "$POOL_PATH" ] ||
+			die "pool $POOL exists elsewhere (source '$src'), not on POOL_PATH $POOL_PATH: choose another BACKEND_INCUS_POOL, or leave POOL_PATH unset for this pool"
+		log "pool $POOL is on $POOL_PATH (btrfs, mounted at $fs_root): nothing to create"
+		return 0
+	fi
+	# Empty, or what an earlier run with this manifest started there (Incus' own directories, a create cut short).
+	if [ -n "$(find "$POOL_PATH" -mindepth 1 -maxdepth 1 -print -quit)" ] && [ "$rec" != "$POOL_PATH" ]; then
+		die "POOL_PATH $POOL_PATH is not empty: $(find "$POOL_PATH" -mindepth 1 -maxdepth 1 | head -n 5 | tr '\n' ' ')"
+	fi
+	log "pool $POOL: on the btrfs filesystem at $POOL_PATH (mounted at $fs_root); nothing is formatted or mounted"
+}
+# size_bytes SIZE prints an Incus size (40GiB, 300GB, 512MiB, a plain byte count) in bytes; status 1 for another
+# spelling.
+size_bytes() {
+	printf '%s\n' "$1" | awk '
+		match($0, /^[0-9]+(\.[0-9]+)?/) {
+			n = substr($0, 1, RLENGTH); u = substr($0, RLENGTH + 1)
+			m["B"] = 1; m[""] = 1
+			m["kB"] = 1e3; m["KB"] = 1e3; m["MB"] = 1e6; m["GB"] = 1e9; m["TB"] = 1e12
+			m["KiB"] = 2^10; m["MiB"] = 2^20; m["GiB"] = 2^30; m["TiB"] = 2^40
+			if (u in m) { printf "%.0f\n", n * m[u]; ok = 1 }
+		}
+		END { exit !ok }'
+}
+# loop_space_check: the loop file Incus makes for the pool ($INCUS_DIR/disks/<pool>.img) is sparse, so it takes
+# its space only as sandboxes write; a POOL_SIZE larger than the free space of the filesystem it lands on would let
+# the pool outgrow it later (sandboxes failing on a full root filesystem, the host with them). Refused before
+# anything changes, in a dry run too.
+loop_space_check() {
+	want="$(size_bytes "$POOL_SIZE")" || die "POOL_SIZE $POOL_SIZE is not a size Incus reads (e.g. 300GiB)"
+	dir="$INCUS_DIR/disks"
+	while [ ! -d "$dir" ]; do dir="$(dirname "$dir")"; done
+	free="$(df -Pk "$dir" | awk 'NR == 2 { printf "%.0f\n", $4 * 1024 }')"
+	[ -n "$free" ] || die "cannot read the free space of $dir"
+	awk -v w="$want" -v f="$free" 'BEGIN { exit !(w <= f) }' ||
+		die "POOL_SIZE $POOL_SIZE is more than the $((free / 1073741824)) GiB free on the filesystem of $dir, where the pool's loop file goes: a smaller POOL_SIZE, or POOL_PATH (docs/deploy.md, 'Sizing a dedicated host')"
+	log "pool $POOL: a sparse loop file of $POOL_SIZE under $INCUS_DIR/disks ($((free / 1073741824)) GiB free there now)"
+}
+if [ -n "$POOL_PATH" ]; then
+	pool_path_check
+elif [ -n "$(pool_path_line "$POOL")" ]; then
+	die "the setup made pool $POOL on $(pool_path_line "$POOL") (manifest $MANIFEST): run with POOL_PATH=$(pool_path_line "$POOL")"
+elif [ "$POOL_DRIVER" = btrfs ] && ! { command -v incus >/dev/null 2>&1 && incus storage show "$POOL" </dev/null >/dev/null 2>&1; }; then
+	loop_space_check
 fi
 
 # The Docker network: either ours with exactly these settings, or absent with its subnet free.
@@ -195,17 +272,20 @@ if [ "$net_new" = 1 ]; then
 		-o com.docker.network.bridge.name="$BRIDGE" "$DOCKER_NETWORK"
 fi
 
-# 2. firewalld policies, permanent (survive reloads, restarts and Docker restarts; measured). Each is recorded
-# before it is made and completed piece by piece, so an interrupted run leaves nothing the next run or the
-# teardown does not know: flow-sb-host (range -> host; IPv6 from zone docker), flow-sb-docker (range -> other
-# Docker bridges), flow-sb-lan (range -> private, link-local and shared networks behind the host, which the host
-# would forward; the internet stays reachable), flow-sb-incus (any container but Flow's -> the Incus API).
+# 2. firewalld policies, permanent (survive reloads, restarts and Docker restarts; measured). Each one this run
+# makes is recorded before it is made (one found is completed, not recorded) and completed piece by piece, so an
+# interrupted run leaves nothing the next run or the teardown does not know: flow-sb-host (range -> host; IPv6
+# from zone docker), flow-sb-docker (range -> other Docker bridges), flow-sb-lan (range -> private, link-local and
+# shared networks behind the host, which the host would forward; the internet stays reachable), flow-sb-incus (any container but Flow's -> the Incus API).
 reload=0
 policy() {
 	name="$1"
 	egress="$(policy_egress "$name")"
-	record "policy $name"
+	# Recorded only when this run makes it (before it does), as the network and the project: a policy found that
+	# this state directory never recorded was made by another setup (another STATE_DIR), and the teardown with this
+	# manifest must leave it. One recorded by an earlier run here stays ours.
 	if ! policy_exists "$name"; then
+		record "policy $name"
 		log "creating firewalld policy $name (zone docker -> $egress)"
 		run firewall-cmd -q --permanent --new-policy="$name"
 		reload=1
@@ -218,6 +298,8 @@ policy() {
 			done
 			return 0
 		fi
+	elif ! recorded "policy $name"; then
+		log "firewalld policy $name exists, not made by a setup with $STATE_DIR: completed if needed, not recorded (the teardown leaves it)"
 	fi
 	if [ "$(firewall-cmd --permanent --policy="$name" --get-priority)" != -10 ]; then
 		run firewall-cmd -q --permanent --policy="$name" --set-priority=-10
@@ -314,7 +396,12 @@ else
 	record "uses pool $POOL"
 	if ! incus storage show "$POOL" </dev/null >/dev/null 2>&1; then
 		record "pool $POOL"
-		if [ "$POOL_DRIVER" = btrfs ]; then
+		if [ -n "$POOL_PATH" ]; then
+			# The owner's btrfs filesystem by path (checked above): recorded first, so a re-run after an interrupted
+			# create takes what Incus started there as its own; every later run needs the same path.
+			record "pool-path $POOL $POOL_PATH"
+			run incus storage create "$POOL" btrfs source="$POOL_PATH" </dev/null
+		elif [ "$POOL_DRIVER" = btrfs ]; then
 			run incus storage create "$POOL" btrfs size="$POOL_SIZE" </dev/null
 		else
 			run incus storage create "$POOL" dir </dev/null

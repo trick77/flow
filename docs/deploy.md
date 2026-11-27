@@ -13,6 +13,74 @@ as root on the host, from a checkout of this repository.
 - An OIDC provider reachable from inside Flow's container at its issuer URL.
 - A DNS name for Flow (`BACKEND_PUBLIC_FQDN`, e.g. `flow.example.com`) pointing at Traefik.
 
+## Sizing a dedicated host
+
+For a host that runs Flow and nothing else, e.g. 4 cores / 8 threads, 32 GB RAM, two NVMe drives of about 450 GB.
+The host scripts never format, wipe or mount a disk: the layout is the installer's and the owner's.
+
+**One root filesystem (the usual layout).** Installer partitioning: `/` ext4 on a software RAID 1 (md) across both
+drives, about 418 GB, nothing else to spare. The sandboxes' storage pool is then Incus' default, a btrfs pool in a
+loop file under `/var/lib/incus/disks/` on `/`, sized with `POOL_SIZE`:
+
+```sh
+POOL_SIZE=300GiB sh deploy/host-setup.sh --dry-run
+POOL_SIZE=300GiB sh deploy/host-setup.sh
+```
+
+300 GiB (about 322 GB) on a 418 GB root leaves room for the system, Docker's images and Flow's data. The file is
+sparse: it takes space only as sandboxes write, and the md RAID below mirrors it like everything else on `/`. The
+setup refuses, also in the dry run, a `POOL_SIZE` larger than the free space where the file goes (a pool allowed
+to outgrow its filesystem would fill `/`). The size is fixed at creation; a later run with another `POOL_SIZE`
+changes nothing.
+
+**A partition of its own (the alternative).** On a host with spare partitions the pool can live on a btrfs
+filesystem the owner makes and mounts himself, named with `POOL_PATH` (its mount point, or an empty directory on
+it). For a mirror across two partitions, e.g.:
+
+```sh
+mkfs.btrfs -L flow-pool -d raid1 -m raid1 /dev/nvme0n1p3 /dev/nvme1n1p3
+mkdir -p /srv/flow-pool
+# /etc/fstab, by the filesystem's UUID (blkid -s UUID -o value /dev/nvme0n1p3):
+UUID=<uuid>  /srv/flow-pool  btrfs  user_subvol_rm_allowed,nofail  0  0
+```
+
+`user_subvol_rm_allowed` is what Incus mounts its own btrfs pools with (`btrfs.mount_options`, default
+`user_subvol_rm_allowed`: [Incus btrfs driver](https://linuxcontainers.org/incus/docs/main/reference/storage_btrfs/)):
+it lets unprivileged containers delete the subvolumes they create. For a filesystem given by path Incus mounts
+nothing, so the fstab line has to carry it. Then `mount /srv/flow-pool` and
+`POOL_PATH=/srv/flow-pool sh deploy/host-setup.sh`, which runs `incus storage create <pool> btrfs
+source=/srv/flow-pool` (the existing-filesystem example of Incus' storage pool how-to). It refuses, before any
+change, a path that does not exist, is no directory, is not on btrfs, lies on a root filesystem that is not btrfs,
+or is not empty; a re-run with the same path changes nothing, another path is refused. The teardown deletes only
+the pool (refused while sandboxes use it); the filesystem, its mount and the fstab line stay.
+
+A drive missing at boot: btrfs RAID 1 does not mount degraded unless told, so the mount fails; `nofail` lets the boot
+go on, and the pool is unavailable with its sandboxes stopped. Recovery, by hand (`btrfs filesystem show` lists the
+missing devid):
+
+```sh
+mount -o degraded,user_subvol_rm_allowed /dev/nvme0n1p3 /srv/flow-pool
+btrfs replace start <missing devid> /dev/nvme1n1p3 /srv/flow-pool
+btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft /srv/flow-pool
+```
+
+The balance converts what was written as single copies while degraded. Nothing mounts degraded automatically: a
+silently degraded pool would lose data with the next drive. Not measured: how Incus behaves while the path is an
+empty directory on `/` (the mount failed); the setup refuses to run then (not btrfs).
+
+Settings in `.env` for this host:
+
+| Setting | Value |
+|---|---|
+| `BACKEND_SANDBOX_MEMORY_TOTAL_MIB` | `26624` (26 GiB; 6 GiB stay for the host, Docker and Flow) |
+| `BACKEND_SANDBOX_MEMORY_MIB` | `6144` |
+| `BACKEND_SANDBOX_MEMORY_HEADROOM_MIB` | default (one sandbox's limit) |
+| `BACKEND_SANDBOX_CPUS` | `4` |
+
+Measured: an idle sandbox with one session uses about 0.25 GiB and a full project check peaks near 4 GiB, so the
+memory budget holds many idle sandboxes and several builds; the four cores, not memory, limit parallel builds to
+two or three.
+
 ## 1. Host setup
 
 ```sh
@@ -26,8 +94,8 @@ the sandbox network's gateway (`172.30.0.1:8443`, `INCUS_LISTEN`) and Flow's res
 static address on the sandbox network (`CONTAINER_ADDRESS`, default `172.30.1.2`, set in `compose.yaml`), reaches
 the API; every other container is refused (firewalld policy `flow-sb-incus`). Settings changed here
 (`BACKEND_SANDBOX_*`, `BACKEND_INCUS_POOL`, `BACKEND_INCUS_PROJECT`, `INCUS_LISTEN`, `CONTAINER_ADDRESS`,
-`CERT_DIR`, `DOCKER_NETWORK`) must reach `.env` too (step 3). A host set up before the listen address moved to the
-gateway: run it again, then `.env`'s `BACKEND_INCUS_URL` is `https://<INCUS_LISTEN>`, and `docker compose up -d`
+`CERT_DIR`, `DOCKER_NETWORK`) must reach `.env` too (step 3). The pool's size and place: `POOL_SIZE`, `POOL_PATH`
+("Sizing a dedicated host"). A host set up before the listen address moved to the gateway: run it again, then `.env`'s `BACKEND_INCUS_URL` is `https://<INCUS_LISTEN>`, and `docker compose up -d`
 makes a running Flow container again with its static address (until then the firewall refuses its Incus calls).
 
 ## 2. Sandbox base image

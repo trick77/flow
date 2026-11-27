@@ -18,7 +18,11 @@
 # it first), and when the project or pool settings differ from those the manifest records. Sandboxes and volumes
 # are looked for on every pool the setups made or used. Left in place on purpose: anything the manifest does not
 # list (an Incus that was there before, its pool, a project it did not make; the root device the setup added to
-# that project's default profile goes), firewalld's own *.xml.old backups other than those of Flow's policies.
+# that project's default profile goes), a Flow policy another setup made (another STATE_DIR; the setup records
+# only those it creates, though manifests written before that record every policy), firewalld's own *.xml.old
+# backups other than those of Flow's policies.
+# A pool on the owner's btrfs filesystem (POOL_PATH): Incus deletes the pool (refused while anything is on it); the
+# filesystem, its mount and its fstab line stay as the owner made them. Nothing here formats, wipes or unmounts.
 set -eu
 
 SCRIPT=host-teardown
@@ -197,6 +201,11 @@ if [ "$has_incus" = 1 ]; then
 		run env DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq incus-base incus-client
 	fi
 fi
+# The pools on the owner's btrfs filesystem (POOL_PATH): only Incus' pool went above; the filesystem stays.
+sed -n 's/^pool-path //p' "$MANIFEST" | while IFS=' ' read -r pool path; do
+	log "left as the owner made it: the btrfs filesystem at $path (pool $pool), its mount and fstab line"
+done
+
 # Every certificate directory a setup made (CERT_DIR may have changed between runs).
 sed -n 's/^cert //p' "$MANIFEST" | while IFS= read -r dir; do
 	if [ -d "$dir" ]; then
