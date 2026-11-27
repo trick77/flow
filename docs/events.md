@@ -52,6 +52,12 @@ Flow's provider-neutral contract between agent adapters, flowd, Flow and the UI.
   and `inputTruncated` is set.
 - The UI renders `provider.passthrough` as a plain generic row (name, collapsible raw content) and an unknown tool
   as a tool row with its name, input and result. Proper rendering follows when the kind is mapped.
+- Exceptions, decided by name in the UI's fold (the events stay in the log and the metering): Claude's
+  `command_lifecycle`, `rate_limit_event` (a passing check; refusals and warnings are notices) and the user message
+  that is only the interrupt marker (`[Request interrupted by user…]`) get no row; `system/thinking_tokens` becomes
+  one "Thinking" indicator with its `estimated_tokens` while it is the running turn's latest activity. Seen as rows
+  in a real session they were noise, one per message. Every other name, any `user` message with more content and a
+  truncated `raw` keep the generic row.
 - Every pass-through is counted in Flow's metering ledger (`internal/metering`, counter `passthrough`, class = name),
   so a new provider capability shows up in the numbers before anyone maps it.
 
@@ -139,7 +145,7 @@ Sources: [typescript](https://code.claude.com/docs/en/agent-sdk/typescript),
 | `canUseTool(toolName, input, {toolUseID, requestId, suggestions})` | `permission.requested` (`canAlwaysAllow` = suggestions present) |
 | `canUseTool("AskUserQuestion", {questions})` | `question.asked`; reply = allow with `updatedInput.answers` keyed by question text |
 | `canUseTool("ExitPlanMode", {plan?})` | `plan.proposed` (**provisional**: approval path not documented; allow = approve, deny + message = keep planning) |
-| `permission.reply` allow_once / allow_always / deny | `{behavior:"allow"}` / allow + `updatedPermissions` = suggestions / `{behavior:"deny", message}` |
+| `permission.reply` allow_once / allow_always / deny | `{behavior:"allow"}` / allow + `updatedPermissions` = suggestions with `destination: "session"` (the UI's "Allow for this session"; the SDK's own destination, often `localSettings`, would write a settings file into the worktree) / `{behavior:"deny", message}` |
 | `result` `success` | `turn.ended {completed}` with `usage`, `duration_ms`, `costUsd` = this turn's share of the cumulative `total_cost_usd`; `model` from `modelUsage` (largest `costUSD` growth), `provider` claude |
 | `assistant` content `tool_use` of a tool not in the list above | `tool.started` kind `other`, `name` and `input` as given |
 | `user` message `tool_use_result` (structured result) | `tool.finished.rawResult` |
