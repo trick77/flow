@@ -8,7 +8,7 @@ import (
 	"github.com/trick77/flow/internal/httpapi"
 )
 
-// API implements httpapi.Sessions: list, create, get (the rest answer not_implemented).
+// API implements httpapi.Sessions: list, create, get, archive (the rest answer not_implemented).
 type API struct {
 	httpapi.NotImplemented
 	Service *Service
@@ -65,4 +65,13 @@ func (a *API) CreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	a.Service.Publish(r.Context(), out.Summary.ID)
 	httpapi.WriteJSON(w, http.StatusCreated, out)
+}
+
+// ArchiveSession implements httpapi.Sessions.
+func (a *API) ArchiveSession(w http.ResponseWriter, r *http.Request) {
+	if err := a.Service.Archive(r.Context(), r.PathValue("sessionId")); err != nil {
+		httpapi.WriteError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

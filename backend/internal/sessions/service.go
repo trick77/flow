@@ -21,6 +21,7 @@ import (
 	"github.com/trick77/flow/internal/layout"
 	"github.com/trick77/flow/internal/metering"
 	"github.com/trick77/flow/internal/projects"
+	"github.com/trick77/flow/internal/sandboxes"
 	"github.com/trick77/flow/internal/store"
 )
 
@@ -28,7 +29,8 @@ import (
 type Sandboxes interface {
 	// Ensure brings the project's sandbox to warm and returns its flowd.
 	Ensure(ctx context.Context, projectID string) (flowdproto.API, error)
-	// Warm returns the flowd of a sandbox that is warm by Flow's records, never starting one.
+	// Warm returns the flowd of a sandbox that is warm by Flow's records, never starting one: sandboxes.ErrNotWarm
+	// (or sandboxes.ErrNotFound, no sandbox yet) when it does not run.
 	Warm(ctx context.Context, projectID string) (flowdproto.API, error)
 	// Forget drops a cached connection after it failed.
 	Forget(projectID string)
@@ -54,10 +56,40 @@ type Service struct {
 	Retry time.Duration
 	// Meter, when set, takes every event the follower reads (internal/metering).
 	Meter Meter
+	// Limits bound every session host unit (BACKEND_SESSION_*), sent with each spec.
+	Limits flowdproto.Limits
+	// Replay has every host start play the recorded demo turn instead of the agent (BACKEND_SESSION_REPLAY):
+	// read at each host start, so a session that ran replayed turns runs its agent once the setting is off.
+	Replay bool
+	// CloseTerminals closes a session's terminals in its sandbox (the terminals area's ids) when the session is
+	// stopped or archived: a shell left running would keep the session's credential. nil closes none.
+	CloseTerminals func(ctx context.Context, api flowdproto.API, sessionID string) error
 
 	mu      sync.Mutex
 	base    context.Context
-	follows map[string]bool
+	follows map[string]*follower
+	locks   map[string]*sync.Mutex
+}
+
+// follower is one session's running follow; cancel ends it (Archive).
+type follower struct{ cancel context.CancelFunc }
+
+// Lock serializes, per session, whatever starts something of the session in its sandbox (Host, the creation of its
+// terminal) with Archive: a start that read the row before an archive would otherwise recreate the host, worktrees
+// or shell after it. Held across a sandbox bring-up. Returns the unlock.
+func (s *Service) Lock(id string) func() {
+	s.mu.Lock()
+	if s.locks == nil {
+		s.locks = map[string]*sync.Mutex{}
+	}
+	l, ok := s.locks[id]
+	if !ok {
+		l = &sync.Mutex{}
+		s.locks[id] = l
+	}
+	s.mu.Unlock()
+	l.Lock()
+	return l.Unlock
 }
 
 // Start follows every session that is not archived, until ctx ends.
@@ -194,7 +226,7 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	undo := func(err error) (apitypes.Session, error) {
 		ctx := context.WithoutCancel(ctx)
 		if api, werr := s.Sandboxes.Warm(ctx, se.ProjectID); werr == nil {
-			if serr := api.StopSession(ctx, se.ID, true); serr != nil && !errors.Is(serr, flowdproto.ErrNotFound) {
+			if serr := s.stop(ctx, api, se.ID, true); serr != nil {
 				s.Log.Warn("removing a failed session in its sandbox", "session", se.ID, "err", serr)
 			}
 		}
@@ -247,7 +279,7 @@ func (s *Service) Spec(ctx context.Context, se Session) (flowdproto.SessionSpec,
 	spec := flowdproto.SessionSpec{ID: se.ID, Name: se.Name, Provider: event.Provider(se.Provider),
 		ClaudeAuth: event.ClaudeAuth(se.ClaudeAuth), Model: se.Model, Mode: event.PermissionMode(se.Mode),
 		ModeCap: event.PermissionMode(se.ModeCap), ProviderSessionID: se.ProviderSessionID,
-		Worktrees: []flowdproto.WorktreeSpec{}}
+		Worktrees: []flowdproto.WorktreeSpec{}, Limits: s.Limits, Replay: s.Replay}
 	if se.ParentID != nil {
 		spec.ParentID = *se.ParentID
 	}
@@ -261,8 +293,10 @@ func (s *Service) Spec(ctx context.Context, se Session) (flowdproto.SessionSpec,
 	return spec, nil
 }
 
-// Host makes sure the session's sandbox is warm and its host runs, and returns the sandbox's flowd.
+// Host makes sure the session's sandbox is warm and its host runs, and returns the sandbox's flowd. Under the
+// session's Lock: an Archive waits for it, or it finds the session archived.
 func (s *Service) Host(ctx context.Context, id string) (flowdproto.API, error) {
+	defer s.Lock(id)()
 	se, err := s.Store.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -284,11 +318,83 @@ func (s *Service) Host(ctx context.Context, id string) (flowdproto.API, error) {
 			s.Sandboxes.Forget(se.ProjectID) // a sandbox that stopped or restarted behind Flow's back
 			continue
 		}
+		if errors.Is(err, flowdproto.ErrNotImplemented) {
+			return nil, apitypes.Fail(apitypes.ErrorCodeNotImplemented, err.Error())
+		}
 		if err != nil {
 			return nil, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
 		}
 		s.recordWorktrees(ctx, se.ID, st.Worktrees)
 		return api, nil
+	}
+}
+
+// stop closes the session's terminals and stops its host (remove: also its worktrees and directory claim). A
+// session flowd does not know has nothing to stop. The host is stopped even when closing a terminal failed: both
+// failures are returned.
+func (s *Service) stop(ctx context.Context, api flowdproto.API, id string, remove bool) error {
+	var errs []error
+	if s.CloseTerminals != nil {
+		if err := s.CloseTerminals(ctx, api, id); err != nil && !errors.Is(err, flowdproto.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("closing the terminal: %w", err))
+		}
+	}
+	if err := api.StopSession(ctx, id, remove); err != nil && !errors.Is(err, flowdproto.ErrNotFound) {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// Archive closes a session's terminals, stops its host and removes its worktrees (branches with commits of their own
+// stay), then marks it archived and ends its follower; its log stays readable. A stopped sandbox is not started for
+// it: nothing of the session runs there, so the session is marked archived with its cleanup pending, which the
+// sandbox's next bring-up does (Sweep). Archiving an archived session again changes nothing.
+func (s *Service) Archive(ctx context.Context, id string) error {
+	defer s.Lock(id)()
+	se, err := s.Store.Get(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return apitypes.Fail(apitypes.ErrorCodeNotFound, "")
+	}
+	if err != nil || se.ArchivedAt != nil {
+		return err
+	}
+	api, err := s.Sandboxes.Warm(ctx, se.ProjectID)
+	// Only these prove nothing runs; any other failure may leave a host with the session's credential running.
+	pending := errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound)
+	if err != nil && !pending {
+		return err
+	}
+	if !pending {
+		if err := s.stop(ctx, api, id, true); err != nil {
+			return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+		}
+	}
+	if err := s.Store.Archive(ctx, id, pending); err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	s.unfollow(id)
+	s.Publish(ctx, id)
+	return nil
+}
+
+// Sweep finishes the archives made while the project's sandbox was stopped (terminals, host, worktrees), now that
+// api reaches its flowd: called after every bring-up. A failure is logged and stays pending for the next one.
+func (s *Service) Sweep(ctx context.Context, projectID string, api flowdproto.API) {
+	list, err := s.Store.List(ctx, ListFilter{ProjectID: projectID, Archived: true, CleanupPending: true})
+	if err != nil {
+		s.Log.Warn("archived sessions to clean up", "project", projectID, "err", err)
+		return
+	}
+	for _, se := range list {
+		if err := s.stop(ctx, api, se.ID, true); err != nil {
+			s.Log.Warn("cleaning up an archived session", "session", se.ID, "err", err)
+			continue
+		}
+		if err := s.Store.CleanedUp(ctx, se.ID); err != nil {
+			s.Log.Warn("cleaning up an archived session", "session", se.ID, "err", err)
+			continue
+		}
+		s.Log.Info("archived session cleaned up", "session", se.ID)
 	}
 }
 
@@ -385,17 +491,29 @@ func (s *Service) Describe(ctx context.Context, se Session) (apitypes.Session, e
 func (s *Service) Follow(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.base == nil || s.follows[id] {
+	if s.base == nil || s.follows[id] != nil {
 		return
 	}
 	if s.follows == nil {
-		s.follows = map[string]bool{}
+		s.follows = map[string]*follower{}
 	}
-	s.follows[id] = true
-	go s.follow(s.base, id)
+	ctx, cancel := context.WithCancel(s.base)
+	f := &follower{cancel: cancel}
+	s.follows[id] = f
+	go s.follow(ctx, id, f)
 }
 
-func (s *Service) follow(ctx context.Context, id string) {
+// unfollow ends a session's follower, also one blocked in a stream (flowd keeps following an archived session's
+// log); it runs its own cleanup as it ends.
+func (s *Service) unfollow(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f := s.follows[id]; f != nil {
+		f.cancel()
+	}
+}
+
+func (s *Service) follow(ctx context.Context, id string, f *follower) {
 	retry := s.Retry
 	if retry == 0 {
 		retry = 2 * time.Second
@@ -403,11 +521,14 @@ func (s *Service) follow(ctx context.Context, id string) {
 	// Ending frees the place, so a later Follow (a session created again under its id cannot be, but an unarchived
 	// one could) starts a new follower.
 	defer func() {
+		f.cancel()
 		if s.Meter != nil {
 			s.Meter.Forget(id)
 		}
 		s.mu.Lock()
-		delete(s.follows, id)
+		if s.follows[id] == f {
+			delete(s.follows, id)
+		}
 		s.mu.Unlock()
 	}()
 	for ctx.Err() == nil {
@@ -481,13 +602,18 @@ func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session) {
 	}
 }
 
-// Publish sends a session's current summary on the app event stream.
+// Publish sends a session's current summary on the app event stream; an archived session's is session.removed
+// (the sidebar drops it), also when a mirror still in flight publishes after the archive.
 func (s *Service) Publish(ctx context.Context, id string) {
 	if s.Hub == nil {
 		return
 	}
 	se, err := s.Store.Get(ctx, id)
 	if err != nil {
+		return
+	}
+	if se.ArchivedAt != nil {
+		s.Hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSessionRemoved, SessionID: id})
 		return
 	}
 	sum, err := s.Summary(ctx, se)

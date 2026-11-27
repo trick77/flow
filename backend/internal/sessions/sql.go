@@ -18,7 +18,7 @@ var _ Store = SQL{}
 
 const cols = `id, project_id, parent_id, name, title, title_source, provider, claude_auth, provider_session_id, model,
 	mode, mode_cap, branch, status, status_at, unseen, seen_seq, last_seq, turn_started_at, last_activity_at,
-	archived_at, created_at, updated_at`
+	archived_at, cleanup_pending, created_at, updated_at`
 
 func scan(sc interface{ Scan(...any) error }) (Session, error) {
 	var s Session
@@ -26,7 +26,7 @@ func scan(sc interface{ Scan(...any) error }) (Session, error) {
 	var statusAt, activity, created, updated string
 	err := sc.Scan(&s.ID, &s.ProjectID, &parent, &s.Name, &s.Title, &s.TitleSource, &s.Provider, &s.ClaudeAuth,
 		&s.ProviderSessionID, &s.Model, &s.Mode, &s.ModeCap, &s.Branch, &s.Status, &statusAt, &s.Unseen, &s.SeenSeq,
-		&s.LastSeq, &turn, &activity, &archived, &created, &updated)
+		&s.LastSeq, &turn, &activity, &archived, &s.CleanupPending, &created, &updated)
 	if parent.Valid {
 		s.ParentID = &parent.String
 	}
@@ -54,6 +54,9 @@ func (s SQL) List(ctx context.Context, f ListFilter) ([]Session, error) {
 	}
 	if f.ProjectID != "" {
 		where, args = append(where, "project_id = ?"), append(args, f.ProjectID)
+	}
+	if f.CleanupPending {
+		where = append(where, "cleanup_pending = 1")
 	}
 	if f.ParentID != "" {
 		where, args = append(where, "parent_id = ?"), append(args, f.ParentID)
@@ -163,9 +166,15 @@ func (s SQL) MarkSeen(ctx context.Context, id string, seq int64) error {
 }
 
 // Archive implements Store.
-func (s SQL) Archive(ctx context.Context, id string) error {
-	res, err := s.DB.ExecContext(ctx, `UPDATE sessions SET archived_at = ? WHERE id = ? AND archived_at IS NULL`,
-		store.Format(time.Now()), id)
+func (s SQL) Archive(ctx context.Context, id string, cleanupPending bool) error {
+	res, err := s.DB.ExecContext(ctx, `UPDATE sessions SET archived_at = ?, cleanup_pending = ? WHERE id = ?
+		AND archived_at IS NULL`, store.Format(time.Now()), cleanupPending, id)
+	return affected(res, err, "session "+id)
+}
+
+// CleanedUp implements Store.
+func (s SQL) CleanedUp(ctx context.Context, id string) error {
+	res, err := s.DB.ExecContext(ctx, `UPDATE sessions SET cleanup_pending = 0 WHERE id = ?`, id)
 	return affected(res, err, "session "+id)
 }
 
