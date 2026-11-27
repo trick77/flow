@@ -12,8 +12,12 @@ import {
   createSession,
   deleteApiKey,
   deleteProject,
+  disconnectGitHub,
   errorCode,
   getAuthSession,
+  listGitHubRepos,
+  pollGitHubDeviceFlow,
+  startGitHubDeviceFlow,
   getConnections,
   getProfile,
   getSession,
@@ -208,6 +212,34 @@ describe("API client", () => {
         '{"kind":"claude_token","value":"v"}',
       ],
       ["/api/connections/api-keys/k%2F1", "DELETE", undefined],
+    ]);
+  });
+
+  it("drives the GitHub connection and lists its repositories", async () => {
+    fetchMock.mockResolvedValueOnce(respond(200, { userCode: "ABCD-1234" }));
+    fetchMock.mockResolvedValueOnce(respond(200, { state: "pending" }));
+    fetchMock.mockResolvedValueOnce(respond(204));
+    fetchMock.mockResolvedValueOnce(respond(200, { items: [] }));
+    fetchMock.mockResolvedValueOnce(respond(200, { items: [] }));
+    await expect(startGitHubDeviceFlow()).resolves.toEqual({
+      userCode: "ABCD-1234",
+    });
+    await expect(pollGitHubDeviceFlow()).resolves.toEqual({
+      state: "pending",
+    });
+    await disconnectGitHub();
+    await listGitHubRepos();
+    await listGitHubRepos("a b");
+    const calls = fetchMock.mock.calls.map(([url, init]) => [
+      url,
+      init?.method,
+    ]);
+    expect(calls).toEqual([
+      ["/api/connections/github/device", "POST"],
+      ["/api/connections/github/device/poll", "POST"],
+      ["/api/connections/github", "DELETE"],
+      ["/api/github/repos", "GET"],
+      ["/api/github/repos?query=a%20b", "GET"],
     ]);
   });
 

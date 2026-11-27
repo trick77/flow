@@ -101,6 +101,9 @@ export interface SessionsState extends Lists {
   // profileRev counts the stream's profile.updated frames (they carry no
   // profile): a change tells profile readers to read it again.
   profileRev: number;
+  // connectionsRev counts connections.updated frames (no payload either):
+  // the Settings page and the project form read the connections again.
+  connectionsRev: number;
   // setStatus applies a session.status from the session's own stream.
   setStatus: (sessionId: string, status: SessionStatus) => void;
   // apply changes the lists by an answer of the owner's own request, without
@@ -131,6 +134,7 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
   const [error, setError] = useState<ErrorCode | null>(null);
   const [projectsError, setProjectsError] = useState<ErrorCode | null>(null);
   const [profileRev, setProfileRev] = useState(0);
+  const [connectionsRev, setConnectionsRev] = useState(0);
   const generation = useRef(0);
   // Changes since the newest load started; null while no load is under way.
   const during = useRef<Change[] | null>(null);
@@ -180,6 +184,9 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
       onEvent: (e) => {
         // The frame carries no profile: readers fetch it again.
         if (e.kind === "profile.updated") setProfileRev((r) => r + 1);
+        if (e.kind === "connections.updated") {
+          setConnectionsRev((r) => r + 1);
+        }
         during.current?.push({ e, answer: false });
         setLists((prev) => applyAppEvent(prev, e));
       },
@@ -238,6 +245,7 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
     error,
     projectsError,
     profileRev,
+    connectionsRev,
     setStatus,
     setSeen,
     patch,

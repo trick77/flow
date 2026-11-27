@@ -37,6 +37,7 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     error,
     projectsError,
     profileRev,
+    connectionsRev,
     setStatus,
     setSeen,
     patch,
@@ -220,7 +221,13 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
               onBack={back}
             />
           )}
-          {view === "settings" && <SettingsPage nav={nav} onBack={back} />}
+          {view === "settings" && (
+            <SettingsPage
+              nav={nav}
+              onBack={back}
+              connectionsRev={connectionsRev}
+            />
+          )}
           {/* The session stays mounted under a page: its draft, terminal and
             stream survive a look at Projects or Settings. */}
           {selected ? (

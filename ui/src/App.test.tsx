@@ -1078,6 +1078,56 @@ describe("App", () => {
     ).toBeGreaterThanOrEqual(2);
   });
 
+  it("reads the connections again on connections.updated", async () => {
+    let github: Record<string, string> = { state: "disconnected" };
+    const server: Server = {
+      sessions: [summary({})],
+      projects: [project],
+      calls: [],
+      extra: (url) => {
+        if (url === "/api/profile") {
+          return new Response(
+            JSON.stringify({
+              gitName: "",
+              gitEmail: "",
+              language: "en",
+              formatLocale: "en-CH",
+              timeZone: "Europe/Zurich",
+              sidebarGrouping: "status",
+              configSync: { state: "never" },
+            }),
+          );
+        }
+        if (url === "/api/connections") {
+          return new Response(
+            JSON.stringify({
+              github,
+              claude: { signedIn: false },
+              apiKeys: [],
+            }),
+          );
+        }
+        return undefined;
+      },
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: en.shell.settings }));
+    });
+    const row = await screen.findByRole("group", { name: en.settings.github });
+    expect(row).toHaveTextContent(en.settings.pillNotConnected);
+    // Connected in another tab: the frame carries nothing, so it is read.
+    github = { state: "connected", login: "octo-user" };
+    act(() => {
+      const app = FakeEventSource.forUrl("/api/events")[0];
+      app.open();
+      app.emit("app", { kind: "connections.updated" });
+    });
+    await waitFor(() => expect(row).toHaveTextContent("octo-user"));
+  });
+
   it("remembers the rail and makes the sidebar a drawer on narrow screens", async () => {
     window.localStorage.clear();
     serve({

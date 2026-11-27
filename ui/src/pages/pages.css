@@ -426,14 +426,80 @@ textarea.input {
   background: var(--color-raised);
   color: var(--color-muted);
 }
+.pill-err {
+  background: var(--color-danger-tint);
+  color: var(--color-danger);
+}
+.conn-row .ds.warn {
+  color: var(--color-sun);
+}
+.conn-row .conn-note {
+  margin: 10px 0 0 42px;
+}
+/* GitHub's device flow: the code to enter, large and copyable */
+.conn-device {
+  margin: 12px 0 0 42px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-ink-warm);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+.conn-device p {
+  margin: 0;
+}
+.device-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin: 10px 0;
+}
+.device-code {
+  color: var(--color-ink-bright);
+  font-family: var(--font-mono);
+  font-size: 1.75rem;
+  letter-spacing: 0.12em;
+  line-height: 1.2;
+  user-select: all;
+}
+.device-status {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+.device-left {
+  font-variant-numeric: tabular-nums;
+}
+.conn-device > .row-inline {
+  margin-top: 10px;
+}
+.conn-device .form-status {
+  margin-bottom: 8px;
+}
 @media (max-width: 760px) {
   .set-sec {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
   }
   .conn-edit,
+  .conn-device,
+  .conn-row .conn-note,
   .conn-row .page-error,
   .conn-row .confirm {
     margin-left: 0;
+  }
+  .conn-main {
+    flex-wrap: wrap;
+  }
+  .conn-main .grow {
+    flex-basis: calc(100% - 42px);
+  }
+  .conn-main .label-pill {
+    margin-left: 42px;
+  }
+  .conn-main .acts {
+    margin-left: auto;
   }
 }
