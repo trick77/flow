@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/trick77/flow/internal/event"
 	"github.com/trick77/flow/internal/flowdproto"
@@ -96,6 +97,37 @@ func TestUnsupportedAndErrors(t *testing.T) {
 	}
 	if (&Error{Body: flowdproto.ErrorBody{Code: "other"}}).Is(flowdproto.ErrNotFound) {
 		t.Error("unknown code matched")
+	}
+}
+
+// The calls that clone or fetch run under the bring-up's deadline, not the short one of every other call: a clone
+// longer than the short one would be cut off and start from zero on every try.
+func TestCloneCallsOutliveTheCallTimeout(t *testing.T) {
+	short, long := callTimeout, cloneTimeout
+	callTimeout, cloneTimeout = 50*time.Millisecond, 10*time.Second
+	t.Cleanup(func() { callTimeout, cloneTimeout = short, long })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(300 * time.Millisecond): // a slow clone
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	ctx := t.Context()
+	c := NewDialer().Dial(flowdproto.Endpoint{Address: strings.TrimPrefix(srv.URL, "http://"), Token: "t"})
+	if _, err := c.EnsureRepo(ctx, flowdproto.RepoSpec{Repo: "o/r"}); err != nil {
+		t.Errorf("EnsureRepo: %v", err)
+	}
+	if _, err := c.EnsureSession(ctx, flowdproto.SessionSpec{ID: "s"}); err != nil {
+		t.Errorf("EnsureSession: %v", err)
+	}
+	if _, err := c.AddWorktree(ctx, "s", flowdproto.WorktreeSpec{Repo: "o/r"}); err != nil {
+		t.Errorf("AddWorktree: %v", err)
+	}
+	if _, err := c.Session(ctx, "s"); !errors.Is(err, flowdproto.ErrUnavailable) {
+		t.Errorf("a short call outlived its timeout: %v", err)
 	}
 }
 

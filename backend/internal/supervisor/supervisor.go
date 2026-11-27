@@ -244,21 +244,38 @@ func (s *Supervisor) mkdirAgent(dir string) error {
 	return nil
 }
 
-// writeSpec writes the spec beside the log, readable by the host (the agent user) only.
+// writeSpec writes the spec beside the log, readable by the host (the agent user) only. The directory is the
+// agent's: flowd (root) writes a new file and renames it over the spec, so a symlink or hard link the agent planted
+// at the spec's name is replaced, never followed, and the chown goes through the new file's descriptor.
 func (s *Supervisor) writeSpec(sp host.Spec) error {
 	b, err := json.MarshalIndent(sp, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := s.p(layout.SessionSpecFile(sp.Session.ID))
 	// The path is layout's, from a session id EnsureSession checked with layout.ValidName.
-	if err := os.WriteFile(path, b, 0o600); err != nil { //nolint:gosec // see above
+	path := s.p(layout.SessionSpecFile(sp.Session.ID))
+	f, err := os.CreateTemp(filepath.Dir(path), ".spec-*") // O_EXCL: never an existing file or link
+	if err != nil {
 		return err
 	}
-	if os.Geteuid() == 0 {
-		return os.Chown(path, layout.AgentUID, layout.AgentGID)
+	tmp := f.Name()
+	err = f.Chmod(0o600)
+	if err == nil && os.Geteuid() == 0 {
+		err = f.Chown(layout.AgentUID, layout.AgentGID)
 	}
-	return nil
+	if err == nil {
+		_, err = f.Write(b)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }
 
 // EnsureRepo implements flowdproto.API: a missing main checkout is cloned, an existing one fetched. A clone goes
@@ -452,7 +469,16 @@ func (s *Supervisor) readSpec(id string) (host.Spec, error) {
 	if err != nil {
 		return sp, err
 	}
-	return sp, json.Unmarshal(b, &sp)
+	if err := json.Unmarshal(b, &sp); err != nil {
+		return sp, err
+	}
+	// The file lies in a directory the agent user owns: flowd (root) removes its Dir and claim by these fields, so
+	// they must be what flowd wrote.
+	if sp.Session.ID != id || !layout.ValidName(sp.Session.Name) || sp.Dir != layout.SessionDir(sp.Session.Name) {
+		return host.Spec{}, invalid("spec of session %s: id %q, name %q or dir %q not flowd's", id, sp.Session.ID,
+			sp.Session.Name, sp.Dir)
+	}
+	return sp, nil
 }
 
 // EnsureSession implements flowdproto.API: worktrees are created as needed, the spec is written beside the log and
@@ -466,13 +492,22 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 	}
 	unit := layout.HostUnit(sp.ID)
 	defer s.lock(unit)()
-	if st, err := s.o.Units.State(ctx, unit); err != nil {
+	st, err := s.o.Units.State(ctx, unit)
+	if err != nil {
 		return flowdproto.SessionState{}, err
 	} else if st == flowdproto.UnitActive || st == flowdproto.UnitActivating {
 		return s.Session(ctx, sp.ID)
 	}
 	if err := s.envReady(); err != nil {
 		return flowdproto.SessionState{}, err
+	}
+	if st != flowdproto.UnitMissing {
+		// A host that ended is collected right after (--collect, a failed one too); one still deactivating is
+		// stopped first, or systemd-run refuses the name "already loaded" (measured, systemd 257: a blocking stop
+		// waits out the deactivation and leaves the name free). As for terminals.
+		if err := s.o.Units.Stop(ctx, unit); err != nil {
+			return flowdproto.SessionState{}, err
+		}
 	}
 	spec := host.Spec{Session: sp, Dir: layout.SessionDir(sp.Name)}
 	if old, err := s.readSpec(sp.ID); err == nil {
@@ -750,8 +785,15 @@ func (s *Supervisor) Command(ctx context.Context, c event.Command) (flowdproto.C
 		return flowdproto.CommandResult{}, err
 	}
 	defer func() { _ = conn.Close() }()
+	// A host that stops answering (stuck holding its lock) must not hold this handler and its connection forever:
+	// the request's end closes the connection.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	resp, err := roundTrip(conn, hostproto.Request{ID: "c", Op: hostproto.OpCommand, Command: &c})
 	if err != nil {
+		if ctx.Err() != nil {
+			return flowdproto.CommandResult{}, ctx.Err()
+		}
 		return flowdproto.CommandResult{}, err
 	}
 	switch resp.Error {

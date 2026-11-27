@@ -467,6 +467,54 @@ func TestRestart_drainsTheRecoveredQueue(t *testing.T) {
 	}
 }
 
+// The queue's order survives a restart: a message sent with interrupt and a queued one sent now go to the head,
+// and the log says so.
+func TestRestart_keepsTheQueueOrder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	f := newFake()
+	r := start(t, path, f)
+	_, _ = r.h.Command(send(t, "m1", "first"))
+	<-f.got
+	for _, id := range []string{"m2", "m3", "m4"} {
+		_, _ = r.h.Command(send(t, id, id))
+	}
+	if _, err := r.h.Command(cmd(t, "n1", event.CmdMessageSendNow, event.MessageSendNow{MessageID: "m3"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.h.Command(cmd(t, "m5", event.CmdMessageSend, event.MessageSend{MessageID: "m5", Text: "now",
+		Origin: event.MessageOriginUser, WhenBusy: event.WhenBusyInterrupt})); err != nil {
+		t.Fatal(err)
+	}
+	ids := func(h *Host) []string {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		var out []string
+		for _, m := range h.queue {
+			out = append(out, m.MessageID)
+		}
+		return out
+	}
+	before := ids(r.h)
+	if strings.Join(before, " ") != "m5 m3 m2 m4" {
+		t.Fatalf("live queue %v", before)
+	}
+	r.stop() // the host dies mid-turn: the adapter never ended it
+
+	f = newFake()
+	r = start(t, path, f)
+	select {
+	case c := <-f.got:
+		if c.ID != "m5" {
+			t.Fatalf("after restart the adapter got %s first, want m5", c.ID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the recovered queue was never drained")
+	}
+	if got := ids(r.h); strings.Join(got, " ") != "m3 m2 m4" {
+		t.Errorf("recovered queue %v, want m3 m2 m4", got)
+	}
+}
+
 func TestPump_failsTheTurnWhenTheAdapterDies(t *testing.T) {
 	f := newFake()
 	path := filepath.Join(t.TempDir(), "events.jsonl")

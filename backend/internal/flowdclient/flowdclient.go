@@ -58,8 +58,13 @@ type Client struct {
 
 var _ flowdproto.API = (*Client)(nil)
 
-// callTimeout bounds a request/response call; EnsureRepo and EnsureSession clone and fetch, hence generous.
-const callTimeout = 5 * time.Minute
+// callTimeout bounds a request/response call. A var for tests.
+var callTimeout = 5 * time.Minute
+
+// cloneTimeout bounds the calls that clone or fetch (EnsureRepo, EnsureSession, AddWorktree): as long as a
+// sandbox bring-up may take (sandboxes' bringTimeout), or a large repository on a slow link is cut off mid-clone
+// and starts from zero on every try. A var for tests.
+var cloneTimeout = 15 * time.Minute
 
 func (c *Client) request(ctx context.Context, method, path string, body any) (*http.Request, error) {
 	var rd io.Reader
@@ -83,7 +88,11 @@ func (c *Client) request(ctx context.Context, method, path string, body any) (*h
 }
 
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	return c.callWithin(ctx, callTimeout, method, path, body, out)
+}
+
+func (c *Client) callWithin(ctx context.Context, timeout time.Duration, method, path string, body, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := c.request(ctx, method, path, body)
 	if err != nil {
@@ -164,13 +173,13 @@ func (c *Client) PutEnv(ctx context.Context, e flowdproto.Env) error {
 // EnsureRepo implements flowdproto.API.
 func (c *Client) EnsureRepo(ctx context.Context, r flowdproto.RepoSpec) (flowdproto.RepoState, error) {
 	var st flowdproto.RepoState
-	return st, c.call(ctx, http.MethodPost, "/v1/repos", r, &st)
+	return st, c.callWithin(ctx, cloneTimeout, http.MethodPost, "/v1/repos", r, &st)
 }
 
 // EnsureSession implements flowdproto.API.
 func (c *Client) EnsureSession(ctx context.Context, s flowdproto.SessionSpec) (flowdproto.SessionState, error) {
 	var st flowdproto.SessionState
-	return st, c.call(ctx, http.MethodPut, "/v1/sessions/"+url.PathEscape(s.ID), s, &st)
+	return st, c.callWithin(ctx, cloneTimeout, http.MethodPut, "/v1/sessions/"+url.PathEscape(s.ID), s, &st)
 }
 
 // Session implements flowdproto.API.
@@ -187,7 +196,7 @@ func (c *Client) StopSession(ctx context.Context, id string, remove bool) error 
 // AddWorktree implements flowdproto.API.
 func (c *Client) AddWorktree(ctx context.Context, id string, w flowdproto.WorktreeSpec) (flowdproto.WorktreeState, error) {
 	var st flowdproto.WorktreeState
-	return st, c.call(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(id)+"/worktrees", w, &st)
+	return st, c.callWithin(ctx, cloneTimeout, http.MethodPost, "/v1/sessions/"+url.PathEscape(id)+"/worktrees", w, &st)
 }
 
 // Command implements flowdproto.API.
