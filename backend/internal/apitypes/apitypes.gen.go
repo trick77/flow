@@ -34,10 +34,11 @@ const (
 	ErrorCodeSandboxNetworkMissing ErrorCode = "sandbox_network_missing"
 	ErrorCodeSandboxMemoryFull     ErrorCode = "sandbox_memory_full"
 	ErrorCodeProjectHasSessions    ErrorCode = "project_has_sessions"
+	ErrorCodeSandboxSetupFailed    ErrorCode = "sandbox_setup_failed"
 )
 
 // ErrorCodeValues lists every ErrorCode.
-var ErrorCodeValues = []ErrorCode{ErrorCodeNotImplemented, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodePreviewOrigin, ErrorCodeNotFound, ErrorCodeInvalidRequest, ErrorCodeConflict, ErrorCodeInternal, ErrorCodeUpstream, ErrorCodeGithubNotConnected, ErrorCodeSandboxUnavailable, ErrorCodeSandboxBusy, ErrorCodeSessionArchived, ErrorCodeRequestNotPending, ErrorCodeModeAboveCap, ErrorCodeProviderUnavailable, ErrorCodeRepoInUse, ErrorCodeTooManySessions, ErrorCodeSandboxNetworkMissing, ErrorCodeSandboxMemoryFull, ErrorCodeProjectHasSessions}
+var ErrorCodeValues = []ErrorCode{ErrorCodeNotImplemented, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodePreviewOrigin, ErrorCodeNotFound, ErrorCodeInvalidRequest, ErrorCodeConflict, ErrorCodeInternal, ErrorCodeUpstream, ErrorCodeGithubNotConnected, ErrorCodeSandboxUnavailable, ErrorCodeSandboxBusy, ErrorCodeSessionArchived, ErrorCodeRequestNotPending, ErrorCodeModeAboveCap, ErrorCodeProviderUnavailable, ErrorCodeRepoInUse, ErrorCodeTooManySessions, ErrorCodeSandboxNetworkMissing, ErrorCodeSandboxMemoryFull, ErrorCodeProjectHasSessions, ErrorCodeSandboxSetupFailed}
 
 // Error is part of the contract.
 type Error struct {

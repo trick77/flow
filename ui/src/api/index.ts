@@ -15,6 +15,8 @@ export {
   getConnections,
   getProfile,
   getSession,
+  getSessionDiff,
+  getSetupLog,
   interruptTurn,
   listAgents,
   listProjects,

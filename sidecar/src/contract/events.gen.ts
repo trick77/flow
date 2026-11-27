@@ -79,8 +79,8 @@ export interface SessionStarted {
   cwd: string;
 }
 
-export type ResumeReason = "message" | "sandbox_start" | "host_restart" | "upgrade";
-export const RESUME_REASON_VALUES: readonly ResumeReason[] = ["message", "sandbox_start", "host_restart", "upgrade"];
+export type ResumeReason = "message" | "sandbox_start" | "host_restart" | "upgrade" | "command";
+export const RESUME_REASON_VALUES: readonly ResumeReason[] = ["message", "sandbox_start", "host_restart", "upgrade", "command"];
 
 export interface SessionResumed {
   reason: ResumeReason;

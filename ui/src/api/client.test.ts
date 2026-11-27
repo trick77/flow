@@ -17,6 +17,7 @@ import {
   getConnections,
   getProfile,
   getSession,
+  getSessionDiff,
   sandboxAction,
   updateProfile,
   interruptTurn,
@@ -84,6 +85,16 @@ describe("API client", () => {
     fetchMock.mockResolvedValueOnce(respond(200, { lastSeq: 3 }));
     await getSession("a/b");
     expect(fetchMock.mock.calls[0][0]).toBe("/api/sessions/a%2Fb");
+  });
+
+  it("reads a worktree's diff", async () => {
+    const diff = { repo: "o/r", baseRef: "main", baseSha: "abc", files: [] };
+    fetchMock.mockResolvedValueOnce(respond(200, diff));
+    await expect(getSessionDiff("s/1", "r 1")).resolves.toEqual(diff);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/sessions/s%2F1/repos/r%201/diff",
+    );
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
   });
 
   it("posts a message as JSON", async () => {

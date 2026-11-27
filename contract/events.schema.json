@@ -137,7 +137,7 @@
         "cwd": { "type": "string" }
       }
     },
-    "ResumeReason": { "type": "string", "enum": ["message", "sandbox_start", "host_restart", "upgrade"] },
+    "ResumeReason": { "type": "string", "enum": ["message", "sandbox_start", "host_restart", "upgrade", "command"] },
     "SessionResumed": {
       "type": "object",
       "required": ["reason"],
