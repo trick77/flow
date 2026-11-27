@@ -133,10 +133,11 @@ const (
 	ResumeReasonSandboxStart ResumeReason = "sandbox_start"
 	ResumeReasonHostRestart  ResumeReason = "host_restart"
 	ResumeReasonUpgrade      ResumeReason = "upgrade"
+	ResumeReasonCommand      ResumeReason = "command"
 )
 
 // ResumeReasonValues lists every ResumeReason.
-var ResumeReasonValues = []ResumeReason{ResumeReasonMessage, ResumeReasonSandboxStart, ResumeReasonHostRestart, ResumeReasonUpgrade}
+var ResumeReasonValues = []ResumeReason{ResumeReasonMessage, ResumeReasonSandboxStart, ResumeReasonHostRestart, ResumeReasonUpgrade, ResumeReasonCommand}
 
 // SessionResumed is part of the contract.
 type SessionResumed struct {

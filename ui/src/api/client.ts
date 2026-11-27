@@ -5,6 +5,7 @@ import {
   type ApiKeyCreate,
   type AuthSession,
   type Connections,
+  type Diff,
   type ErrorCode,
   type MessageAccepted,
   type MessageCreate,
@@ -21,6 +22,7 @@ import {
   type SessionCreate,
   type SessionList,
   type SessionUpdate,
+  type SetupLog,
 } from "./types.gen";
 
 // ApiError is a non-2xx answer (or no answer at all). code is one of the API's
@@ -143,6 +145,18 @@ export function listSessions(): Promise<SessionList> {
 
 export function getSession(sessionId: string): Promise<Session> {
   return request<Session>("GET", `/api/sessions/${seg(sessionId)}`);
+}
+
+// getSessionDiff is one worktree's diff against the commit it was cut from;
+// sandbox_unavailable while the sandbox does not run (never started for it).
+export function getSessionDiff(
+  sessionId: string,
+  repoId: string,
+): Promise<Diff> {
+  return request<Diff>(
+    "GET",
+    `/api/sessions/${seg(sessionId)}/repos/${seg(repoId)}/diff`,
+  );
 }
 
 // createSession starts a session: worktrees on fresh origin/<default branch>,
@@ -285,6 +299,16 @@ export function createProject(project: ProjectCreate): Promise<Project> {
 
 export function deleteProject(projectId: string): Promise<void> {
   return request<void>("DELETE", `/api/projects/${seg(projectId)}`);
+}
+
+// getSetupLog is the last setup run's log lines after line `after` (at most
+// 1000 per answer); sandbox_unavailable while the sandbox cannot answer.
+export function getSetupLog(projectId: string, after = 0): Promise<SetupLog> {
+  const q = after > 0 ? `?after=${after}` : "";
+  return request<SetupLog>(
+    "GET",
+    `/api/projects/${seg(projectId)}/sandbox/setup-log${q}`,
+  );
 }
 
 // SandboxAction is what the owner can do with a project's sandbox.

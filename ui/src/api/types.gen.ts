@@ -2,8 +2,8 @@
 // Regenerate: CONTRACTGEN_UPDATE=1 go test ./internal/contractgen/ (in backend/)
 
 /** Every error the API answers with. The UI maps each to a sentence in its errors namespace. */
-export type ErrorCode = "not_implemented" | "unauthenticated" | "forbidden" | "preview_origin" | "not_found" | "invalid_request" | "conflict" | "internal" | "upstream" | "github_not_connected" | "sandbox_unavailable" | "sandbox_busy" | "session_archived" | "request_not_pending" | "mode_above_cap" | "provider_unavailable" | "repo_in_use" | "too_many_sessions" | "sandbox_network_missing" | "sandbox_memory_full" | "project_has_sessions";
-export const ERROR_CODE_VALUES: readonly ErrorCode[] = ["not_implemented", "unauthenticated", "forbidden", "preview_origin", "not_found", "invalid_request", "conflict", "internal", "upstream", "github_not_connected", "sandbox_unavailable", "sandbox_busy", "session_archived", "request_not_pending", "mode_above_cap", "provider_unavailable", "repo_in_use", "too_many_sessions", "sandbox_network_missing", "sandbox_memory_full", "project_has_sessions"];
+export type ErrorCode = "not_implemented" | "unauthenticated" | "forbidden" | "preview_origin" | "not_found" | "invalid_request" | "conflict" | "internal" | "upstream" | "github_not_connected" | "sandbox_unavailable" | "sandbox_busy" | "session_archived" | "request_not_pending" | "mode_above_cap" | "provider_unavailable" | "repo_in_use" | "too_many_sessions" | "sandbox_network_missing" | "sandbox_memory_full" | "project_has_sessions" | "sandbox_setup_failed";
+export const ERROR_CODE_VALUES: readonly ErrorCode[] = ["not_implemented", "unauthenticated", "forbidden", "preview_origin", "not_found", "invalid_request", "conflict", "internal", "upstream", "github_not_connected", "sandbox_unavailable", "sandbox_busy", "session_archived", "request_not_pending", "mode_above_cap", "provider_unavailable", "repo_in_use", "too_many_sessions", "sandbox_network_missing", "sandbox_memory_full", "project_has_sessions", "sandbox_setup_failed"];
 
 export interface Error {
   code: ErrorCode;

@@ -205,7 +205,7 @@
       "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
       "post": {
         "tags": ["sandboxes"], "operationId": "rebuildSandbox", "x-flow-area": "sandboxes",
-        "summary": "Rebuild the sandbox", "description": "Deletes the instance and sets the sandbox up again from the base image in the background: fresh checkouts of every repository, flowd delivered again, the same address. Refused with project_has_sessions while a session of the project is not archived, and with sandbox_busy while a bring-up runs. Archived sessions' logs and kept worktrees go with the old instance.",
+        "summary": "Rebuild the sandbox", "description": "Deletes the instance and sets the sandbox up again from the base image in the background: fresh checkouts of every repository, each repository's .flow/setup.sh run again, flowd delivered again, the same address. Refused with project_has_sessions while a session of the project is not archived, and with sandbox_busy while a bring-up runs. Archived sessions' logs and kept worktrees go with the old instance.",
         "responses": { "202": { "$ref": "#/components/responses/Sandbox" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
@@ -213,9 +213,9 @@
       "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
       "get": {
         "tags": ["sandboxes"], "operationId": "getSetupLog", "x-flow-area": "sandboxes",
-        "summary": "Setup log", "description": "Lines of the last setup run after a line number; poll while state is setup.",
+        "summary": "Setup log", "description": "Lines of the last setup run after a line number; poll while state is setup. The repositories' .flow/setup.sh logs in project order, each after a header line, numbered from 1 across all of them; at most 1000 lines per answer, ask again after the last one. Each log keeps its first 4 MiB. Answered for a sandbox in setup, warm or failed (empty lines while flowd does not answer yet during setup); sandbox_unavailable for one that is stopped, never created or being deleted, or whose flowd does not answer.",
         "parameters": [{ "name": "after", "in": "query", "required": false, "description": "Last line number seen.", "schema": { "type": "integer" } }],
-        "responses": { "200": { "description": "The lines.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetupLog" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "responses": { "200": { "description": "The lines.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetupLog" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/agents": {
@@ -477,7 +477,8 @@
           "not_implemented", "unauthenticated", "forbidden", "preview_origin", "not_found", "invalid_request",
           "conflict", "internal", "upstream", "github_not_connected", "sandbox_unavailable", "sandbox_busy",
           "session_archived", "request_not_pending", "mode_above_cap", "provider_unavailable", "repo_in_use",
-          "too_many_sessions", "sandbox_network_missing", "sandbox_memory_full", "project_has_sessions"
+          "too_many_sessions", "sandbox_network_missing", "sandbox_memory_full", "project_has_sessions",
+          "sandbox_setup_failed"
         ]
       },
       "Error": {
