@@ -1,0 +1,118 @@
+/* The terminal drawer (mock: .drawer, .dr-h, .term) and its header toggle
+   (mock: .icon-btn). Colours from the app's tokens; --term-bg is the drawer's
+   own ground, a step below the code blocks'. */
+.tdrawer {
+  --term-bg: #151514;
+  display: flex;
+  flex-direction: column;
+  height: 236px;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--color-border-side);
+  background: var(--term-bg);
+  min-width: 0;
+}
+.tdrawer[hidden] {
+  display: none;
+}
+.tdr-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding-left: max(14px, env(safe-area-inset-left, 0px));
+  padding-right: max(8px, env(safe-area-inset-right, 0px));
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-muted);
+  font-size: 0.75rem;
+  min-width: 0;
+}
+.tdr-h .ttl {
+  color: var(--color-ink-warm);
+}
+.tdr-h svg.i {
+  width: 14px;
+  height: 14px;
+}
+.tdr-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  min-width: 0;
+}
+.tdr-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.tdr-note {
+  white-space: nowrap;
+  color: var(--color-sun);
+}
+.tdr-note.ended {
+  color: var(--color-muted);
+}
+.tdr-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 6px;
+  color: var(--color-ink-btn);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+.tdr-btn:hover {
+  background: var(--color-raised);
+}
+.tdr-icon,
+.tdr-toggle {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  color: var(--color-ink-icon);
+  transition:
+    background-color 0.12s,
+    color 0.12s;
+}
+.tdr-icon {
+  width: 24px;
+  height: 24px;
+}
+.tdr-toggle {
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+}
+.tdr-toggle svg.i {
+  width: 18px;
+  height: 18px;
+}
+.tdr-icon:hover,
+.tdr-toggle:hover {
+  background: var(--color-raised);
+  color: var(--color-ink);
+}
+.tdr-toggle[aria-pressed="true"] {
+  background: var(--color-active);
+  color: var(--color-ink);
+}
+.tdr-screen {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px max(14px, env(safe-area-inset-right, 0px)) 8px
+    max(14px, env(safe-area-inset-left, 0px));
+}
+.tdr-screen .xterm {
+  height: 100%;
+}
+.tdr-screen .xterm-viewport {
+  background-color: var(--term-bg) !important;
+}
+@media (max-width: 720px) {
+  .tdrawer {
+    height: 200px;
+  }
+}

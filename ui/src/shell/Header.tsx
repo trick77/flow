@@ -1,16 +1,20 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Icon } from "./Icon";
 
-// Header: the crumb "project / title" and the branch chip.
+// Header: the crumb "project / title", the branch chip and, at the right, the
+// session toggles (actions).
 export function Header({
   project,
   title,
   branch,
+  actions,
 }: {
   project?: string;
   title: string;
   branch: string;
+  actions?: ReactNode;
 }) {
   const { t } = useTranslation("shell");
   return (
@@ -32,6 +36,7 @@ export function Header({
           <span className="mono">{branch}</span>
         </span>
       )}
+      {actions}
     </header>
   );
 }
