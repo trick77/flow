@@ -203,6 +203,9 @@ type MessageQueued struct {
 	Text        string        `json:"text"`
 	Origin      MessageOrigin `json:"origin"`
 	FromSession string        `json:"fromSession,omitempty"`
+	// Queued at the head, not the tail: a message that interrupts the turn, or a queued one sent now (logged again
+	// under its id, which moves it to the head).
+	Front bool `json:"front,omitempty"`
 }
 
 // DequeueReason is part of the contract.

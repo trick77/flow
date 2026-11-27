@@ -123,6 +123,11 @@ export interface MessageQueued {
   text: string;
   origin: MessageOrigin;
   fromSession?: string;
+  /**
+   * Queued at the head, not the tail: a message that interrupts the turn, or a queued one sent now
+   * (logged again under its id, which moves it to the head).
+   */
+  front?: boolean;
 }
 
 export type DequeueReason = "sent" | "removed";
