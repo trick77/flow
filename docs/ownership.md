@@ -43,7 +43,7 @@ is added before code imports it.
 | helper-model tasks | `internal/helper` | titles, branch names, summaries, PR text | toolkit/llmwire, metering |
 | metering | `internal/metering` | the usage ledger: `sessions.Meter` (fed by the follower), `metering.Store`, the `Record*` API | imports no area (every area may call it); reads `session_worktrees` + `project_repos` for a turn's repos |
 | flowd runtime | `cmd/flowd`, `internal/supervisor`, `internal/flowdclient`, `internal/eventlog`, `internal/mcp` | flowdproto server and client, units, credentials delivery, MCP, gate shim, terminals (`flowd term`) | layout, hostproto |
-| flowd Claude adapter host | `internal/host` | `flowd host`: log writer, queue, status, sidecar child | eventlog, hostproto, event |
+| flowd Claude adapter host | `internal/host`, `internal/host/claude` (the sidecar child: start line, environment, supervision) | `flowd host`: log writer, queue, status, sidecar child | eventlog, hostproto, event |
 | flowd OpenCode adapter | `internal/opencode` | OpenCode bridge inside the host | event |
 | sidecar | `sidecar/src` (not `contract/`) | SDK → `EventDraft` on stdout, `Command` from stdin | `sidecar/src/contract/events.gen.ts` |
 | UI shell and sidebar | `ui/src/shell`, `ui/src/sidebar`, `locales/en/shell.ts`, `sidebar.ts` | layout, header, sidebar sections, rail | API client |
