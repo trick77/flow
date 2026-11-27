@@ -225,6 +225,9 @@ func sandboxManager(cfg config.Config, db *sql.DB, projectStore projects.SQL, ru
 		Addresses: sandboxes.SQLAddresses{DB: db, Network: cfg.SandboxNetwork},
 		Version:   version.String(), Log: slog.Default(), Wait: time.Minute, Poll: 200 * time.Millisecond,
 		LockWait: 2 * time.Second,
+		// A setup script runs with a session's limits.
+		SetupTimeout: cfg.SetupTimeout, SetupLimits: flowdproto.Limits{MemoryMaxBytes: cfg.Session.MemoryBytes,
+			CPUQuotaPercent: cfg.Session.CPUPercent, TasksMax: cfg.Session.Tasks},
 		Flowd: func(arch string) ([]byte, error) {
 			return os.ReadFile(filepath.Join(cfg.FlowdDir, fmt.Sprintf("flowd-linux-%s", arch)))
 		}}

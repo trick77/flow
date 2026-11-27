@@ -73,6 +73,12 @@ type Fake struct {
 	Script Script
 	// JobScript yields a job's log lines and exit code; one line and 0 by default.
 	JobScript func(flowdproto.JobSpec) ([]string, int)
+	// SetupScripts names the repositories (owner/name) whose checkout EnsureRepo reports with a setup script.
+	SetupScripts map[string]bool
+	// HoldJobs keeps a started job running (its lines logged, no result) until FinishJob.
+	HoldJobs bool
+	// jobSpecs records every job start, in order.
+	jobSpecs []flowdproto.JobSpec
 	// Now is the clock; time.Now by default.
 	Now func() time.Time
 }
@@ -109,6 +115,7 @@ func New(sandbox string) *Fake {
 type job struct {
 	state flowdproto.JobState
 	lines []string
+	code  int
 }
 
 // notify wakes every follower; callers hold mu.
@@ -197,7 +204,8 @@ func (f *Fake) Env() flowdproto.Env {
 func (f *Fake) EnsureRepo(_ context.Context, r flowdproto.RepoSpec) (flowdproto.RepoState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	st := flowdproto.RepoState{Repo: r.Repo, Path: "/home/flow/work/" + repoName(r.Repo), HeadSHA: "0000000"}
+	st := flowdproto.RepoState{Repo: r.Repo, Path: "/home/flow/work/" + repoName(r.Repo), HeadSHA: "0000000",
+		SetupScript: f.SetupScripts[r.Repo]}
 	f.repos[r.Repo] = st
 	return st, nil
 }
@@ -638,21 +646,49 @@ func (f *Fake) ReplyControl(_ context.Context, r flowdproto.ControlReply) error 
 	return nil
 }
 
-// StartJob implements flowdproto.API: the job finishes at once with JobScript's output and exit code.
+// StartJob implements flowdproto.API: the job finishes at once with JobScript's output and exit code (with
+// HoldJobs it runs until FinishJob). A job that ran or runs is reported, not started again.
 func (f *Fake) StartJob(_ context.Context, j flowdproto.JobSpec) (flowdproto.JobState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if st, ok := f.jobs[j.ID]; ok {
 		return st.state, nil
 	}
+	f.jobSpecs = append(f.jobSpecs, j)
 	lines, code := f.JobScript(j)
 	st := flowdproto.JobState{ID: j.ID, Kind: j.Kind, Unit: flowdproto.UnitInactive, Done: true, ExitCode: code,
 		Lines: len(lines)}
 	if j.Kind == flowdproto.JobConfigSync && code == 0 {
 		st.Commit, st.Files = "a3f9c21", 1036
 	}
-	f.jobs[j.ID] = &job{state: st, lines: lines}
+	if f.HoldJobs {
+		st.Unit, st.Done, st.ExitCode = flowdproto.UnitActive, false, 0
+	}
+	f.jobs[j.ID] = &job{state: st, lines: lines, code: code}
 	return st, nil
+}
+
+// FinishJob ends a held job with JobScript's exit code.
+func (f *Fake) FinishJob(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if j, ok := f.jobs[id]; ok {
+		j.state.Unit, j.state.Done, j.state.ExitCode = flowdproto.UnitInactive, true, j.code
+	}
+}
+
+// ForgetJobs drops every job and its result, as a new instance (a rebuild) has none.
+func (f *Fake) ForgetJobs() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.jobs = map[string]*job{}
+}
+
+// JobSpecs is every job started, in order (a start that found the job is not one).
+func (f *Fake) JobSpecs() []flowdproto.JobSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.jobSpecs)
 }
 
 // Job implements flowdproto.API.

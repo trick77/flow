@@ -595,6 +595,41 @@ func TestIdleWithAQueue_newMessageGoesBehind(t *testing.T) {
 	}
 }
 
+// A host started held to take a command (session.resumed command) starts no queued turn either: the command
+// arrives, the queue waits for the owner's next start.
+func TestRestart_commandKeepsTheQueue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	f := newFake()
+	r := start(t, path, f)
+	_, _ = r.h.Command(send(t, "m1", "first"))
+	_, _ = r.h.Command(send(t, "m2", "queued before the stop"))
+	<-f.got
+	r.stop()
+
+	f = newFake()
+	r = startFor(t, path, f, event.ResumeReasonCommand)
+	select {
+	case c := <-f.got:
+		t.Fatalf("the adapter got %s, nobody asked for a turn", c.ID)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if !r.h.Queued("m2") {
+		t.Error("m2 left the queue")
+	}
+	resumed := false
+	for _, e := range r.events() {
+		if p, _ := e.Payload(); p != nil {
+			if sr, ok := p.(*event.SessionResumed); ok {
+				resumed = resumed || sr.Reason == event.ResumeReasonCommand
+			}
+		}
+	}
+	if !resumed {
+		t.Error("no session.resumed command")
+	}
+	r.stop()
+}
+
 // A question reply naming a question or option the request does not have is refused and leaves the request open;
 // a known option and free text are taken.
 func TestQuestionReply_refusesUnknownIds(t *testing.T) {

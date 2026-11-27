@@ -1,6 +1,6 @@
 // Command flowd is the supervisor daemon inside each sandbox's system container. The server pushes the binary
 // matching the sandbox's architecture into it. Multi-call: "flowd host" is a session host, started by flowd as a
-// transient systemd unit.
+// transient systemd unit; "flowd term" a terminal, "flowd job" a job's runner (a repository's setup script).
 package main
 
 import (
@@ -36,6 +36,9 @@ func start() error {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "term" {
 		return term.Run(ctx, os.Args[2:], slog.Default())
+	}
+	if len(os.Args) > 1 && os.Args[1] == "job" {
+		return supervisor.RunJob(ctx, os.Args[2:], slog.Default())
 	}
 	if len(os.Args) > 1 {
 		// Never the supervisor by accident (flowd.service runs it without arguments): an agent starting "flowd mcp"

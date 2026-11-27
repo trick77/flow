@@ -584,6 +584,29 @@ func TestSlug(t *testing.T) {
 	}
 }
 
+// status_at is the time of the event that changed the status, not of the mirror: a follower catching up after a
+// restart must not date every status to its catch-up. The same status again keeps the first time.
+func TestSQL_statusAtIsTheEventsTime(t *testing.T) {
+	r := newRig(t)
+	s := r.svc.Store.(SQL)
+	ctx := t.Context()
+	if err := s.Create(ctx, Session{ID: "s", ProjectID: "p1", Name: "s", Provider: "claude", Model: "m", Mode: "ask",
+		Branch: "b"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 20, 9, 30, 0, 0, time.UTC)
+	if err := s.ApplyMirror(ctx, "s", Mirror{LastSeq: 4, Status: "working", At: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyMirror(ctx, "s", Mirror{LastSeq: 5, Status: "working", At: at.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	se, _ := s.Get(ctx, "s")
+	if !se.StatusAt.Equal(at) || se.Status != "working" {
+		t.Errorf("status %s at %s, want working at %s", se.Status, se.StatusAt, at)
+	}
+}
+
 func TestSQL(t *testing.T) {
 	r := newRig(t)
 	s := r.svc.Store.(SQL)

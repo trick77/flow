@@ -135,12 +135,6 @@ func (s SQL) Update(ctx context.Context, id string, p Patch) error {
 	if p.Title != "" {
 		q, args = q+`, title = ?, title_source = 'owner'`, append(args, p.Title)
 	}
-	if p.Model != "" {
-		q, args = q+`, model = ?`, append(args, p.Model)
-	}
-	if p.Mode != "" {
-		q, args = q+`, mode = ?`, append(args, p.Mode)
-	}
 	res, err := s.DB.ExecContext(ctx, q+` WHERE id = ?`, append(args, id)...)
 	return affected(res, err, "session "+id)
 }
@@ -166,7 +160,7 @@ func (s SQL) ApplyMirror(ctx context.Context, id string, m Mirror) error {
 	args := []any{m.LastSeq, at, now}
 	if m.Status != "" {
 		q += `, status_at = CASE WHEN status = ? THEN status_at ELSE ? END, status = ?`
-		args = append(args, m.Status, now, m.Status)
+		args = append(args, m.Status, at, m.Status)
 	}
 	if m.Unseen {
 		q += `, unseen = 1`

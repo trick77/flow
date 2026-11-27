@@ -179,8 +179,26 @@ func HostUnit(sessionID string) string { return "flow-session-" + sessionID + ".
 // JobUnit is a job's unit (setup script, config sync).
 func JobUnit(id string) string { return "flow-job-" + id + ".service" }
 
+// JobDir holds the jobs' logs and results: root 0700, so nothing the agent plants there is ever opened by root.
+const JobDir = State + "/jobs"
+
 // JobLog is a job's output, kept after the job ends.
-func JobLog(id string) string { return path.Join(State, "jobs", id+".log") }
+func JobLog(id string) string { return path.Join(JobDir, id+".log") }
+
+// JobResult is a job's result (JSON), written by its runner when the job ends: the marker that it ran, from which
+// commit and script, and how it ended. A job with a result is never started again in this instance.
+func JobResult(id string) string { return path.Join(JobDir, id+".json") }
+
+// JobEnvFile is the EnvironmentFile of a job's unit, beside the session hosts' (a name no session or terminal id
+// takes).
+func JobEnvFile(id string) string { return path.Join(SessionEnvDir, "job-"+id+".env") }
+
+// SetupScript is a repository's setup script, relative to its main checkout.
+const SetupScript = ".flow/setup.sh"
+
+// SetupJobID is the job that runs a repository's setup script (RepoDir name): one per repository and instance, so a
+// restarted Flow or flowd finds it again instead of starting a second.
+func SetupJobID(repoDir string) string { return "setup-" + repoDir }
 
 // TerminalUnit is a terminal's unit.
 func TerminalUnit(id string) string { return "flow-term-" + id + ".service" }

@@ -97,6 +97,7 @@ func (s *Supervisor) Handler(token string) http.Handler {
 	})
 	mux.HandleFunc(flowdproto.RouteEvents, s.events)
 	s.terminalRoutes(mux)
+	s.jobRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(flowdproto.HeaderProtocol, strconv.Itoa(flowdproto.Protocol))
 		got, ok := httpx.Bearer(r)

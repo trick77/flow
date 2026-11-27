@@ -184,8 +184,8 @@ func TestCommandHeld_keepsTheQueueStill(t *testing.T) {
 			reason = p.Reason
 		}
 	}
-	if reason != event.ResumeReasonSandboxStart {
-		t.Errorf("host started with resume reason %q, want sandbox_start (queue left as it is)", reason)
+	if reason != event.ResumeReasonCommand {
+		t.Errorf("host started with resume reason %q, want command (queue left as it is)", reason)
 	}
 	if st, _ := r.sb.api.Session(t.Context(), id); st.Unit == "active" {
 		t.Error("the host started for the command keeps running")
@@ -291,8 +291,8 @@ func TestCommandIfRunning_startsTheHostHeld(t *testing.T) {
 			reasons = append(reasons, p.Reason)
 		}
 	}
-	if len(reasons) != 1 || reasons[0] != event.ResumeReasonSandboxStart {
-		t.Errorf("host started with resume reasons %v, want one sandbox_start (queue left as it is)", reasons)
+	if len(reasons) != 1 || reasons[0] != event.ResumeReasonCommand {
+		t.Errorf("host started with resume reasons %v, want one command (queue left as it is)", reasons)
 	}
 	if st, _ := r.sb.api.Session(t.Context(), id); st.Unit == "active" {
 		t.Error("the host started for the interrupt keeps running")

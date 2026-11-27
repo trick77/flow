@@ -61,7 +61,8 @@ type Config struct {
 	LogPath string
 	Adapter Adapter
 	Version string
-	// ResumeReason goes into session.resumed when the log already has a session.started.
+	// ResumeReason goes into session.resumed when the log already has a session.started; sandbox_start and command
+	// leave the queue as it is (Pump).
 	ResumeReason event.ResumeReason
 	Now          func() time.Time
 	Log          *slog.Logger
@@ -891,10 +892,11 @@ func (h *Host) Pump(ctx context.Context) error {
 	errc := make(chan error, 1)
 	go func() { errc <- h.cfg.Adapter.Run(ctx, out) }()
 	// Messages queued when the previous host died run first, in their order; a newer one queues behind them. Not
-	// for a host started only to log a lost turn after a sandbox start: nobody asked for a turn, so they wait for
-	// the owner (Flow stops that host again at once; the next start drains).
+	// for a host started only to log a lost turn after a sandbox start, or to take a held command (stop, reply,
+	// queue removal, settings): nobody asked for a turn, so they wait for the owner (Flow stops that host again at
+	// once; the next start drains).
 	h.mu.Lock()
-	if h.cfg.ResumeReason != event.ResumeReasonSandboxStart {
+	if h.cfg.ResumeReason != event.ResumeReasonSandboxStart && h.cfg.ResumeReason != event.ResumeReasonCommand {
 		h.drain()
 	}
 	h.mu.Unlock()
