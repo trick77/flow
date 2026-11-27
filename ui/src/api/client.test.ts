@@ -1,8 +1,16 @@
 import {
   ApiError,
+  createApiKey,
+  createProject,
+  deleteApiKey,
+  deleteProject,
   errorCode,
   getAuthSession,
+  getConnections,
+  getProfile,
   getSession,
+  sandboxAction,
+  updateProfile,
   interruptTurn,
   listProjects,
   listSessions,
@@ -129,6 +137,55 @@ describe("API client", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/api/auth/session");
     expect(fetchMock.mock.calls[1][0]).toBe("/api/auth/logout");
     expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+  });
+
+  it("reads and changes the profile and the connections", async () => {
+    fetchMock.mockResolvedValueOnce(respond(200, { gitName: "a" }));
+    fetchMock.mockResolvedValueOnce(respond(200, { gitName: "b" }));
+    fetchMock.mockResolvedValueOnce(respond(200, { apiKeys: [] }));
+    fetchMock.mockResolvedValueOnce(respond(201, { id: "k" }));
+    fetchMock.mockResolvedValueOnce(respond(204));
+    await getProfile();
+    await updateProfile({ gitName: "b" });
+    await getConnections();
+    await createApiKey({ kind: "claude_token", value: "v" });
+    await deleteApiKey("k/1");
+    const calls = fetchMock.mock.calls.map(([url, init]) => [
+      url,
+      init?.method,
+      init?.body,
+    ]);
+    expect(calls).toEqual([
+      ["/api/profile", "GET", undefined],
+      ["/api/profile", "PATCH", '{"gitName":"b"}'],
+      ["/api/connections", "GET", undefined],
+      [
+        "/api/connections/api-keys",
+        "POST",
+        '{"kind":"claude_token","value":"v"}',
+      ],
+      ["/api/connections/api-keys/k%2F1", "DELETE", undefined],
+    ]);
+  });
+
+  it("creates and deletes projects and drives their sandboxes", async () => {
+    fetchMock.mockResolvedValueOnce(respond(201, { id: "p" }));
+    fetchMock.mockResolvedValueOnce(respond(204));
+    await createProject({ name: "n", repos: ["a/b"] });
+    await deleteProject("p");
+    for (const a of ["start", "stop", "rebuild"] as const) {
+      fetchMock.mockResolvedValueOnce(respond(202, { state: "setup" }));
+      await expect(sandboxAction("p", a)).resolves.toEqual({ state: "setup" });
+    }
+    expect(
+      fetchMock.mock.calls.map(([url, init]) => [url, init?.method]),
+    ).toEqual([
+      ["/api/projects", "POST"],
+      ["/api/projects/p", "DELETE"],
+      ["/api/projects/p/sandbox/start", "POST"],
+      ["/api/projects/p/sandbox/stop", "POST"],
+      ["/api/projects/p/sandbox/rebuild", "POST"],
+    ]);
   });
 
   it("tells listeners about unauthenticated answers only", async () => {

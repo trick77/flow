@@ -4,5 +4,6 @@
 export { AccountContext, AuthGate, SignIn, type Account } from "./AuthGate";
 export { Header } from "./Header";
 export { Icon, type IconName } from "./Icon";
+export { Nav, type View } from "./Nav";
 export { SessionView } from "./SessionView";
 export { UserMenu } from "./UserMenu";

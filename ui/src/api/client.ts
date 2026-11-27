@@ -1,11 +1,19 @@
 import {
   ERROR_CODE_VALUES,
+  type ApiKey,
+  type ApiKeyCreate,
   type AuthSession,
+  type Connections,
   type ErrorCode,
   type MessageAccepted,
   type MessageCreate,
+  type Profile,
+  type ProfileUpdate,
+  type Project,
+  type ProjectCreate,
   type ProjectList,
   type ReplyDecision,
+  type Sandbox,
   type Session,
   type SessionList,
 } from "./types.gen";
@@ -147,6 +155,56 @@ export function replyPermission(
   );
 }
 
+// archiveSession stops the session's host and removes its worktrees (one
+// with uncommitted work stays on disk); its log stays readable.
+export function archiveSession(sessionId: string): Promise<void> {
+  return request<void>("DELETE", `/api/sessions/${seg(sessionId)}`);
+}
+
 export function interruptTurn(sessionId: string): Promise<void> {
   return request<void>("POST", `/api/sessions/${seg(sessionId)}/interrupt`);
+}
+
+export function getProfile(): Promise<Profile> {
+  return request<Profile>("GET", "/api/profile");
+}
+
+// updateProfile changes the fields given; an empty string clears a text
+// field.
+export function updateProfile(update: ProfileUpdate): Promise<Profile> {
+  return request<Profile>("PATCH", "/api/profile", update);
+}
+
+export function getConnections(): Promise<Connections> {
+  return request<Connections>("GET", "/api/connections");
+}
+
+// createApiKey stores or replaces a secret; the answer never carries it.
+export function createApiKey(key: ApiKeyCreate): Promise<ApiKey> {
+  return request<ApiKey>("POST", "/api/connections/api-keys", key);
+}
+
+export function deleteApiKey(keyId: string): Promise<void> {
+  return request<void>("DELETE", `/api/connections/api-keys/${seg(keyId)}`);
+}
+
+export function createProject(project: ProjectCreate): Promise<Project> {
+  return request<Project>("POST", "/api/projects", project);
+}
+
+export function deleteProject(projectId: string): Promise<void> {
+  return request<void>("DELETE", `/api/projects/${seg(projectId)}`);
+}
+
+// SandboxAction is what the owner can do with a project's sandbox.
+export type SandboxAction = "start" | "stop" | "rebuild";
+
+export function sandboxAction(
+  projectId: string,
+  action: SandboxAction,
+): Promise<Sandbox> {
+  return request<Sandbox>(
+    "POST",
+    `/api/projects/${seg(projectId)}/sandbox/${action}`,
+  );
 }

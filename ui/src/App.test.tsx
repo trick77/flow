@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { App } from "./App";
 import type { Project, SessionSummary } from "./api/types.gen";
 import { resources } from "./i18n/resources";
+import { FakeWebSocket } from "./terminal/fakeSocket";
 import { FakeEventSource } from "./test/fakeEventSource";
 import { fixtureLines } from "./test/flowEvents";
 
@@ -38,26 +39,50 @@ interface Server {
   sessions: SessionSummary[];
   projects: Project[];
   sessionsStatus?: number;
+  projectsStatus?: number;
+  // archive answers DELETE /api/sessions/{id}: 204 or an error code.
+  archive?: string[];
   calls: string[];
 }
 
 function serve(server: Server) {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-    const url = String(input);
-    server.calls.push(url);
-    if (url === "/api/sessions") {
-      if (server.sessionsStatus) {
-        return new Response(JSON.stringify({ code: "sandbox_unavailable" }), {
-          status: server.sessionsStatus,
+  const fetchMock = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      server.calls.push(init?.method === "DELETE" ? "DELETE " + url : url);
+      if (init?.method === "DELETE" && url.startsWith("/api/sessions/")) {
+        const code = server.archive?.shift();
+        return code
+          ? new Response(JSON.stringify({ code }), { status: 409 })
+          : new Response(null, { status: 204 });
+      }
+      if (url === "/api/terminals") {
+        return new Response(
+          JSON.stringify({ id: "t1", projectId: "p1", cwd: "/w" }),
+          { status: 201 },
+        );
+      }
+      if (url === "/api/projects" && server.projectsStatus) {
+        return new Response(JSON.stringify({ code: "internal" }), {
+          status: server.projectsStatus,
         });
       }
-      return new Response(JSON.stringify({ items: server.sessions }));
-    }
-    if (url === "/api/projects") {
-      return new Response(JSON.stringify({ items: server.projects }));
-    }
-    return new Response(JSON.stringify({ code: "not_found" }), { status: 404 });
-  });
+      if (url === "/api/sessions") {
+        if (server.sessionsStatus) {
+          return new Response(JSON.stringify({ code: "sandbox_unavailable" }), {
+            status: server.sessionsStatus,
+          });
+        }
+        return new Response(JSON.stringify({ items: server.sessions }));
+      }
+      if (url === "/api/projects") {
+        return new Response(JSON.stringify({ items: server.projects }));
+      }
+      return new Response(JSON.stringify({ code: "not_found" }), {
+        status: 404,
+      });
+    },
+  );
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
@@ -209,5 +234,158 @@ describe("App", () => {
     expect(server.calls.filter((c) => c === "/api/sessions").length).toBe(
       before + 1,
     );
+  });
+
+  it("opens Projects and Settings from the header, also without sessions", async () => {
+    serve({ sessions: [], projects: [project], calls: [] });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByText(en.shell.empty);
+    fireEvent.click(screen.getByRole("button", { name: en.shell.projects }));
+    expect(
+      screen.getByRole("heading", { level: 1, name: en.projects.title }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "scener" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: en.shell.projects }),
+    ).toHaveAttribute("aria-current", "page");
+    // No session to go back to.
+    expect(
+      screen.queryByRole("button", { name: en.shell.backToSession }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: en.shell.settings }));
+    expect(
+      screen.getByRole("heading", { level: 1, name: en.settings.title }),
+    ).toBeInTheDocument();
+    // The current page's button goes back.
+    fireEvent.click(screen.getByRole("button", { name: en.shell.settings }));
+    expect(screen.getByText(en.shell.empty)).toBeInTheDocument();
+  });
+
+  it("says the projects failed to load instead of showing none", async () => {
+    serve({
+      sessions: [],
+      projects: [project],
+      projectsStatus: 500,
+      calls: [],
+    });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByText(en.shell.empty);
+    fireEvent.click(screen.getByRole("button", { name: en.shell.projects }));
+    expect(screen.getByRole("alert")).toHaveTextContent(en.projects.loadFailed);
+    expect(screen.queryByText(en.projects.empty)).toBeNull();
+  });
+
+  it("keeps the session's draft, terminal and stream across a page", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    // xterm asks for the device pixel ratio's media query; jsdom has none.
+    vi.stubGlobal(
+      "matchMedia",
+      () =>
+        ({ matches: false, addListener() {}, removeListener() {} }) as unknown,
+    );
+    FakeWebSocket.reset();
+    serve({ sessions: [summary({})], projects: [project], calls: [] });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    fireEvent.change(screen.getByLabelText(en.composer.placeholder), {
+      target: { value: "half a message" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: en.terminal.toggle }));
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.shell.settings }));
+    expect(
+      screen.getByRole("heading", { level: 1, name: en.settings.title }),
+    ).toBeInTheDocument();
+    // The session is out of view (hidden), not gone.
+    expect(screen.queryByRole("region", { name: en.shell.session })).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: en.shell.backToSession }),
+    );
+    expect(screen.getByLabelText(en.composer.placeholder)).toHaveValue(
+      "half a message",
+    );
+    expect(
+      screen.getByRole("button", { name: en.terminal.toggle }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(FakeEventSource.forUrl("/api/sessions/s-done/events")).toHaveLength(
+      1,
+    );
+    expect(
+      FakeEventSource.forUrl("/api/sessions/s-done/events")[0].closed,
+    ).toBe(false);
+    // The terminal's one socket, still open.
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances[0].closedWith).toBeUndefined();
+  });
+
+  it("archives the open session after asking, and says why it could not", async () => {
+    const server: Server = {
+      sessions: [summary({}), summary({ id: "s2", title: "Second one" })],
+      projects: [project],
+      archive: ["sandbox_unavailable"],
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", {
+      level: 2,
+      name: "Persist the sidebar width",
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.shell.archive }));
+    const ask = screen.getByRole("alertdialog", { name: en.shell.archive });
+    expect(ask).toHaveTextContent("Archive Persist the sidebar width?");
+    expect(ask).toHaveTextContent("uncommitted");
+    fireEvent.click(within(ask).getByRole("button", { name: en.shell.cancel }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(server.calls.filter((c) => c.startsWith("DELETE"))).toHaveLength(0);
+
+    const confirm = async () => {
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole("button", { name: en.shell.confirmArchiveAction }),
+        );
+      });
+    };
+    fireEvent.click(screen.getByRole("button", { name: en.shell.archive }));
+    await confirm();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      en.errors.sandbox_unavailable,
+    );
+    await confirm();
+    expect(server.calls).toContain("DELETE /api/sessions/s-done");
+    // Gone from the sidebar; the other session shows.
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Second one" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Persist the sidebar width")).toBeNull();
+  });
+
+  it("goes back to the session from a page, and to a session picked in the sidebar", async () => {
+    serve({
+      sessions: [summary({}), summary({ id: "s2", title: "Second one" })],
+      projects: [project],
+      calls: [],
+    });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", {
+      level: 2,
+      name: "Persist the sidebar width",
+    });
+    fireEvent.click(screen.getByRole("button", { name: en.shell.projects }));
+    fireEvent.click(
+      screen.getByRole("button", { name: en.shell.backToSession }),
+    );
+    expect(
+      screen.queryByRole("heading", { level: 1, name: en.projects.title }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: en.shell.settings }));
+    const sidebar = screen.getByRole("region", {
+      name: en.sidebar.sectionDone,
+    });
+    fireEvent.click(within(sidebar).getByText("Second one"));
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Second one" }),
+    ).toBeInTheDocument();
   });
 });

@@ -1,0 +1,64 @@
+/* The header's right end (mock: .hdr-actions, .hdr-div, .icon-btn): a
+   divider, then Projects and Settings. */
+.hdr-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.hdr-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.hdr-div {
+  width: 1px;
+  height: 18px;
+  margin: 0 6px;
+  flex: 0 0 auto;
+  background: var(--color-border-strong);
+}
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  color: var(--color-ink-icon);
+  transition:
+    background-color 0.12s,
+    color 0.12s;
+}
+.icon-btn:hover {
+  background: var(--color-raised);
+  color: var(--color-ink);
+}
+.icon-btn[aria-current="page"] {
+  background: var(--color-active);
+  color: var(--color-ink);
+}
+.icon-btn svg.i {
+  width: 18px;
+  height: 18px;
+}
+.icon-btn[aria-expanded="true"] {
+  background: var(--color-active);
+  color: var(--color-ink);
+}
+
+/* A session view kept mounted under a page (draft, terminal and stream
+   stay): .view's display:flex would beat the hidden attribute. */
+.view[hidden] {
+  display: none;
+}
+
+/* The archive confirmation under the session header. */
+.confirm.hdr-confirm {
+  flex: 0 0 auto;
+  margin: 10px 16px 0;
+}
+.hdr-confirm-err {
+  margin: 8px 0 0;
+  color: var(--color-danger);
+  font-size: 0.75rem;
+}
