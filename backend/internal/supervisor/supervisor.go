@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -474,11 +475,45 @@ func (s *Supervisor) readSpec(id string) (host.Spec, error) {
 	}
 	// The file lies in a directory the agent user owns: flowd (root) removes its Dir and claim by these fields, so
 	// they must be what flowd wrote.
-	if sp.Session.ID != id || !layout.ValidName(sp.Session.Name) || sp.Dir != layout.SessionDir(sp.Session.Name) {
-		return host.Spec{}, invalid("spec of session %s: id %q, name %q or dir %q not flowd's", id, sp.Session.ID,
-			sp.Session.Name, sp.Dir)
+	if sp.Session.ID != id || !layout.ValidName(sp.Session.Name) || sp.Dir != layout.SessionDir(sp.Session.Name) ||
+		!validCwd(sp) {
+		return host.Spec{}, invalid("spec of session %s: id %q, name %q, dir %q or cwd %q not flowd's", id,
+			sp.Session.ID, sp.Session.Name, sp.Dir, sp.Cwd)
 	}
 	return sp, nil
+}
+
+// validCwd: the agent works in its session directory or in one repository's worktree there (a terminal starts in
+// it, so the field must not point anywhere else).
+func validCwd(sp host.Spec) bool {
+	return sp.Cwd == "" || sp.Cwd == sp.Dir || path.Dir(sp.Cwd) == sp.Dir && layout.ValidName(path.Base(sp.Cwd))
+}
+
+// agentCwd is the working directory a session's agent gets, chosen once (the spec keeps it): the worktree of a
+// session that starts with exactly one repository, so the agent works inside it; the session directory above
+// several. A session whose log already exists keeps the directory it ran in, as its first session.started names it
+// (the session directory for one from before this choice, or a spec lost or rewritten without the field): Claude
+// Code stores its transcript by working directory, and a resume must find it.
+func (s *Supervisor) agentCwd(spec host.Spec, logged bool) string {
+	if spec.Cwd != "" {
+		return spec.Cwd
+	}
+	if logged {
+		evs, err := eventlog.NewReader(s.p(layout.EventLog(spec.Session.ID))).Read(0, 1)
+		if err == nil && len(evs) == 1 && evs[0].Kind == event.KindSessionStarted {
+			var st event.SessionStarted
+			if json.Unmarshal(evs[0].Data, &st) == nil {
+				if c := (host.Spec{Session: spec.Session, Dir: spec.Dir, Cwd: st.Cwd}); st.Cwd != "" && validCwd(c) {
+					return st.Cwd
+				}
+			}
+		}
+		return spec.Dir
+	}
+	if len(spec.Worktrees) == 1 {
+		return spec.Worktrees[0].Path
+	}
+	return spec.Dir
 }
 
 // EnsureSession implements flowdproto.API: worktrees are created as needed, the spec is written beside the log and
@@ -511,7 +546,7 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 	}
 	spec := host.Spec{Session: sp, Dir: layout.SessionDir(sp.Name)}
 	if old, err := s.readSpec(sp.ID); err == nil {
-		spec.Worktrees = old.Worktrees
+		spec.Worktrees, spec.Cwd = old.Worktrees, old.Cwd
 	}
 	for _, dir := range []string{s.p(layout.SessionDir(sp.Name)), filepath.Dir(s.p(layout.EventLog(sp.ID))),
 		filepath.Dir(s.p(layout.HostSocket(sp.ID)))} {
@@ -544,6 +579,12 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 		}
 		spec.Worktrees = append(spec.Worktrees, st)
 		added = append(added, st)
+		if err := s.writeSpec(spec); err != nil {
+			return flowdproto.SessionState{}, err
+		}
+	}
+	if spec.Cwd == "" {
+		spec.Cwd = s.agentCwd(spec, resumed)
 		if err := s.writeSpec(spec); err != nil {
 			return flowdproto.SessionState{}, err
 		}

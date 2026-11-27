@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -82,7 +83,7 @@ func TestAgentState_fromTheLog(t *testing.T) {
 	got := r.h.AgentState()
 	want := AgentState{Resume: true, PriorCostUSD: 0.35, Model: "m1", Mode: event.PermissionModeAcceptEdits,
 		ModeCap: event.PermissionModeAuto}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("AgentState = %+v, want %+v", got, want)
 	}
 
@@ -98,6 +99,56 @@ func TestAgentState_fromTheLog(t *testing.T) {
 	got = r.h.AgentState()
 	if got.PriorCostUSD != 0.4 || got.Model != "m2" || got.Mode != event.PermissionModePlan {
 		t.Errorf("after a turn and a settings change: %+v", got)
+	}
+}
+
+// The worktrees a restarted agent is told about are the log's: the spec's (logged at the first start) and one added
+// while the host ran, which the host's spec never sees; also after a restart.
+func TestAgentState_worktreesFromTheLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	r := start(t, path, newFake())
+	added := event.WorktreeAdd{Repo: "trick77/web", Branch: "flow/demo", Path: "/home/flow/work/.sessions/demo/web",
+		BaseRef: "origin/main", BaseSHA: "def"}
+	if _, err := r.h.Command(cmd(t, "w1", event.CmdWorktreeAdd, added)); err != nil {
+		t.Fatal(err)
+	}
+	want := []event.WorktreeAdded{{Repo: "trick77/toolkit", Branch: "flow/demo",
+		Path: "/home/flow/work/.sessions/demo/toolkit", BaseRef: "origin/master", BaseSHA: "abc"}, event.WorktreeAdded(added)}
+	if got := r.h.AgentState().Worktrees; !reflect.DeepEqual(got, want) {
+		t.Errorf("running: worktrees = %+v, want %+v", got, want)
+	}
+	r.stop()
+	r = start(t, path, newFake())
+	if got := r.h.AgentState().Worktrees; !reflect.DeepEqual(got, want) {
+		t.Errorf("after a restart: worktrees = %+v, want %+v", got, want)
+	}
+}
+
+// session.started names the agent's working directory: the spec's Cwd, the session directory for a spec without one.
+func TestSessionStarted_cwd(t *testing.T) {
+	for _, tc := range []struct{ cwd, want string }{
+		{"", "/home/flow/work/.sessions/demo"},
+		{"/home/flow/work/.sessions/demo/toolkit", "/home/flow/work/.sessions/demo/toolkit"},
+	} {
+		sp := spec()
+		sp.Cwd = tc.cwd
+		path := filepath.Join(t.TempDir(), "events.jsonl")
+		h, err := New(Config{Spec: sp, LogPath: path, Adapter: newFake(), Version: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = h.Close()
+		evs, err := eventlog.NewReader(path).Read(0, 0)
+		if err != nil || len(evs) == 0 {
+			t.Fatal(err)
+		}
+		p, err := evs[0].Payload()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s, ok := p.(*event.SessionStarted); !ok || s.Cwd != tc.want {
+			t.Errorf("cwd %q: session.started = %+v, want cwd %q", tc.cwd, p, tc.want)
+		}
 	}
 }
 

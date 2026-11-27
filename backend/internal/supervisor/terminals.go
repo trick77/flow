@@ -46,7 +46,8 @@ func termAuth(t flowdproto.TerminalSpec) event.ClaudeAuth {
 	return t.ClaudeAuth
 }
 
-// validTermDir: a terminal starts in the agent's home or in a session directory, nowhere else.
+// validTermDir: a terminal is asked for in the agent's home or in a session directory, nowhere else (flowd moves a
+// session's terminal into the agent's working directory).
 func validTermDir(dir string) bool {
 	return dir == layout.Home || path.Dir(dir) == layout.Sessions && layout.ValidName(path.Base(dir))
 }
@@ -65,6 +66,13 @@ func (s *Supervisor) EnsureTerminal(ctx context.Context, t flowdproto.TerminalSp
 	}
 	if t.ClaudeAuth != "" && !slices.Contains(event.ClaudeAuthValues, t.ClaudeAuth) {
 		return flowdproto.TerminalState{}, invalid("terminal claudeAuth %q", t.ClaudeAuth)
+	}
+	if t.Session != "" {
+		// A session's terminal opens where its agent works: the session's one worktree, or the session directory.
+		// Flow knows only the session directory; the spec holds the choice.
+		if sp, err := s.readSpec(t.Session); err == nil && t.Dir == sp.Dir {
+			t.Dir = sp.AgentDir()
+		}
 	}
 	unit := layout.TerminalUnit(t.ID)
 	defer s.lock(unit)()

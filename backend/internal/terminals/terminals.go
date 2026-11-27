@@ -215,9 +215,16 @@ func (a *API) CreateTerminal(w http.ResponseWriter, r *http.Request) {
 			httpapi.WriteError(w, unavailable(err))
 			return
 		}
+		// flowd opens a session's terminal where the session's agent works, which may be below the directory asked.
+		if st.Dir != "" {
+			out.Cwd = st.Dir
+		}
 		break
 	}
-	out.ID, out.Cwd = spec.ID, spec.Dir
+	out.ID = spec.ID
+	if out.Cwd == "" {
+		out.Cwd = spec.Dir
+	}
 	httpapi.WriteJSON(w, http.StatusCreated, out)
 }
 

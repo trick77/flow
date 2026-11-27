@@ -71,4 +71,10 @@ func TestNewAdapter_selection(t *testing.T) {
 	if a.(*claude.Adapter).Config().RecordPath != "" {
 		t.Error("recording without the switch")
 	}
+	// The agent works where the spec's Cwd says (the session's one worktree), the sidecar too.
+	wt := spec().Worktrees[0].Path
+	a, _ = mk(func(s *Spec) { s.Cwd = wt })
+	if cfg := a.(*claude.Adapter).Config(); cfg.Dir != wt || cfg.Session.Cwd != wt {
+		t.Errorf("cwd %q: dir %q, session cwd %q", wt, cfg.Dir, cfg.Session.Cwd)
+	}
 }

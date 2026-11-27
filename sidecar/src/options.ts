@@ -26,7 +26,8 @@ export interface StartSpec {
   // resume: the session ran before (any earlier host start); the SDK then
   // resumes it instead of creating it.
   resume: boolean;
-  // cwd is the session directory.
+  // cwd is the agent's working directory: the session's one worktree, or the
+  // session directory above several.
   cwd: string;
   mode: PermissionMode;
   modeCap?: PermissionMode;
@@ -41,7 +42,11 @@ export interface StartSpec {
   mcpServers?: Record<string, McpStdioServerConfig>;
   // env is added over the sidecar's own environment for Claude Code.
   env?: Record<string, string>;
+  // additionalDirectories: worktrees outside cwd (a repository added later).
   additionalDirectories?: string[];
+  // appendSystemPrompt: the host's note on which directory holds which
+  // repository, appended to Claude Code's own system prompt.
+  appendSystemPrompt?: string;
   // version names the Flow release in CLAUDE_AGENT_SDK_CLIENT_APP.
   version?: string;
   // priorCostUsd: on a resume, the cost of the session's earlier turns (the
@@ -105,6 +110,12 @@ export function parseStartSpec(v: unknown): StartSpec | string {
   ) {
     return "additionalDirectories";
   }
+  if (
+    s.appendSystemPrompt !== undefined &&
+    typeof s.appendSystemPrompt !== "string"
+  ) {
+    return "appendSystemPrompt";
+  }
   if (s.version !== undefined && typeof s.version !== "string")
     return "version";
   if (s.priorCostUsd !== undefined && typeof s.priorCostUsd !== "number")
@@ -157,6 +168,19 @@ export function buildOptions(spec: StartSpec, st: QueryState): Options {
   if (spec.mcpServers !== undefined) o.mcpServers = spec.mcpServers;
   if (spec.additionalDirectories !== undefined) {
     o.additionalDirectories = spec.additionalDirectories;
+  }
+  if (spec.appendSystemPrompt !== undefined && spec.appendSystemPrompt !== "") {
+    // snapshot false: by default Claude Code records the first request's
+    // prompt and ignores a different append on a later start of the same
+    // session; the note changes when a worktree is added (sdk.d.ts,
+    // systemPrompt). The text is the same at every request of one process,
+    // so the prompt cache still hits.
+    o.systemPrompt = {
+      type: "preset",
+      preset: "claude_code",
+      append: spec.appendSystemPrompt,
+      snapshot: false,
+    };
   }
   // sessionId on the first start, resume afterwards: the SDK refuses both
   // together (without forkSession).

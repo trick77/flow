@@ -8,7 +8,9 @@ package claude
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
+	"strings"
 
 	"github.com/trick77/flow/internal/event"
 )
@@ -29,6 +31,12 @@ type StartSpec struct {
 	ClaudeExecutable string               `json:"claudeExecutable"`
 	SettingsPath     string               `json:"settingsPath"`
 	MCPServers       map[string]MCPServer `json:"mcpServers,omitempty"`
+	// AdditionalDirectories are the worktrees outside Cwd (a repository added to a session that works in its first
+	// one), so Claude Code's file tools reach them without asking.
+	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
+	// AppendSystemPrompt is the layout note: which directory holds which repository, when Cwd is not the session's
+	// one worktree.
+	AppendSystemPrompt string `json:"appendSystemPrompt,omitempty"`
 	// Env is added over the sidecar's own environment for Claude Code; the host leaves it empty and controls the
 	// sidecar's process environment instead (Env).
 	Env map[string]string `json:"env,omitempty"`
@@ -67,6 +75,28 @@ type State struct {
 	Model        string
 	Mode         event.PermissionMode
 	ModeCap      event.PermissionMode
+	// Worktrees are the session's worktrees as logged, in the order they were added.
+	Worktrees []event.WorktreeAdded
+}
+
+// worktreeLayout is what the agent is told about its worktrees beyond its working directory: the ones outside cwd
+// (to pass as additional directories) and a note naming every repository's directory. Neither when cwd is the
+// session's one worktree. The note depends only on the worktrees, in their logged order, so it is the same at every
+// start until a worktree is added.
+func worktreeLayout(cwd string, wts []event.WorktreeAdded) (outside []string, note string) {
+	if len(wts) == 0 || len(wts) == 1 && wts[0].Path == cwd {
+		return nil, ""
+	}
+	var b strings.Builder
+	b.WriteString("The session's repositories, each a git worktree in its own directory " +
+		"(run git commands inside the repository's directory):\n")
+	for _, w := range wts {
+		if w.Path != cwd && !strings.HasPrefix(w.Path, cwd+"/") {
+			outside = append(outside, w.Path)
+		}
+		fmt.Fprintf(&b, "- %s: %s, branch %s, based on %s\n", w.Path, w.Repo, w.Branch, w.BaseRef)
+	}
+	return outside, strings.TrimSuffix(b.String(), "\n")
 }
 
 // NewStartSpec builds the start line's data. The MCP list is the same for every session (stable tool list).
@@ -77,6 +107,7 @@ func NewStartSpec(s Session, st State) StartSpec {
 	}
 	spec := StartSpec{SessionID: s.ID, Resume: st.Resume, Cwd: s.Cwd, Mode: mode, ModeCap: st.ModeCap, Model: st.Model,
 		ClaudeAuth: s.ClaudeAuth, ClaudeExecutable: s.ClaudeExecutable, SettingsPath: s.SettingsPath, Version: s.Version}
+	spec.AdditionalDirectories, spec.AppendSystemPrompt = worktreeLayout(s.Cwd, st.Worktrees)
 	if s.MCPCommand != "" {
 		srv := MCPServer{Type: "stdio", Command: s.MCPCommand, Args: []string{"mcp"}}
 		if s.MCPToken != "" {

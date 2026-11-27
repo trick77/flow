@@ -57,14 +57,14 @@ func newAdapter(spec Spec, pace Pace, paths Paths, logPath, version string, envi
 	}
 	cfg := claude.Config{
 		Argv: []string{paths.Node, filepath.Join(paths.Sidecar, "dist", "main.js")},
-		Dir:  spec.Dir,
+		Dir:  spec.AgentDir(),
 		Env:  env,
-		Session: claude.Session{ID: s.ID, Cwd: spec.Dir, ClaudeAuth: s.ClaudeAuth, ClaudeExecutable: paths.Claude,
+		Session: claude.Session{ID: s.ID, Cwd: spec.AgentDir(), ClaudeAuth: s.ClaudeAuth, ClaudeExecutable: paths.Claude,
 			SettingsPath: paths.Settings, Version: version, MCPCommand: mcpCommand, MCPToken: lookup(environ, claude.MCPTokenVar)},
 		State: func() claude.State {
 			a := state()
 			return claude.State{Resume: a.Resume, PriorCostUSD: a.PriorCostUSD, Model: a.Model, Mode: a.Mode,
-				ModeCap: a.ModeCap}
+				ModeCap: a.ModeCap, Worktrees: a.Worktrees}
 		},
 		Log: log,
 	}

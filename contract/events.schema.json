@@ -286,7 +286,7 @@
         "toolId": { "type": "string" },
         "name": { "type": "string", "description": "The provider's tool name (Read, Bash, mcp__flow__create_session, ...)." },
         "kind": { "$ref": "#/$defs/ToolKind" },
-        "path": { "type": "string", "description": "File or directory the tool works on, relative to the session directory when inside it." },
+        "path": { "type": "string", "description": "File or directory the tool works on, relative to the agent's working directory (session.started.cwd) when inside it." },
         "command": { "type": "string" },
         "pattern": { "type": "string" },
         "url": { "type": "string" },

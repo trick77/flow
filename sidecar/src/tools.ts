@@ -71,8 +71,8 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
 }
 
-// displayPath is a path relative to the session directory when it lies inside
-// it, else as given.
+// displayPath is a path relative to the agent's working directory when it lies
+// inside it, else as given (a sibling worktree's path stays absolute).
 export function displayPath(p: string, cwd: string): string {
   if (!isAbsolute(p) || cwd === "") return p;
   const rel = relative(cwd, p);

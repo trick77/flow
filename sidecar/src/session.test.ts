@@ -23,6 +23,7 @@ import type {
 import { describe, expect, it } from "vitest";
 
 import type { EventDraft } from "./contract/events.gen.js";
+import { parseStartSpec } from "./options.js";
 import type { QueryFn } from "./session.js";
 import { messageUUID } from "./session.js";
 import { DraftWriter, parseLine, runSidecar } from "./stdio.js";
@@ -788,6 +789,49 @@ describe("stdio loop against a stand-in SDK", () => {
     await h.close();
     expect(sdk.calls[0].options.resume).toBe(SID);
     expect(sdk.calls[0].options.sessionId).toBeUndefined();
+  });
+
+  it("appends the host's layout note to Claude Code's prompt, not recorded once, and passes the worktrees outside cwd", async () => {
+    const sdk = fakeSDK([
+      async (ctx) => {
+        const u = await ctx.next();
+        ctx.emit(result(u));
+        await ctx.next();
+      },
+    ]);
+    const h = harness(sdk.query);
+    const note = "The session's repositories:\n- /w/.sessions/s/api: acme/api";
+    h.start({
+      additionalDirectories: ["/w/.sessions/s/web"],
+      appendSystemPrompt: note,
+    });
+    h.send("message.send", { messageId: "m", text: "hi", origin: "user" });
+    await h.kind("turn.ended");
+    await h.close();
+    expect(sdk.calls[0].options).toMatchObject({
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append: note,
+        snapshot: false,
+      },
+      additionalDirectories: ["/w/.sessions/s/web"],
+    });
+  });
+
+  it("refuses a start whose appendSystemPrompt is not a string", () => {
+    const data = {
+      sessionId: SID,
+      resume: false,
+      cwd: CWD,
+      mode: "ask",
+      claudeExecutable: "/usr/local/bin/claude",
+      settingsPath: "/etc/flow/claude-settings.json",
+    };
+    expect(typeof parseStartSpec(data)).toBe("object");
+    expect(parseStartSpec({ ...data, appendSystemPrompt: 1 })).toBe(
+      "appendSystemPrompt",
+    );
   });
 
   it("[docs only] host.shutdown while a permission waits: the request is denied, the turn interrupted, the process ends", async () => {

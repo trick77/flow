@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/trick77/flow/internal/event"
+	"github.com/trick77/flow/internal/eventlog"
 	"github.com/trick77/flow/internal/flowdclient"
 	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/host"
@@ -484,6 +485,14 @@ func TestSpec_plantedLinkAndTamperedFields(t *testing.T) {
 	if got, err := s.readSpec("s1"); err != nil || got.Dir != sp.Dir {
 		t.Errorf("read back %+v, %v", got, err)
 	}
+	withCwd := sp
+	withCwd.Cwd = layout.Worktree("demo", "toolkit")
+	if err := s.writeSpec(withCwd); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.readSpec("s1"); err != nil || got.Cwd != withCwd.Cwd {
+		t.Errorf("spec with a worktree cwd: %+v, %v", got, err)
+	}
 	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".spec-*")); len(left) != 0 {
 		t.Errorf("temporary files left: %v", left)
 	}
@@ -491,6 +500,13 @@ func TestSpec_plantedLinkAndTamperedFields(t *testing.T) {
 		{Session: flowdproto.SessionSpec{ID: "s1", Name: "demo"}, Dir: "/etc"},
 		{Session: flowdproto.SessionSpec{ID: "s1", Name: "../x"}, Dir: layout.SessionDir("../x")},
 		{Session: flowdproto.SessionSpec{ID: "s2", Name: "demo"}, Dir: layout.SessionDir("demo")},
+		{Session: flowdproto.SessionSpec{ID: "s1", Name: "demo"}, Dir: layout.SessionDir("demo"), Cwd: "/etc"},
+		{Session: flowdproto.SessionSpec{ID: "s1", Name: "demo"}, Dir: layout.SessionDir("demo"),
+			Cwd: layout.SessionDir("other") + "/x"},
+		{Session: flowdproto.SessionSpec{ID: "s1", Name: "demo"}, Dir: layout.SessionDir("demo"),
+			Cwd: layout.SessionDir("demo") + "/a/b"},
+		{Session: flowdproto.SessionSpec{ID: "s1", Name: "demo"}, Dir: layout.SessionDir("demo"),
+			Cwd: layout.SessionDir("demo") + "/.."},
 	} {
 		b, _ := json.Marshal(bad)
 		_ = os.WriteFile(path, b, 0o600)
@@ -561,6 +577,122 @@ func TestEnsureSession_adoptsOnlyItsOwnWorktrees(t *testing.T) {
 	}
 	if _, err := r.api.EnsureSession(ctx, spec("s2")); err != nil {
 		t.Errorf("name not freed by stop-and-remove: %v", err)
+	}
+}
+
+// The agent's working directory is chosen once and kept in the spec: a session made with one repository works in
+// its worktree (also after a repository is added), one made with several in the session directory, and a session
+// whose spec predates the choice keeps the session directory its provider session was recorded under.
+func TestEnsureSession_agentCwd(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	spec := func(id, name string, repos ...string) flowdproto.SessionSpec {
+		sp := flowdproto.SessionSpec{ID: id, Name: name, Provider: event.ProviderClaude, Model: "m", Mode: "ask",
+			Replay: true}
+		for _, repo := range repos {
+			sp.Worktrees = append(sp.Worktrees, flowdproto.WorktreeSpec{Repo: repo, Branch: "flow/" + name,
+				BaseRef: "origin/master"})
+		}
+		return sp
+	}
+	sv := New(Options{Root: r.root})
+	cwd := func(id string) string {
+		t.Helper()
+		sp, err := sv.readSpec(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sp.Cwd
+	}
+	started := func(id string) string {
+		t.Helper()
+		evs, err := eventlog.NewReader(filepath.Join(r.root, layout.EventLog(id))).Read(0, 0)
+		if err != nil || len(evs) == 0 {
+			t.Fatalf("log of %s: %v", id, err)
+		}
+		var s event.SessionStarted
+		_ = json.Unmarshal(evs[0].Data, &s)
+		return s.Cwd
+	}
+
+	if _, err := r.api.EnsureSession(ctx, spec("s1", "one", "trick77/toolkit")); err != nil {
+		t.Fatal(err)
+	}
+	wt := layout.Worktree("one", "toolkit")
+	if got := cwd("s1"); got != wt || started("s1") != wt {
+		t.Errorf("one repository: spec cwd %q, session.started cwd %q, want %q", got, started("s1"), wt)
+	}
+	if _, err := r.api.AddWorktree(ctx, "s1", flowdproto.WorktreeSpec{Repo: "trick77/ship", Branch: "flow/one",
+		BaseRef: "origin/master"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.api.StopSession(ctx, "s1", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.api.EnsureSession(ctx, spec("s1", "one", "trick77/toolkit")); err != nil {
+		t.Fatal(err)
+	}
+	if got := cwd("s1"); got != wt {
+		t.Errorf("after a repository was added and a restart: cwd %q, want %q", got, wt)
+	}
+
+	if _, err := r.api.EnsureSession(ctx, spec("s2", "two", "trick77/toolkit", "trick77/ship")); err != nil {
+		t.Fatal(err)
+	}
+	if got := cwd("s2"); got != layout.SessionDir("two") || started("s2") != got {
+		t.Errorf("two repositories: cwd %q, session.started cwd %q", got, started("s2"))
+	}
+
+	// A spec without cwd over an existing log (lost, or rewritten by an older flowd): the log's session.started
+	// decides, the worktree here.
+	if err := r.api.StopSession(ctx, "s1", false); err != nil {
+		t.Fatal(err)
+	}
+	dropCwd := func(id string) {
+		t.Helper()
+		sp, err := sv.readSpec(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sp.Cwd = ""
+		if err := sv.writeSpec(sp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dropCwd("s1")
+	if _, err := r.api.EnsureSession(ctx, spec("s1", "one", "trick77/toolkit")); err != nil {
+		t.Fatal(err)
+	}
+	if got := cwd("s1"); got != wt {
+		t.Errorf("spec without cwd over a log that started in the worktree: cwd %q, want %q", got, wt)
+	}
+
+	// A session from before: its log started in the session directory, and its spec has no cwd.
+	sp3 := spec("s3", "old", "trick77/toolkit")
+	if _, err := r.api.EnsureSession(ctx, sp3); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.api.StopSession(ctx, "s3", false); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(r.root, layout.EventLog("s3"))
+	_ = os.Remove(logPath)
+	w, _, err := eventlog.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := event.New("s3", event.KindSessionStarted, time.Now(), event.SessionStarted{Provider: event.ProviderClaude,
+		Model: "m", Mode: "ask", Cwd: layout.SessionDir("old")})
+	if _, err := w.Append(e); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	dropCwd("s3")
+	if _, err := r.api.EnsureSession(ctx, sp3); err != nil {
+		t.Fatal(err)
+	}
+	if got := cwd("s3"); got != layout.SessionDir("old") {
+		t.Errorf("existing session: cwd %q, want its session directory", got)
 	}
 }
 

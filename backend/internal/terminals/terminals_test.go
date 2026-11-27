@@ -331,6 +331,26 @@ func (r *recorder) EnsureTerminal(ctx context.Context, t flowdproto.TerminalSpec
 	return r.Fake.EnsureTerminal(ctx, t)
 }
 
+// inWorktree is a flowd that opens a session's terminal in the session's one worktree, as flowd does when the
+// session's agent works there.
+type inWorktree struct{ *flowdfake.Fake }
+
+func (w inWorktree) EnsureTerminal(ctx context.Context, t flowdproto.TerminalSpec) (flowdproto.TerminalState, error) {
+	st, err := w.Fake.EnsureTerminal(ctx, t)
+	st.Dir = t.Dir + "/api"
+	return st, err
+}
+
+// The terminal's cwd is where flowd started it, not the directory Flow asked for.
+func TestCreate_cwdIsFlowds(t *testing.T) {
+	r := newRig(t)
+	r.sb.api = inWorktree{r.fake}
+	resp, out := r.post(`{"projectId":"` + pid + `","sessionId":"` + sid + `","cols":80,"rows":24}`)
+	if resp.StatusCode != http.StatusCreated || out["cwd"] != layout.SessionDir("flaky-test")+"/api" {
+		t.Fatalf("create = %d %v", resp.StatusCode, out)
+	}
+}
+
 type notFound struct{ *flowdfake.Fake }
 
 func (notFound) EnsureTerminal(context.Context, flowdproto.TerminalSpec) (flowdproto.TerminalState, error) {

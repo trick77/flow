@@ -26,9 +26,21 @@ import (
 
 // Spec is what flowd starts a host with, written to layout.SessionSpecFile.
 type Spec struct {
-	Session   flowdproto.SessionSpec     `json:"session"`
-	Dir       string                     `json:"dir"`
+	Session flowdproto.SessionSpec `json:"session"`
+	Dir     string                 `json:"dir"`
+	// Cwd is the agent's working directory, chosen once by flowd before the session's first start and never
+	// changed after (Claude Code keys its transcripts by it, so a resume must find the same one): the worktree of a
+	// session made with one repository, else Dir. Empty in specs from before the field: Dir.
+	Cwd       string                     `json:"cwd,omitempty"`
 	Worktrees []flowdproto.WorktreeState `json:"worktrees"`
+}
+
+// AgentDir is the agent's working directory: Cwd, or Dir for a spec without one.
+func (s Spec) AgentDir() string {
+	if s.Cwd != "" {
+		return s.Cwd
+	}
+	return s.Dir
 }
 
 // Adapter drives one agent. Run emits drafts until ctx ends; Send hands it a command of a kind marked sidecar and
@@ -73,6 +85,7 @@ type Host struct {
 	// providerKinds). Both go into a restarted agent's start: resume and the cost its totals continue from.
 	costUSD      float64
 	provider     bool
+	worktrees    []event.WorktreeAdded
 	started      bool
 	turn         string
 	turns        int
@@ -136,7 +149,7 @@ func New(cfg Config) (*Host, error) {
 		h.started = true
 		h.append(event.KindSessionStarted, "", event.SessionStarted{Provider: s.Session.Provider,
 			ClaudeAuth: s.Session.ClaudeAuth, Model: s.Session.Model, Mode: s.Session.Mode, ModeCap: s.Session.ModeCap,
-			ProviderSessionID: s.Session.ID, Cwd: s.Dir})
+			ProviderSessionID: s.Session.ID, Cwd: s.AgentDir()})
 		for _, wt := range s.Worktrees {
 			h.append(event.KindWorktreeAdded, "", event.WorktreeAdded{Repo: wt.Repo, Branch: wt.Branch, Path: wt.Path,
 				BaseRef: wt.BaseRef, BaseSHA: wt.BaseSHA})
@@ -266,7 +279,7 @@ func (h *Host) tryWrite(e event.Event) error {
 const NoticeProviderSession = "provider_session"
 
 // observe keeps what a restarted agent is started with up to date with every logged event (on recovery and as
-// written): model, mode, cap, the summed cost and whether the provider has a session.
+// written): model, mode, cap, the summed cost, whether the provider has a session, and the worktrees.
 func (h *Host) observe(_ event.EventKind, turn string, p any) {
 	switch p := p.(type) {
 	case *event.Notice:
@@ -290,6 +303,13 @@ func (h *Host) observe(_ event.EventKind, turn string, p any) {
 	case *event.TurnEnded:
 		if p.CostUSD != nil && h.provider {
 			h.costUSD += *p.CostUSD
+		}
+	case *event.WorktreeAdded:
+		// The log, not the spec: a worktree added while the host runs is only in the log until the next start.
+		if i := slices.IndexFunc(h.worktrees, func(w event.WorktreeAdded) bool { return w.Repo == p.Repo }); i >= 0 {
+			h.worktrees[i] = *p
+		} else {
+			h.worktrees = append(h.worktrees, *p)
 		}
 	}
 }
@@ -317,6 +337,8 @@ type AgentState struct {
 	// Mode is held to ModeCap.
 	Mode    event.PermissionMode
 	ModeCap event.PermissionMode
+	// Worktrees are the session's worktrees as logged (worktree.added), in the order they were added.
+	Worktrees []event.WorktreeAdded
 }
 
 // AgentState reports the session's agent state now.
@@ -324,7 +346,7 @@ func (h *Host) AgentState() AgentState {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return AgentState{Resume: h.provider, PriorCostUSD: math.Round(h.costUSD*1e9) / 1e9, Model: h.model,
-		Mode: capped(h.mode, h.modeCap), ModeCap: h.modeCap}
+		Mode: capped(h.mode, h.modeCap), ModeCap: h.modeCap, Worktrees: slices.Clone(h.worktrees)}
 }
 
 func (h *Host) broadcast(f hostproto.Frame) {
