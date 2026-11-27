@@ -1,3 +1,7 @@
+# Flow on a host prepared by deploy/host-setup.sh, behind an existing Traefik (docs/deploy.md). Settings come from
+# .env next to this file (template: deploy/flow.env.example): Compose reads it for the ${...} below, and the
+# container gets every line of it. Needs Docker Compose 2.24+ (env_file `path`).
+name: flow
 services:
   flow:
     image: ghcr.io/trick77/flow:latest
@@ -5,22 +9,38 @@ services:
     build:
       context: .
       dockerfile: backend/Containerfile
-    # distroless nonroot's own uid, never 1000 (the host's first user). Host
-    # ./data must belong to it: sudo chown -R 65532:65532 data
+    # distroless nonroot's own uid, never 1000 (the host's first user). Host ./data and host-setup's certificate
+    # directory must belong to it: install -d -o 65532 -g 65532 -m 0700 data
     user: "65532:65532"
     restart: unless-stopped
-    # BACKEND_* settings beyond the ones below. Values exported in the shell
-    # are not forwarded. Needs Docker Compose 2.24+ (env_file `path`).
     env_file:
       - path: .env
         required: false
+    # Fixed by this file (the mounts below), so not taken from .env.
     environment:
       BACKEND_ADDR: ":8080"
-      BACKEND_LOG_LEVEL: "${BACKEND_LOG_LEVEL:-info}"
-    ports:
-      - "127.0.0.1:8080:8080"
+      BACKEND_DB_PATH: /data/flow.db
+      BACKEND_INCUS_CERT: /etc/flow/incus/client.crt
+      BACKEND_INCUS_KEY: /etc/flow/incus/client.key
+      BACKEND_INCUS_SERVER_CERT: /etc/flow/incus/server.crt
+    # No published port: browsers come through Traefik on the proxy network. Flow refuses every request that
+    # arrives over the sandbox network.
     volumes:
       - ./data:/data
+      - ${INCUS_CERT_DIR:-/etc/flow-host/incus}:/etc/flow/incus:ro
+    networks:
+      - sandbox
+      - proxy
+    labels:
+      traefik.enable: "true"
+      # Flow is on two networks: the proxy must reach it on its own, never over the sandbox network.
+      traefik.docker.network: ${PROXY_NETWORK:-traefik}
+      traefik.http.routers.flow.rule: Host(`${BACKEND_PUBLIC_FQDN:?set BACKEND_PUBLIC_FQDN in .env}`)
+      traefik.http.routers.flow.entrypoints: websecure
+      # The host's wildcard certificate (Traefik's file provider) covers the name: no certresolver.
+      traefik.http.routers.flow.tls: "true"
+      traefik.http.routers.flow.service: flow
+      traefik.http.services.flow.loadbalancer.server.port: "8080"
     healthcheck:
       test: ["CMD", "/flow", "healthcheck"]
       interval: 60s
@@ -28,3 +48,13 @@ services:
       start_period: 30s
       start_interval: 5s
       retries: 3
+
+networks:
+  # host-setup.sh's Docker network (its DOCKER_NETWORK): Flow dials flowd in the sandboxes there.
+  sandbox:
+    name: ${DOCKER_NETWORK:-flow}
+    external: true
+  # The reverse proxy's network, where Traefik reaches Flow.
+  proxy:
+    name: ${PROXY_NETWORK:-traefik}
+    external: true

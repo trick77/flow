@@ -22,13 +22,16 @@
 #      Docker itself never flushes DOCKER-USER (measured: restart, firewalld reload, network re-create).
 #   4. Incus (containers only; installed with apt-get as incus-base when missing, before any other change, elsewhere
 #      install it first) without any managed network; the storage pool $BACKEND_INCUS_POOL (when missing); the API
-#      on $INCUS_LISTEN. The project's default profile gets its root disk on that pool; a root disk on another pool
-#      is refused, never re-pointed.
+#      on $INCUS_LISTEN (default: $BRIDGE's gateway, which Flow's container reaches and sandboxes do not). The
+#      project's default profile gets its root disk on that pool; a root disk on another pool is refused, never
+#      re-pointed.
 #   5. systemd drop-in: incus.service starts after Docker has made $BRIDGE (else autostart fails three times and
 #      leaves the sandboxes stopped; measured).
 #   6. The restricted Incus project $PROJECT and Flow's client certificate, trusted for that project only. The
 #      project needs restricted.devices.nic=allow: a restricted project refuses NICs on an unmanaged bridge
-#      ("Only managed network devices are allowed", measured), and Incus has nothing narrower.
+#      ("Only managed network devices are allowed", measured), and Incus has nothing narrower. $CERT_DIR (client
+#      certificate and key, Incus' server certificate) belongs to $CERT_OWNER, the uid Flow's container runs as and
+#      reads them with through a read-only mount; set again on every run.
 #   Flow's container (not made here) joins $DOCKER_NETWORK to dial flowd and must also be on the reverse proxy's
 #   network, where the proxy reaches it (Traefik: label traefik.docker.network=<the proxy's network>). Flow refuses
 #   every browser request arriving over $DOCKER_NETWORK, which sandboxes reach at L2; with no other network it
@@ -57,8 +60,9 @@
 #
 # Settings (environment): BACKEND_SANDBOX_BRIDGE, _SUBNET, _RANGE, _GATEWAY, _MEMORY_TOTAL_MIB, BACKEND_INCUS_POOL
 # and BACKEND_INCUS_PROJECT as Flow reads them (PROJECT overrides the latter); DOCKER_NETWORK, DOCKER_RANGE,
-# BAN_CHAIN (empty: none), BAN_REQUIRE, BAN_WAIT, INCUS_LISTEN, INCUS_DIR, CERT_DIR, POOL_DRIVER (btrfs, or dir
-# where loop devices are refused), POOL_SIZE, STATE_DIR, INCUS_PROJECT_MEMORY, OTHER_CHURN. Defaults in host-lib.sh.
+# BAN_CHAIN (empty: none), BAN_REQUIRE, BAN_WAIT, INCUS_LISTEN, INCUS_DIR, CERT_DIR, CERT_OWNER, POOL_DRIVER (btrfs,
+# or dir where loop devices are refused), POOL_SIZE, STATE_DIR, INCUS_PROJECT_MEMORY, OTHER_CHURN. Defaults in
+# host-lib.sh.
 set -eu
 
 SCRIPT=host-setup
@@ -346,6 +350,9 @@ else
 		[ -f "$INCUS_DIR/server.crt" ] || die "no $INCUS_DIR/server.crt: set INCUS_DIR to Incus' directory"
 		cp "$INCUS_DIR/server.crt" "$CERT_DIR/server.crt"
 		chmod 0600 "$CERT_DIR"/*
+		# Flow's container reads them as CERT_OWNER (mounted read-only); root keeps access. Also on a re-run over
+		# certificates an earlier setup left to root.
+		chown "$CERT_OWNER" "$CERT_DIR" "$CERT_DIR/client.crt" "$CERT_DIR/client.key" "$CERT_DIR/server.crt"
 	fi
 fi
 
