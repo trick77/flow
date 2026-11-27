@@ -391,9 +391,12 @@ and without a ban chain, then end to end with Flow itself.
   boot), effective only while FORWARD jumps to `DOCKER-USER` before `DOCKER-FORWARD` (the scripts check; once seen
   reversed in the lab until Docker restarted); Incus ordered after Docker; Incus' API on the sandbox network's
   gateway (`INCUS_LISTEN`, `172.30.0.1:8443`): Flow's container cannot reach the host's loopback, sandboxes are
-  refused there by `flow-sb-host`, containers on any Docker network connect to it (both measured with Flow in its
-  container); without a trusted client certificate Incus answers them only as an untrusted client (Incus' trust
-  model, not measured);
+  refused there by `flow-sb-host`, and every other container (all Docker bridges are in zone `docker`) by
+  `flow-sb-incus`, which lets only Flow's static address (`CONTAINER_ADDRESS`, `172.30.1.2`, outside Docker's and
+  the sandboxes' ranges) through; matched by source address, so a container on `flow` with raw sockets could forge
+  it or take the address over on the bridge (not measured); Incus' client certificate stays the other bar. `flow-incus-listen.service`
+  sets the listener again once Docker made the bridge (Incus binds a missing address once more after 30 s, then
+  never; measured);
   the restricted project, which needs `restricted.devices.nic=allow` (a restricted project refuses NICs on an
   unmanaged bridge; measured). Owner's risk, measured on Incus 6.0.4: `allow` also lets the certificate's holder
   attach a NIC to any host bridge (other Docker networks, filtering off) and use macvlan, ipvlan, routed, p2p and
@@ -440,7 +443,10 @@ and without a ban chain, then end to end with Flow itself.
   (default `BACKEND_SANDBOX_MEMORY_MIB`: room for one full build to begin) fits under
   `BACKEND_SANDBOX_MEMORY_TOTAL_MIB` (default 14 GiB; unset is the default, 0 turns the check off), else
   `sandbox_memory_full` with a log line stating measured, headroom and total. Checked before the create (about 40 s;
-  a refused sandbox leaves no instance) and again at the start, under one lock with it. Measured = the working set
+  a refused sandbox leaves no instance) and again at the start. Each admitted create or start holds a headroom of
+  its own until it finishes (a sandbox just started measures almost nothing): two at once need room for two. A
+  running sandbox restarted onto its bridge or address is not checked again (refused, it would stay stopped with
+  its turns gone). Measured = the working set
   from Incus' metrics (`/1.0/metrics`): `MemTotal − MemFree` (the cgroup's `memory.current`) less `Inactive_file`.
   The instance state's `memory.usage` is `memory.current` with the page cache in it (measured, Incus 6.0.4: an idle
   sandbox just booted 270 MiB, 210 MiB of it inactive file cache): reclaimable cache must not refuse a start, so
@@ -449,7 +455,7 @@ and without a ban chain, then end to end with Flow itself.
   included: too much rather than nothing, never an open door, never a block for good; an instance list that fails
   refuses the start (`sandbox_unavailable`) until the next one. Incus' project `limits.memory` was rejected as the
   default: it counts stopped instances too (measured) and would cap how many sandboxes exist; host-setup sets it
-  only with `INCUS_PROJECT_MEMORY=1`.
+  only with `INCUS_PROJECT_MEMORY=1` (refused while the total is 0).
 
 ## Lifecycles
 
@@ -523,12 +529,12 @@ after an archive. A stopped host restarts on the next message with resume and lo
 | host crash | sidecar dies with it; turn lost | flowd restarts it on the next message: `turn.ended {lost}`, open requests `expired`, `session.resumed` |
 | sidecar exit or broken pipe | during a turn: `notice {message_may_not_have_run}`, `turn.ended {error, adapter_exited}`, open request `expired`; between turns: nothing | the host lives on; the owner re-sends if needed; the next message starts a sidecar with `resume` |
 | opencode serve restart | the host's event stream breaks | host reconnects, resyncs from the message list (OpenCode's `/api/event` has no replay, [openapi.json](https://github.com/anomalyco/opencode/blob/dev/packages/protocol/openapi.json)) |
-| sandbox stop | all units end | Flow sets a cut-off turn's row `failed` and keeps it open (`turn_started_at`); on start, only the hosts of those sessions start at once (two at a time, after the sandbox is warm) and log the turn `lost`; every other host starts when needed |
+| sandbox stop | all units end | Flow sets a cut-off turn's row `failed` and keeps it open (`turn_started_at`); on start, only the hosts of those sessions start at once (two at a time, after the sandbox is warm), log the turn `lost` and `session.resumed {sandbox_start}`, leave queued messages queued and are stopped again; every other host starts when needed, and a message's start drains the queue |
 | host (machine) reboot | Incus starts nothing by default; Flow reconciles | sandboxes start on demand; `BootID` change tells Flow every unit is gone |
 | Incus restart | units survive (spike 11) | Flow holds no exec, so Incus restarts in about 2 s |
 | host bridge `flowbr0` missing | the sandbox is `failed`, nothing created or started, no retry | host-setup.sh makes the network again; the next start brings the sandbox up |
 | bridge made again under running sandboxes | they run on, cut off (Incus never re-attaches a NIC) | the next bring-up restarts them onto the bridge |
-| host boot | Incus waits for Docker's bridge (drop-in), else autostart fails and leaves sandboxes stopped | sandboxes start on demand |
+| host boot | Incus waits for Docker's bridge (drop-in, at most 120 s), else autostart fails and leaves sandboxes stopped; an API address still missing then is retried once after 30 s, then never | `flow-incus-listen.service` sets the listener again once Docker has made the bridge; sandboxes start on demand |
 
 ## Where state lives
 
