@@ -8,11 +8,13 @@ describe("start prefs", () => {
       projectId: "p1",
       provider: "opencode",
       model: "m",
+      effort: "high",
     });
     expect(loadPrefs()).toEqual({
       projectId: "p1",
       provider: "opencode",
       model: "m",
+      effort: "high",
     });
   });
 

@@ -83,7 +83,8 @@ export interface DeviceFlowControl {
 // server is polled at the interval it gave, one request at a time, the wait
 // counted from each answer. A slow-down lengthens the interval for good; a
 // lost answer is retried at the same interval. Polling stops on success,
-// denial, expiry (the server's or the clock's), cancel, unmount, and after
+// denial, the server's expiry (or a lost answer past the local deadline,
+// counted from the seconds left the start answered), cancel, unmount, and after
 // HIDDEN_GRACE_MS in a hidden tab; a visible tab resumes it, waiting out what
 // is left of the interval. onConnected gets the connection the poll answered.
 export function useDeviceFlow(
@@ -124,17 +125,12 @@ export function useDeviceFlow(
     const schedule = () => {
       clearTimeout(timer);
       if (stopped || polling || isPaused) return;
-      if (Date.now() >= flow.expiresAt) {
-        finish({ phase: "expired" });
-        return;
-      }
       timer = setTimeout(poll, Math.max(0, last + intervalMs - Date.now()));
     };
+    // The server's expired answer ends the code; the local deadline only
+    // shows the countdown, and ends the flow when the server cannot be
+    // reached past it.
     const poll = () => {
-      if (Date.now() >= flow.expiresAt) {
-        finish({ phase: "expired" });
-        return;
-      }
       polling = true;
       pollGitHubDeviceFlow()
         .then(
@@ -145,6 +141,10 @@ export function useDeviceFlow(
           polling = false;
           if (stopped) return;
           last = Date.now();
+          if (o.kind === "retry" && last >= flow.expiresAt) {
+            finish({ phase: "expired" });
+            return;
+          }
           if (
             o.kind === "pending" ||
             o.kind === "slowDown" ||
@@ -187,22 +187,13 @@ export function useDeviceFlow(
     };
   }, [waiting]);
 
-  // The countdown, once a second while waiting.
+  // The countdown, once a second while waiting, until the local deadline.
   useEffect(() => {
     if (!waiting) return;
     const tick = setInterval(() => {
       const t = Date.now();
       setNow(t);
-      if (t >= waiting.expiresAt) {
-        clearInterval(tick);
-        kept = null;
-        setPaused(false);
-        setState((s) =>
-          s.phase === "waiting" && s.flow === waiting
-            ? { phase: "expired" }
-            : s,
-        );
-      }
+      if (t >= waiting.expiresAt) clearInterval(tick);
     }, 1000);
     return () => clearInterval(tick);
   }, [waiting]);
@@ -223,9 +214,10 @@ export function useDeviceFlow(
     startGitHubDeviceFlow().then(
       (f) => {
         if (gen !== startGen.current) return;
-        const flow = activeFlow(f);
+        const at = Date.now();
+        const flow = activeFlow(f, at);
         kept = flow;
-        setNow(Date.now());
+        setNow(at);
         setState({ phase: "waiting", flow });
       },
       (err: unknown) => {

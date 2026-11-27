@@ -80,8 +80,14 @@ describe("pollOutcome", () => {
     expect(pollOutcome(undefined, new ApiError("internal", 0))).toEqual({
       kind: "retry",
     });
+    // The server's upstream or internal: its code is over, no retry.
     expect(pollOutcome(undefined, new ApiError("upstream", 502))).toEqual({
-      kind: "retry",
+      kind: "failed",
+      code: "upstream",
+    });
+    expect(pollOutcome(undefined, new ApiError("internal", 500))).toEqual({
+      kind: "failed",
+      code: "internal",
     });
     expect(pollOutcome(undefined, new ApiError("conflict", 409))).toEqual({
       kind: "failed",
@@ -107,20 +113,35 @@ describe("nextInterval", () => {
 });
 
 describe("activeFlow", () => {
-  it("converts the API's device code", () => {
+  it("converts the API's device code, its deadline by the local clock", () => {
+    const now = Date.parse("2026-11-27T10:30:00Z"); // ahead of the server
     expect(
-      activeFlow({
-        userCode: "ABCD-1234",
-        verificationUri: "https://github.com/login/device",
-        expiresAt: "2026-11-27T10:15:00Z",
-        intervalSeconds: 5,
-      }),
+      activeFlow(
+        {
+          userCode: "ABCD-1234",
+          verificationUri: "https://github.com/login/device",
+          expiresAt: "2026-11-27T10:15:00Z",
+          expiresInSeconds: 900,
+          intervalSeconds: 5,
+        },
+        now,
+      ),
     ).toEqual({
       userCode: "ABCD-1234",
       verificationUri: "https://github.com/login/device",
-      expiresAt: Date.parse("2026-11-27T10:15:00Z"),
+      expiresAt: now + 900_000,
       intervalMs: 5000,
     });
+  });
+
+  it("falls back to expiresAt without the seconds left", () => {
+    const f = activeFlow({
+      userCode: "X",
+      verificationUri: "",
+      expiresAt: "2026-11-27T10:15:00Z",
+      intervalSeconds: 5,
+    } as unknown as Parameters<typeof activeFlow>[0]);
+    expect(f.expiresAt).toBe(Date.parse("2026-11-27T10:15:00Z"));
   });
 
   it("guards a missing interval and a bad expiry", () => {
@@ -129,7 +150,7 @@ describe("activeFlow", () => {
       verificationUri: "",
       expiresAt: "soon",
       intervalSeconds: 0,
-    });
+    } as unknown as Parameters<typeof activeFlow>[0]);
     expect(f.intervalMs).toBe(MIN_INTERVAL_MS);
     expect(f.expiresAt).toBe(0);
   });

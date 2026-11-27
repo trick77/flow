@@ -15,13 +15,18 @@ const device = (over: Record<string, unknown> = {}) => ({
   userCode: "ABCD-1234",
   verificationUri: "https://github.com/login/device",
   expiresAt: new Date(T0 + 15 * 60_000).toISOString(),
+  expiresInSeconds: 900,
   intervalSeconds: 5,
   ...over,
 });
 
 // serve answers the start with `start` and each poll with the next of
-// `polls` (pending once they run out); polls records when each poll came.
-function serve(start: Response | (() => Promise<Response>), polls: Response[]) {
+// `polls` (pending once they run out; an Error is a request that got no
+// answer); polls records when each poll came.
+function serve(
+  start: Response | (() => Promise<Response>),
+  polls: (Response | Error)[],
+) {
   const pollTimes: number[] = [];
   vi.stubGlobal(
     "fetch",
@@ -32,7 +37,9 @@ function serve(start: Response | (() => Promise<Response>), polls: Response[]) {
       }
       if (url === "/api/connections/github/device/poll") {
         pollTimes.push(Date.now() - T0);
-        return polls.shift() ?? json(200, { state: "pending" });
+        const next = polls.shift() ?? json(200, { state: "pending" });
+        if (next instanceof Error) throw next;
+        return next;
       }
       throw new Error("unexpected " + url);
     }),
@@ -146,25 +153,56 @@ describe("useDeviceFlow", () => {
     expect(times).toHaveLength(1);
   });
 
-  it("ends at the code's expiry by the clock", async () => {
+  it("counts the code's time from the seconds left, not the server's clock", async () => {
+    // The browser's clock runs minutes ahead of the server's: by the
+    // absolute expiresAt the code would be over already.
     const times = serve(
-      json(200, device({ expiresAt: new Date(T0 + 12_000).toISOString() })),
+      json(
+        200,
+        device({
+          expiresAt: new Date(T0 - 5 * 60_000).toISOString(),
+          expiresInSeconds: 12,
+        }),
+      ),
       [],
     );
     const { result } = await started();
+    expect(result.current.state.phase).toBe("waiting");
     await advance(11_000);
     expect(times).toEqual([5000, 10_000]);
     expect(result.current.remainingMs).toBe(1000);
+    // The local deadline passes: the countdown ends, the server decides.
     await advance(1000);
-    expect(result.current.state.phase).toBe("expired");
     expect(result.current.remainingMs).toBe(0);
+    expect(result.current.state.phase).toBe("waiting");
+  });
+
+  it("ends on the server's expired answer, or a lost answer past the deadline", async () => {
+    let times = serve(json(200, device({ expiresInSeconds: 8 })), [
+      json(200, { state: "pending" }),
+      json(200, { state: "expired" }),
+    ]);
+    let hook = await started();
+    await advance(10_000);
+    expect(hook.result.current.state.phase).toBe("expired");
+    await advance(30_000);
+    expect(times).toHaveLength(2);
+    hook.unmount();
+
+    times = serve(json(200, device({ expiresInSeconds: 8 })), [
+      json(200, { state: "pending" }),
+      new TypeError("network"),
+    ]);
+    hook = await started();
+    await advance(10_000);
+    expect(hook.result.current.state.phase).toBe("expired");
     await advance(30_000);
     expect(times).toHaveLength(2);
   });
 
   it("retries a lost answer at the same interval and stops on a refusal", async () => {
     const times = serve(json(200, device()), [
-      json(502, { code: "internal" }),
+      new TypeError("network"),
       json(409, { code: "conflict" }),
     ]);
     const { result } = await started();
@@ -173,6 +211,18 @@ describe("useDeviceFlow", () => {
     await advance(5000);
     expect(times).toEqual([5000, 10_000]);
     expect(result.current.state).toEqual({ phase: "failed", code: "conflict" });
+  });
+
+  it("ends on an upstream or internal answer: the server's code is over", async () => {
+    for (const code of ["upstream", "internal"] as const) {
+      const times = serve(json(200, device()), [json(502, { code })]);
+      const hook = await started();
+      await advance(5000);
+      expect(hook.result.current.state).toEqual({ phase: "failed", code });
+      await advance(30_000);
+      expect(times).toHaveLength(1);
+      hook.unmount();
+    }
   });
 
   it("reads a 501 as unavailable, at start and while polling", async () => {
@@ -240,7 +290,13 @@ describe("useDeviceFlow", () => {
 
   it("forgets a kept code that expired meanwhile", async () => {
     serve(
-      json(200, device({ expiresAt: new Date(T0 + 20_000).toISOString() })),
+      json(
+        200,
+        device({
+          expiresAt: new Date(T0 + 20_000).toISOString(),
+          expiresInSeconds: 20,
+        }),
+      ),
       [],
     );
     const first = await started();

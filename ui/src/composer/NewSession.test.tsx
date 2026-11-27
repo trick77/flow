@@ -481,6 +481,73 @@ describe("NewSession", () => {
     expect(startButton()).toBeEnabled();
   });
 
+  const withEfforts: AgentCatalog = {
+    ...catalog,
+    providers: [
+      {
+        ...catalog.providers[0],
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        defaultEffort: "default",
+      },
+      catalog.providers[1],
+    ],
+  };
+
+  it("starts on the agent's own effort, takes a picked one and remembers it", async () => {
+    serve(withEfforts);
+    const props = view();
+    await box();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Effort: Agent default" }),
+    );
+    expect(screen.getByRole("menu")).toHaveTextContent(
+      en.composer.effortLowered,
+    );
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Extra high" }));
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
+    expect(posted()).toMatchObject({
+      model: "claude-opus-5-5",
+      effort: "xhigh",
+    });
+    expect(JSON.parse(window.localStorage.getItem(PREFS_KEY)!)).toEqual({
+      projectId: "p1",
+      provider: "claude",
+      model: "claude-opus-5-5",
+      effort: "xhigh",
+    });
+
+    // The next new session starts on it; default goes back to the agent's own.
+    cleanup();
+    fetchMock.mockClear();
+    const next = view();
+    await box();
+    fireEvent.click(screen.getByRole("button", { name: "Effort: Extra high" }));
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: /Agent default/ }),
+    );
+    fireEvent.change(await box(), { target: { value: "Again" } });
+    fireEvent.click(startButton());
+    await waitFor(() => expect(next.onCreated).toHaveBeenCalled());
+    expect(posted()?.effort).toBe("default");
+  });
+
+  it("shows no effort for an agent that takes none, and ignores a remembered one", async () => {
+    window.localStorage.setItem(
+      PREFS_KEY,
+      JSON.stringify({ model: "claude-opus-5-5", effort: "max" }),
+    );
+    serve();
+    const props = view();
+    await box();
+    expect(screen.queryByRole("button", { name: /^Effort:/ })).toBeNull();
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
+    expect(posted()).not.toHaveProperty("effort");
+  });
+
   it("offers the credential when more than one can be used", async () => {
     serve({
       ...catalog,

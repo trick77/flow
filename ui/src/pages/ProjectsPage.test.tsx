@@ -335,4 +335,30 @@ describe("ProjectsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: en.cancel }));
     expect(screen.queryByRole("form")).toBeNull();
   });
+
+  it("says why a repository could not be looked up, not that it is malformed", async () => {
+    serve([
+      json(409, { code: "github_not_connected", field: "repos" }),
+      json(502, { code: "upstream", field: "repos" }),
+    ]);
+    renderPage([]);
+    fireEvent.click(screen.getByRole("button", { name: en.add }));
+    fireEvent.change(screen.getByLabelText(en.name), {
+      target: { value: "apps" },
+    });
+    fireEvent.change(screen.getByLabelText(en.repos), {
+      target: { value: "octo/hidden" },
+    });
+    const submit = () =>
+      act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: en.create }));
+      });
+    await submit();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      errors.github_not_connected,
+    );
+    expect(screen.getByRole("alert")).not.toHaveTextContent(en.invalidRepos);
+    await submit();
+    expect(screen.getByRole("alert")).toHaveTextContent(errors.upstream);
+  });
 });

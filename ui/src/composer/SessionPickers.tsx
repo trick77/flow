@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { errorCode, updateSession } from "../api";
 import type {
   AgentCatalog,
+  Effort,
   ErrorCode,
   PermissionMode,
   Provider,
@@ -11,25 +12,26 @@ import type {
 } from "../api/types.gen";
 import { AgentPill, useAgentName } from "../shell/AgentPill";
 import { Icon } from "../shell/Icon";
-import { aboveCap, modelLabel } from "./catalog";
-import { modeKeys } from "./modes";
+import { aboveCap, efforts, modelLabel } from "./catalog";
+import { effortKeys, modeKeys } from "./modes";
 import { Picker, type PickerOption } from "./Picker";
 
 // The fields the pickers change, as the answer gave them back.
-export type SettingsPatch = Pick<SessionUpdate, "model" | "mode">;
+export type SettingsPatch = Pick<SessionUpdate, "model" | "effort" | "mode">;
 
-// SessionPickers are a running session's model and permission mode in the
-// composer bar. A pick shows at once and is sent as updateSession; the
+// SessionPickers are a running session's model, effort and permission mode in
+// the composer bar. A pick shows at once and is sent as updateSession; the
 // answer's values go to onUpdated, a refusal puts the old value back and
-// goes to onError. Only the session's own agent's models are offered (a
-// session cannot change agent); modes above the cap are disabled. The model
-// changes between turns (docs/events.md, "Model per turn"): picked while one
-// runs, it applies to the next, and the menu says so. Without a catalog they
-// are a read-only display.
+// goes to onError. Only the session's own agent's models and efforts are
+// offered (a session cannot change agent); modes above the cap are disabled.
+// Model and effort change between turns (docs/events.md, "Model per turn"):
+// picked while one runs, they apply to the next, and the menu says so.
+// Without a catalog they are a read-only display (no effort then).
 export function SessionPickers({
   sessionId,
   provider,
   model,
+  effort = "default",
   mode,
   modeCap,
   catalog,
@@ -40,6 +42,8 @@ export function SessionPickers({
   sessionId: string;
   provider: Provider;
   model: string;
+  // Absent: the agent's own (a session from before efforts).
+  effort?: Effort;
   mode: PermissionMode;
   modeCap?: PermissionMode;
   catalog?: AgentCatalog;
@@ -52,6 +56,7 @@ export function SessionPickers({
   // The pick under way, shown until the answer.
   const [pending, setPending] = useState<SettingsPatch>({});
   const shownModel = pending.model ?? model;
+  const shownEffort = pending.effort ?? effort;
   const shownMode = pending.mode ?? mode;
   const label = modelLabel(catalog, provider, shownModel);
 
@@ -63,6 +68,9 @@ export function SessionPickers({
         setPending({});
         onUpdated?.({
           ...(update.model !== undefined ? { model: s.summary.model } : {}),
+          ...(update.effort !== undefined
+            ? { effort: s.summary.effort ?? update.effort }
+            : {}),
           ...(update.mode !== undefined ? { mode: s.summary.mode } : {}),
         });
       },
@@ -73,11 +81,23 @@ export function SessionPickers({
     );
   };
 
-  const busy = pending.model !== undefined || pending.mode !== undefined;
+  const busy =
+    pending.model !== undefined ||
+    pending.effort !== undefined ||
+    pending.mode !== undefined;
   const providerInfo = catalog?.providers.find((p) => p.provider === provider);
   const modelOptions: PickerOption<string>[] = (providerInfo?.models ?? []).map(
     (m) => ({ value: m.id, label: m.label, description: m.via }),
   );
+  const offeredEfforts = efforts(providerInfo);
+  const effortOptions: PickerOption<Effort>[] = offeredEfforts.map((e) => ({
+    value: e,
+    label: t(effortKeys[e]),
+    description: e === "default" ? t("effortDefaultHint") : undefined,
+  }));
+  const effortName = t("effortOf", {
+    effort: t(effortKeys[shownEffort] ?? effortKeys.default),
+  });
   const modes = (catalog?.modes ?? []).filter((m) => m in modeKeys);
   const capped = modes.some((m) => aboveCap(modes, m, modeCap));
   const modeOptions: PickerOption<PermissionMode>[] = modes.map((m) => ({
@@ -121,6 +141,21 @@ export function SessionPickers({
         <span className="picker picker-ro" role="img" aria-label={modelName}>
           <span aria-hidden="true">{modelContent}</span>
         </span>
+      )}
+      {effortOptions.length > 0 && (
+        <Picker
+          label={effortName}
+          heading={t("effort")}
+          value={shownEffort}
+          options={effortOptions}
+          onChange={(e) => e !== shownEffort && change({ effort: e })}
+          disabled={busy}
+          note={turnRunning ? t("modelNextTurn") : t("effortLowered")}
+          title={turnRunning ? t("modelNextTurn") : undefined}
+        >
+          <Icon name="gauge" />
+          <span>{t(effortKeys[shownEffort] ?? effortKeys.default)}</span>
+        </Picker>
       )}
       {known &&
         (modeOptions.length > 0 ? (

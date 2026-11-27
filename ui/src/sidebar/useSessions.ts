@@ -17,7 +17,7 @@ import type {
 
 // The fields of a session the owner changes with updateSession.
 export type SessionPatch = Partial<
-  Pick<SessionSummary, "title" | "model" | "mode">
+  Pick<SessionSummary, "title" | "model" | "effort" | "mode">
 >;
 
 export interface Lists {

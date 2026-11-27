@@ -99,7 +99,9 @@ export function ProjectsPage({
 }
 
 // fieldError is the sentence for a refusal of the create form: the field's
-// own where the API names one, else the code's.
+// own where the API names one, else the code's. A repository the API cannot
+// look up for another reason (github_not_connected, upstream) says that
+// reason, not that the name is malformed.
 function fieldError(err: unknown): { field?: string; key: string } {
   if (err instanceof ApiError && err.field === "name") {
     return {
@@ -107,7 +109,11 @@ function fieldError(err: unknown): { field?: string; key: string } {
       key: err.code === "conflict" ? "nameTaken" : "invalidName",
     };
   }
-  if (err instanceof ApiError && err.field === "repos") {
+  if (
+    err instanceof ApiError &&
+    err.field === "repos" &&
+    err.code === "invalid_request"
+  ) {
     return { field: "repos", key: "invalidRepos" };
   }
   return { key: errorCode(err) };

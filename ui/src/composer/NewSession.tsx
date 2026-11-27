@@ -13,6 +13,7 @@ import { answerLost, createSession, errorCode } from "../api";
 import type {
   AgentCatalog,
   ClaudeAuth,
+  Effort,
   ErrorCode,
   PermissionMode,
   Project,
@@ -26,24 +27,26 @@ import {
   choiceKey,
   defaultAuth,
   defaultChoice,
+  defaultEffort,
   defaultMode,
   defaultProject,
+  efforts,
   findModel,
   parseChoiceKey,
   refreshCatalog,
   useCatalog,
 } from "./catalog";
 import "./composer.css";
-import { authKeys, modeKeys } from "./modes";
+import { authKeys, effortKeys, modeKeys } from "./modes";
 import { Picker, type PickerOption } from "./Picker";
 import { loadPrefs, savePrefs } from "./prefs";
 
 // NewSession starts a session: the project, its repositories (all picked at
-// first), the model, the permission mode and the first message. The models
-// and modes come from the agent catalog; without an agent that can run it
-// points to Settings instead. The project of the session on screen is the
-// default, else the one used last in this browser; the last model used is the
-// default next time. Every session starts in plan mode (defaultMode), never in
+// first), the model, the effort, the permission mode and the first message.
+// The models, efforts and modes come from the agent catalog; without an agent
+// that can run it points to Settings instead. The project of the session on
+// screen is the default, else the one used last in this browser; the last
+// model and effort used are the default next time. Every session starts in plan mode (defaultMode), never in
 // the one picked last. onCreated gets the session the moment the server has
 // made it.
 //
@@ -87,6 +90,7 @@ export function NewSession({
   // The picked model, as choiceKey(provider, model id).
   const [model, setModel] = useState<string>();
   const [mode, setMode] = useState<PermissionMode>();
+  const [effort, setEffort] = useState<Effort>();
   const [auth, setAuth] = useState<ClaudeAuth>();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -118,6 +122,13 @@ export function NewSession({
   const modes = (catalog?.modes ?? []).filter((m) => m in modeKeys);
   const chosenMode =
     mode ?? (catalog ? defaultMode({ ...catalog, modes }) : undefined);
+  const offeredEfforts = efforts(choice?.provider);
+  const chosenEffort =
+    effort && offeredEfforts.includes(effort)
+      ? effort
+      : choice
+        ? defaultEffort(choice.provider, prefs)
+        : undefined;
   const auths = choice?.provider.claudeAuths ?? [];
   const chosenAuth =
     choice?.provider.provider === "claude"
@@ -166,6 +177,7 @@ export function NewSession({
       provider: choice.provider.provider,
       claudeAuth: chosenAuth,
       model: choice.model.id,
+      effort: chosenEffort,
       mode: chosenMode,
       message: { clientId: draftId.current, text: body },
     }).then(
@@ -174,6 +186,7 @@ export function NewSession({
           projectId: project.id,
           provider: choice.provider.provider,
           model: choice.model.id,
+          effort: chosenEffort,
         });
         onCreated(session);
       },
@@ -227,6 +240,11 @@ export function NewSession({
     label: t(modeKeys[m].label),
     description: t(modeKeys[m].hint),
     warn: m === "full_access",
+  }));
+  const effortOptions: PickerOption<Effort>[] = offeredEfforts.map((e) => ({
+    value: e,
+    label: t(effortKeys[e]),
+    description: e === "default" ? t("effortDefaultHint") : undefined,
   }));
   const authOptions: PickerOption<ClaudeAuth>[] = auths
     .filter((a) => a in authKeys)
@@ -331,6 +349,19 @@ export function NewSession({
                 {choice.model.label}
               </span>
             </Picker>
+            {chosenEffort && (
+              <Picker
+                label={t("effortOf", { effort: t(effortKeys[chosenEffort]) })}
+                heading={t("effort")}
+                note={t("effortLowered")}
+                value={chosenEffort}
+                options={effortOptions}
+                onChange={setEffort}
+              >
+                <Icon name="gauge" />
+                <span>{t(effortKeys[chosenEffort])}</span>
+              </Picker>
+            )}
             {chosenMode && (
               <Picker
                 label={t("modeOf", { mode: t(modeKeys[chosenMode].label) })}

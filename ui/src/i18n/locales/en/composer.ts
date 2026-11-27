@@ -30,6 +30,17 @@ export const composer = {
   modeOf: "Permission mode: {{mode}}",
   modeCapped: "Capped by the parent session",
   modelNextTurn: "Applies to the next turn",
+  // The effort picker: how much the agent thinks before it answers.
+  effort: "Effort",
+  effortOf: "Effort: {{effort}}",
+  effortDefault: "Agent default",
+  effortDefaultHint: "The agent's own level for the model",
+  effortLow: "Low",
+  effortMedium: "Medium",
+  effortHigh: "High",
+  effortXhigh: "Extra high",
+  effortMax: "Max",
+  effortLowered: "A model without a level runs it lower",
   settingsFailed: "The change was not applied.",
   // Starting a new session.
   newTitle: "New session",
