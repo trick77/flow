@@ -836,7 +836,8 @@ func (m *Manager) Warm(ctx context.Context, projectID string) (flowdproto.API, e
 	return m.ensure(ctx, projectID, false)
 }
 
-// Stop stops a project's sandbox; its filesystem stays.
+// Stop stops a project's sandbox; its filesystem stays. An instance that does not exist (a bring-up failed before
+// creating it, or deleted outside Flow) is stopped already.
 func (m *Manager) Stop(ctx context.Context, projectID string) error {
 	defer m.lock(projectID)()
 	m.remember(projectID, cachedAPI{})
@@ -848,7 +849,7 @@ func (m *Manager) Stop(ctx context.Context, projectID string) error {
 		return nil // nothing runs, and the state must stay what keeps a bring-up away
 	}
 	m.setState(ctx, &sb, StateStopping, "")
-	if err := m.Runtime.Stop(ctx, sb.Instance, 30*time.Second); err != nil {
+	if err := m.Runtime.Stop(ctx, sb.Instance, 30*time.Second); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
 		m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
 		return err
 	}

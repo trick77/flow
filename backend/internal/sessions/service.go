@@ -474,6 +474,29 @@ func (s *Service) Command(ctx context.Context, id, cmdID string, kind event.Comm
 	return res, nil
 }
 
+// CommandIfRunning sends a command that only matters to a running session (an interrupt, a reply): a stopped
+// sandbox is not started for it. ran false: the sandbox is stopped or has none, so nothing of the session runs and
+// the command had nothing to act on. In a warm sandbox it is Command: a host that is down starts, logs the cut-off
+// turn lost and so closes what the owner still sees open.
+func (s *Service) CommandIfRunning(ctx context.Context, id, cmdID string, kind event.CommandKind, payload any) (flowdproto.CommandResult, bool, error) {
+	se, err := s.Store.Get(ctx, id)
+	if err != nil {
+		return flowdproto.CommandResult{}, false, err
+	}
+	if se.ArchivedAt != nil {
+		return flowdproto.CommandResult{}, false, apitypes.Fail(apitypes.ErrorCodeSessionArchived, "")
+	}
+	_, err = s.Sandboxes.Warm(ctx, se.ProjectID)
+	if errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound) {
+		return flowdproto.CommandResult{}, false, nil
+	}
+	if err != nil {
+		return flowdproto.CommandResult{}, false, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+	}
+	res, err := s.Command(ctx, id, cmdID, kind, payload)
+	return res, true, err
+}
+
 // Summary is the sidebar's view of a session.
 func (s *Service) Summary(ctx context.Context, se Session) (apitypes.SessionSummary, error) {
 	wts, err := s.Store.Worktrees(ctx, se.ID)
@@ -569,8 +592,12 @@ func (s *Service) follow(ctx context.Context, id string, f *follower) {
 			// A transient store error (locked, I/O): try again after the wait rather than freeze the sidebar status.
 			s.Log.Warn("follow: reading the session", "session", id, "err", err)
 		default:
-			if api, err := s.Sandboxes.Warm(ctx, se.ProjectID); err == nil {
+			api, err := s.Sandboxes.Warm(ctx, se.ProjectID)
+			switch {
+			case err == nil:
 				s.mirror(ctx, api, se)
+			case errors.Is(err, sandboxes.ErrNotWarm):
+				s.turnCutOff(ctx, se)
 			}
 		}
 		select {
@@ -578,6 +605,25 @@ func (s *Service) follow(ctx context.Context, id string, f *follower) {
 		case <-time.After(retry):
 		}
 	}
+}
+
+// turnCutOff ends the mirrored turn of a session whose sandbox is proven stopped: a stop ends every unit without a
+// turn.ended in the log, so the row would show the session working (or waiting for the owner) until a message
+// restarts the host. The host logs that turn lost when it starts again (docs/events.md: failed); the row says so
+// now. Only ErrNotWarm proves the stop (never ErrMayRun).
+func (s *Service) turnCutOff(ctx context.Context, se Session) {
+	switch event.SessionStatus(se.Status) {
+	case event.SessionStatusIdle, event.SessionStatusDone, event.SessionStatusFailed:
+		if se.TurnStartedAt == nil {
+			return
+		}
+	}
+	if err := s.Store.ApplyMirror(ctx, se.ID, Mirror{Status: string(event.SessionStatusFailed), TurnEnded: true,
+		Unseen: true}); err != nil {
+		s.Log.Warn("follow: ending the turn of a stopped sandbox", "session", se.ID, "err", err)
+		return
+	}
+	s.Publish(ctx, se.ID)
 }
 
 // mirror follows one stream from the row's last seq until it fails.

@@ -22,6 +22,7 @@ import (
 	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/flowdproto/flowdfake"
 	"github.com/trick77/flow/internal/projects"
+	sbx "github.com/trick77/flow/internal/sandboxes"
 	"github.com/trick77/flow/internal/sessions"
 	"github.com/trick77/flow/internal/ssewire"
 	"github.com/trick77/flow/internal/store"
@@ -64,11 +65,50 @@ func (f *flaky) Command(ctx context.Context, c event.Command) (flowdproto.Comman
 	return f.Fake.Command(ctx, c)
 }
 
-type sandboxes struct{ api flowdproto.API }
+var errNotWarm = sbx.ErrNotWarm
 
-func (s sandboxes) Ensure(context.Context, string) (flowdproto.API, error) { return s.api, nil }
-func (s sandboxes) Warm(context.Context, string) (flowdproto.API, error)   { return s.api, nil }
-func (s sandboxes) Forget(string)                                          {}
+// sandboxes hands out the fake flowd; with stopped set Warm answers not warm (a stopped sandbox), and Ensure counts
+// the bring-ups asked for.
+type sandboxes struct {
+	api     flowdproto.API
+	mu      sync.Mutex
+	stopped bool
+	ensures int
+	warms   int
+}
+
+func (s *sandboxes) Ensure(context.Context, string) (flowdproto.API, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensures++
+	s.stopped = false
+	return s.api, nil
+}
+
+func (s *sandboxes) Warm(context.Context, string) (flowdproto.API, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.warms++
+	if s.stopped {
+		return nil, errNotWarm
+	}
+	return s.api, nil
+}
+
+func (s *sandboxes) Forget(string) {}
+
+func (s *sandboxes) set(stopped bool) (ensures, warms int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = stopped
+	return s.ensures, s.warms
+}
+
+func (s *sandboxes) counts() (ensures, warms int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ensures, s.warms
+}
 
 func demo(t *testing.T) []event.Event {
 	t.Helper()
@@ -93,6 +133,7 @@ func demo(t *testing.T) []event.Event {
 type rig struct {
 	api  *API
 	fake *flaky
+	sb   *sandboxes
 	srv  *httptest.Server
 	id   string
 	hub  *sse.Hub[apitypes.AppEvent]
@@ -111,7 +152,8 @@ func newRig(t *testing.T) *rig {
 	fake.Script = flowdfake.Replay(demo(t))
 	hub := sse.NewHub[apitypes.AppEvent](sse.HubOptions{})
 	t.Cleanup(hub.Close)
-	svc := &sessions.Service{Store: sessions.SQL{DB: db}, Projects: ps, Sandboxes: sandboxes{api: fake}, Hub: hub,
+	sb := &sandboxes{api: fake}
+	svc := &sessions.Service{Store: sessions.SQL{DB: db}, Projects: ps, Sandboxes: sb, Hub: hub,
 		Log: slog.New(slog.DiscardHandler)}
 	s, err := svc.Create(t.Context(), apitypes.SessionCreate{ProjectID: "p1", RepoIds: []string{"r1"}, Provider: "claude",
 		Model: "m", Mode: "ask", Title: "t"})
@@ -127,7 +169,7 @@ func newRig(t *testing.T) *rig {
 	mux.HandleFunc("POST /s/{sessionId}/permissions/{requestId}", a.ReplyPermission)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &rig{api: a, fake: fake, srv: srv, id: s.Summary.ID, hub: hub}
+	return &rig{api: a, fake: fake, sb: sb, srv: srv, id: s.Summary.ID, hub: hub}
 }
 
 func (r *rig) post(t *testing.T, path, body string) int {
@@ -239,6 +281,74 @@ func TestCommandsAndRefusals(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != 404 {
 		t.Errorf("unknown session stream: %d", resp.StatusCode)
+	}
+}
+
+// A stream of a session whose sandbox is stopped asks for the sandbox ever more rarely (each look takes the
+// project's lock and asks Incus), and at once when the project's sandbox changes (the owner started it).
+func TestStream_stoppedSandboxBacksOffAndWakesOnAChange(t *testing.T) {
+	r := newRig(t)
+	r.api.MaxRetry = time.Minute
+	_, warms0 := r.sb.set(true)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", r.srv.URL+"/s/"+r.id+"/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	frames := make(chan ssewire.Frame, 100)
+	go func() {
+		_ = ssewire.Parse(resp.Body, func(f ssewire.Frame) bool {
+			if f.Event != "" {
+				frames <- f
+			}
+			return true
+		})
+	}()
+	time.Sleep(600 * time.Millisecond)
+	// Retry 10 ms doubling: 10+20+40+80+160+320 ms, six or seven looks; a fixed retry would have made sixty.
+	if _, warms := r.sb.counts(); warms-warms0 > 10 {
+		t.Errorf("%d looks at a stopped sandbox in 600 ms", warms-warms0)
+	}
+	select {
+	case f := <-frames:
+		t.Fatalf("frame from a stopped sandbox %+v", f)
+	default:
+	}
+	r.sb.set(false)
+	r.hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: "other"})
+	r.hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: "p1"})
+	select {
+	case f := <-frames:
+		if f.Event != "flow" {
+			t.Errorf("frame %+v", f)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the start of the sandbox did not wake the stream")
+	}
+}
+
+// Interrupting or answering a request in a stopped sandbox starts it not: the interrupt is a no-op, the reply finds
+// no request pending.
+func TestCommands_stoppedSandboxStartsNothing(t *testing.T) {
+	r := newRig(t)
+	if err := r.fake.StopSession(t.Context(), r.id, false); err != nil { // the stop ended the host too
+		t.Fatal(err)
+	}
+	ensures, _ := r.sb.set(true)
+	if c := r.post(t, "/s/"+r.id+"/interrupt", `{}`); c != http.StatusNoContent {
+		t.Errorf("interrupt in a stopped sandbox: %d", c)
+	}
+	if c := r.post(t, "/s/"+r.id+"/permissions/x", `{"decision":"allow_once"}`); c != http.StatusConflict {
+		t.Errorf("reply in a stopped sandbox: %d", c)
+	}
+	if n, _ := r.sb.counts(); n != ensures {
+		t.Errorf("%d bring-ups for commands with nothing to act on", n-ensures)
+	}
+	if st, _ := r.fake.Session(t.Context(), r.id); st.Unit != flowdproto.UnitInactive {
+		t.Errorf("host started for a no-op: %s", st.Unit)
 	}
 }
 
