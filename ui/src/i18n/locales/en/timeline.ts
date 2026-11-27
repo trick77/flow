@@ -90,11 +90,11 @@ export const timeline = {
   cwdIn: "in",
   modeIs: "mode {{mode}}",
   allowOnce: "Allow once",
-  allowAlways: "Always allow",
+  allowAlways: "Allow for this session",
   deny: "Deny",
   resolved: {
     allow_once: "Allowed once",
-    allow_always: "Always allowed",
+    allow_always: "Allowed for this session",
     deny: "Denied",
     expired: "Expired",
   },
@@ -133,6 +133,10 @@ export const timeline = {
   todos: "Todos",
   todosDone: "{{done}} of {{total}}",
   workingNow: "Working…",
+  // The running turn's thinking estimate, in place of "Working…".
+  thinkingNow: "Thinking…",
+  thinkingTokens_one: "about {{n}} token",
+  thinkingTokens_other: "about {{n}} tokens",
   // One sentence per notice code (docs/events.md, "Notice codes"). Codes are
   // free-form strings: an unknown one shows noticeUnknown.
   notices: {

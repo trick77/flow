@@ -140,7 +140,11 @@ export function SessionView({
   const status = down ? session.status : (folded.status ?? session.status);
   useMarkSeen({
     sessionId: session.id,
-    lastSeq: stream.lastSeq,
+    // With the sandbox down the stream delivers nothing: the row's mirrored
+    // last seq is all there is to see (a turn cut off by the stop).
+    lastSeq: down
+      ? Math.max(stream.lastSeq, session.lastSeq ?? 0)
+      : stream.lastSeq,
     unseen: session.unseen,
     shown: !hidden,
     onSeen,

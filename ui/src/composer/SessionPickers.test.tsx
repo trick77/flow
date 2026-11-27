@@ -120,14 +120,33 @@ describe("SessionPickers", () => {
     ).toBeDisabled();
   });
 
-  it("leaves the model alone while a turn runs, not the mode", () => {
+  it("takes a model while a turn runs, for the next turn, and says so", () => {
+    fetchMock.mockReturnValueOnce(new Promise(() => {}));
     view({ turnRunning: true });
     const model = screen.getByRole("button", { name: /^Model:/ });
-    expect(model).toBeDisabled();
-    expect(model).toHaveAttribute("title", en.composer.modelBetweenTurns);
+    expect(model).toBeEnabled();
+    expect(model).toHaveAttribute("title", en.composer.modelNextTurn);
     expect(
       screen.getByRole("button", { name: /^Permission mode/ }),
     ).toBeEnabled();
+    fireEvent.click(model);
+    expect(screen.getByRole("menu")).toHaveTextContent(
+      en.composer.modelNextTurn,
+    );
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /Haiku/ }));
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      model: "claude-haiku-5-5",
+    });
+  });
+
+  it("gives no next-turn hint between turns", () => {
+    view();
+    const model = screen.getByRole("button", { name: /^Model:/ });
+    expect(model).not.toHaveAttribute("title");
+    fireEvent.click(model);
+    expect(screen.getByRole("menu")).not.toHaveTextContent(
+      en.composer.modelNextTurn,
+    );
   });
 
   it("sends nothing for the value already set", () => {

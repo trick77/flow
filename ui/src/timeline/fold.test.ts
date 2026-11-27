@@ -7,6 +7,7 @@ import {
   type PermissionItem,
   type PlanItem,
   type QuestionItem,
+  THINKING_TOKENS as THINKING,
   type ToolRow,
 } from "./fold";
 import { emptyStream, reduceStream, type StreamState } from "./state";
@@ -410,5 +411,134 @@ describe("foldEvents: questions, plans, the queue", () => {
       ),
     ]);
     expect(delivered.queue).toEqual([]);
+  });
+});
+
+describe("provider messages the timeline does not show", () => {
+  const t = "t-1";
+  const pt = (name: string, raw: unknown, seq: number, rawTruncated = false) =>
+    mk(
+      "provider.passthrough",
+      { provider: "claude", name, raw, ...(rawTruncated && { rawTruncated }) },
+      { seq, turn: t },
+    );
+  const started = mk("turn.started", { messageId: "m" }, { seq: 1, turn: t });
+  const rows = (f: ReturnType<typeof foldRaw>) =>
+    f.items.flatMap((i) => (i.type === "fold" ? i.rows : []));
+
+  it("hides CLI bookkeeping and the interrupt marker, keeps everything else", () => {
+    const f = foldRaw([
+      started,
+      pt("command_lifecycle", { type: "command_lifecycle", state: "done" }, 2),
+      pt("rate_limit_event", { type: "rate_limit_event" }, 3),
+      pt(
+        "user",
+        {
+          type: "user",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "[Request interrupted by user]" }],
+          },
+        },
+        4,
+      ),
+      pt(
+        "user",
+        {
+          type: "user",
+          message: {
+            role: "user",
+            content: "[Request interrupted by user for tool use]",
+          },
+        },
+        5,
+      ),
+      // A user message with more than the marker, a truncated one, an
+      // unknown kind: still rows.
+      pt(
+        "user",
+        {
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "text", text: "[Request interrupted by user]" },
+              { type: "text", text: "and something else" },
+            ],
+          },
+        },
+        6,
+      ),
+      pt(
+        "user",
+        '{"type":"user","message":{"role":"user","content":"[Req',
+        7,
+        true,
+      ),
+      pt("system/workspace_indexed", { type: "system" }, 8),
+    ]);
+    expect(rows(f).map((r) => r.key)).toEqual(["raw:6", "raw:7", "raw:8"]);
+  });
+
+  it("makes no empty fold for a hidden message outside a turn", () => {
+    const f = foldRaw([
+      mk(
+        "provider.passthrough",
+        { provider: "claude", name: "command_lifecycle", raw: {} },
+        { seq: 1 },
+      ),
+    ]);
+    expect(f.items).toEqual([]);
+  });
+
+  it("shows the same names of another provider as rows", () => {
+    const f = foldRaw([
+      started,
+      mk(
+        "provider.passthrough",
+        { provider: "opencode", name: "rate_limit_event", raw: {} },
+        { seq: 2, turn: t },
+      ),
+    ]);
+    expect(rows(f).map((r) => r.key)).toEqual(["raw:2"]);
+  });
+
+  it("turns thinking estimates into one indicator for the running turn", () => {
+    const thinking = [
+      started,
+      pt(THINKING, { estimated_tokens: 120, estimated_tokens_delta: 120 }, 2),
+      pt(THINKING, { estimated_tokens: 1834, estimated_tokens_delta: 1714 }, 3),
+    ];
+    const f = foldRaw(thinking);
+    expect(rows(f)).toEqual([]);
+    expect(f.thinking).toEqual({ tokens: 1834 });
+
+    // Over once the agent does something else, or the turn ends.
+    const tool = mk(
+      "tool.started",
+      { toolId: "tl", name: "Read", kind: "read", path: "a.go" },
+      { seq: 4, turn: t },
+    );
+    expect(foldRaw([...thinking, tool]).thinking).toBeUndefined();
+    const ended = mk(
+      "turn.ended",
+      { outcome: "completed", durationMs: 1 },
+      { seq: 4, turn: t },
+    );
+    expect(foldRaw([...thinking, ended]).thinking).toBeUndefined();
+    // A hidden message in between does not end it.
+    expect(
+      foldRaw([...thinking, pt("command_lifecycle", {}, 4)]).thinking,
+    ).toEqual({ tokens: 1834 });
+    // Without a readable estimate: the indicator alone.
+    expect(foldRaw([started, pt(THINKING, { x: 1 }, 2)]).thinking).toEqual({});
+    // Not while the answer streams already.
+    expect(
+      foldEvents({
+        ...emptyStream,
+        events: thinking,
+        live: [{ blockId: "b", text: "Here" }],
+      }).thinking,
+    ).toBeUndefined();
   });
 });

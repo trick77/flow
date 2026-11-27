@@ -71,6 +71,20 @@ describe("highlight", () => {
     ]);
   });
 
+  it("marks a term with an emoji and ends (no endless loop in a surrogate pair)", () => {
+    expect(highlight("fix 😀 bug 😀😀", ["😀"])).toEqual([
+      { text: "fix ", hit: false },
+      { text: "😀", hit: true },
+      { text: " bug ", hit: false },
+      { text: "😀😀", hit: true },
+    ]);
+    expect(highlight("a😀😀😀b", ["😀😀"])).toEqual([
+      { text: "a", hit: false },
+      { text: "😀😀😀", hit: true },
+      { text: "b", hit: false },
+    ]);
+  });
+
   it("takes terms literally, not as patterns", () => {
     expect(highlight("a.b axb", ["a.b"])).toEqual([
       { text: "a.b", hit: true },

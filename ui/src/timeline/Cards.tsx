@@ -9,6 +9,7 @@ import type {
   NoticeItem,
   ResumedItem,
   TextItem,
+  Thinking,
   TodoListItem,
   ToolRow,
   UserItem,
@@ -156,10 +157,18 @@ export function NoticeRow({ item }: { item: NoticeItem }) {
   );
 }
 
-// WorkingIndicator: bouncing dots and what the open tool does.
-export function WorkingIndicator({ tool }: { tool?: ToolRow }) {
+// WorkingIndicator: bouncing dots and what the open tool does, or, while the
+// agent thinks, "Thinking" and its running token estimate.
+export function WorkingIndicator({
+  tool,
+  thinking,
+}: {
+  tool?: ToolRow;
+  thinking?: Thinking;
+}) {
   const { t } = useTranslation("timeline");
   const verb = useToolVerb();
+  const showThinking = thinking !== undefined && tool === undefined;
   return (
     <div className="working" role="status">
       <div className="dots" aria-hidden="true">
@@ -168,7 +177,16 @@ export function WorkingIndicator({ tool }: { tool?: ToolRow }) {
         <span />
       </div>
       <span>
-        {t("workingNow")}
+        {showThinking ? t("thinkingNow") : t("workingNow")}
+        {showThinking && thinking.tokens !== undefined && (
+          <span className="faint">
+            {t("separator")}
+            {t("thinkingTokens", {
+              count: thinking.tokens,
+              n: formatNumber(thinking.tokens),
+            })}
+          </span>
+        )}
         {tool && (
           <>
             {t("separator")}

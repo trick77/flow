@@ -29,7 +29,7 @@ export const composer = {
   mode: "Permission mode",
   modeOf: "Permission mode: {{mode}}",
   modeCapped: "Capped by the parent session",
-  modelBetweenTurns: "The model changes between turns",
+  modelNextTurn: "Applies to the next turn",
   settingsFailed: "The change was not applied.",
   // Starting a new session.
   newTitle: "New session",

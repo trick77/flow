@@ -50,6 +50,14 @@ export function reduceStream(
       next.live = state.live.filter((b) => b.blockId !== id);
       next.done = { ...state.done, [id]: true };
     }
+    // A turn that ended (lost, interrupted, the agent gone mid-stream) writes
+    // no more of its open blocks: what was half streamed is not live text
+    // under the turns that follow. Late deltas for them are stale.
+    if (e.kind === "turn.ended" && state.live.length > 0) {
+      next.live = [];
+      next.done = { ...state.done };
+      for (const b of state.live) next.done[b.blockId] = true;
+    }
     return next;
   }
   switch (e.kind) {

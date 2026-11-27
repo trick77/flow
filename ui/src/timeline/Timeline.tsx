@@ -126,7 +126,9 @@ export function Timeline({
             ctx={ctx}
           />
         ))}
-        {working && <WorkingIndicator tool={folded.openTool} />}
+        {working && (
+          <WorkingIndicator tool={folded.openTool} thinking={folded.thinking} />
+        )}
       </div>
     </div>
   );

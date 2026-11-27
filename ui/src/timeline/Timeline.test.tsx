@@ -142,6 +142,57 @@ describe("Timeline", () => {
     );
   });
 
+  it("opens a command row to the whole command, wrapped", () => {
+    const command = `go test -race -count=50 -run 'TestMigrations' ./${"pkg/".repeat(40)}...`;
+    show(
+      foldEvents(
+        stateOf([
+          mk("turn.started", { messageId: "m" }, { seq: 1, turn: "t" }),
+          mk(
+            "tool.started",
+            { toolId: "b1", name: "Bash", kind: "bash", command },
+            { seq: 2, turn: "t" },
+          ),
+        ]),
+      ),
+      true,
+    );
+    const r = row("tool:b1");
+    const toggle = within(r).getByRole("button", { name: /^Running/ });
+    expect(r.querySelector("pre")).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const pre = r.querySelector("pre") as HTMLElement;
+    expect(pre).toHaveClass("cmd-wrap");
+    expect(pre.textContent).toBe(command);
+  });
+
+  it("shows thinking estimates as one Thinking indicator, not as rows", () => {
+    const pt = (raw: unknown, seq: number) =>
+      mk(
+        "provider.passthrough",
+        { provider: "claude", name: "system/thinking_tokens", raw },
+        { seq, turn: "t" },
+      );
+    show(
+      foldEvents(
+        stateOf([
+          mk("turn.started", { messageId: "m" }, { seq: 1, turn: "t" }),
+          pt({ estimated_tokens: 40 }, 2),
+          pt({ estimated_tokens: 1834 }, 3),
+        ]),
+      ),
+      true,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Thinking… · about 1'834 tokens",
+    );
+    expect(screen.queryByText(en.timeline.passthrough)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /^Working for / }),
+    ).toBeDisabled();
+  });
+
   it("renders the kind fixtures: errors, subagents, gates, dividers, notices", () => {
     const events = fixtureEvents("events.jsonl");
     show(foldEvents({ ...emptyStream, events }));

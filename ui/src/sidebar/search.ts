@@ -44,10 +44,17 @@ export function highlight(text: string, words: readonly string[]): Part[] {
   const hit = new Array<boolean>(text.length).fill(false);
   for (const w of words) {
     const re = matcher(w);
+    let prev = -1;
     for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+      // Never the same occurrence twice: whatever the engine does with
+      // lastIndex, the loop ends.
+      if (m.index <= prev) break;
+      prev = m.index;
       hit.fill(true, m.index, m.index + m[0].length);
-      // Overlapping occurrences: look again one past this one's start.
-      re.lastIndex = m.index + 1;
+      // Overlapping occurrences: look again one code point past this one's
+      // start. One code unit would land inside a surrogate pair (an emoji),
+      // where the u flag finds the same match again.
+      re.lastIndex = m.index + ((m[0].codePointAt(0) ?? 0) > 0xffff ? 2 : 1);
     }
   }
   const parts: Part[] = [];

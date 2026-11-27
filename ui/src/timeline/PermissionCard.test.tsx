@@ -45,6 +45,25 @@ describe("PermissionCard", () => {
     );
   });
 
+  it("shows a long command whole, wrapped, with the three choices in order", () => {
+    const command = `bash -c 'for f in ${"a/".repeat(60)}x; do  echo "$f"; done'`;
+    render(
+      <PermissionCard
+        item={item({ request: { ...request, command } })}
+        sessionId="s1"
+      />,
+    );
+    const pre = document.querySelector(".perm .cmd") as HTMLElement;
+    expect(pre).toHaveClass("cmd-wrap");
+    // Whitespace kept, nothing cut.
+    expect(pre.textContent).toBe(`$ ${command}`);
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Allow once",
+      "Allow for this session",
+      "Deny",
+    ]);
+  });
+
   it.each([
     [en.timeline.allowOnce, "allow_once"],
     [en.timeline.allowAlways, "allow_always"],
@@ -77,7 +96,7 @@ describe("PermissionCard", () => {
     ).toBeEnabled();
   });
 
-  it("offers Always allow only when the provider can remember a rule", () => {
+  it("offers Allow for this session only when the provider can remember a rule", () => {
     render(
       <PermissionCard
         item={item({

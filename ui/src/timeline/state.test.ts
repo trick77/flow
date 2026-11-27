@@ -52,6 +52,37 @@ describe("reduceStream", () => {
     expect(late).toBe(s);
   });
 
+  it("drops half-streamed blocks when their turn ends without their text", () => {
+    let s = feed([
+      [
+        "turn.started",
+        { messageId: "m1", provider: "claude", model: "x" },
+        { seq: 1, turn: "t1" },
+      ],
+      [
+        "assistant.text_delta",
+        { blockId: "b1", text: "Half a para" },
+        { turn: "t1" },
+      ],
+    ]);
+    expect(s.live).toEqual([{ blockId: "b1", text: "Half a para" }]);
+    s = reduceStream(s, {
+      type: "event",
+      event: mk(
+        "turn.ended",
+        { outcome: "lost", durationMs: 0 },
+        { seq: 2, turn: "t1" },
+      ),
+    });
+    expect(s.live).toEqual([]);
+    // A late delta of the ended turn's block is stale.
+    const late = reduceStream(s, {
+      type: "event",
+      event: mk("assistant.text_delta", { blockId: "b1", text: "graph" }),
+    });
+    expect(late).toBe(s);
+  });
+
   it("takes a snapshot's blocks as the whole set, without finished ones", () => {
     let s = feed([
       ["assistant.text", { blockId: "done", text: "x" }, { seq: 1 }],
