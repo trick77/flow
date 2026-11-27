@@ -250,6 +250,14 @@ func (r *Runtime) EnsureVolume(_ context.Context, v sandbox.Volume) error {
 	return nil
 }
 
+// Volume returns a volume EnsureVolume made.
+func (r *Runtime) Volume(name string) (sandbox.Volume, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v, ok := r.volumes[name]
+	return v, ok
+}
+
 // Attach implements sandbox.Runtime.
 func (r *Runtime) Attach(_ context.Context, name string, m sandbox.Mount) error {
 	r.mu.Lock()

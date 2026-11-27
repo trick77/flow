@@ -61,11 +61,12 @@ type Fake struct {
 	changed   chan struct{} // closed and replaced on every change
 	hello     flowdproto.Hello
 	env       flowdproto.Env
+	envPushes int
 	repos     map[string]flowdproto.RepoState
 	sessions  map[string]*host
 	control   []flowdproto.ControlRequest
 	replies   map[string]flowdproto.ControlReply
-	terminals map[string]flowdproto.TerminalState
+	terminals map[string]*terminal
 	diffs     map[string]apitypes.Diff
 	jobs      map[string]*job
 	// Script answers every delivered message; Echo by default.
@@ -99,7 +100,7 @@ func New(sandbox string) *Fake {
 		hello: flowdproto.Hello{Protocol: flowdproto.Protocol, MinProtocol: flowdproto.MinProtocol,
 			Version: "fake", Sandbox: sandbox, Arch: "amd64", BootID: "boot-1"},
 		repos: map[string]flowdproto.RepoState{}, sessions: map[string]*host{},
-		replies: map[string]flowdproto.ControlReply{}, terminals: map[string]flowdproto.TerminalState{},
+		replies: map[string]flowdproto.ControlReply{}, terminals: map[string]*terminal{},
 		diffs: map[string]apitypes.Diff{}, jobs: map[string]*job{}, Script: Echo, Now: time.Now,
 		JobScript: func(j flowdproto.JobSpec) ([]string, int) { return []string{string(j.Kind) + " " + j.Repo}, 0 },
 	}
@@ -128,7 +129,7 @@ func (f *Fake) Hello(context.Context) (flowdproto.Hello, error) {
 	}
 	h.Terminals = nil
 	for _, t := range f.terminals {
-		h.Terminals = append(h.Terminals, t)
+		h.Terminals = append(h.Terminals, t.state)
 	}
 	slices.SortFunc(h.Terminals, func(a, b flowdproto.TerminalState) int { return cmpString(a.ID, b.ID) })
 	return h, nil
@@ -160,14 +161,29 @@ func (f *Fake) SetClaudeSignedIn(v bool) {
 	f.hello.ClaudeSignedIn = v
 }
 
-// PutEnv implements flowdproto.API; an older revision is ignored.
+// SetRelease sets the release Hello reports (the delivered build's directory).
+func (f *Fake) SetRelease(r string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hello.Release = r
+}
+
+// PutEnv implements flowdproto.API; an older revision is ignored. Every call is counted (EnvPushes).
 func (f *Fake) PutEnv(_ context.Context, e flowdproto.Env) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.envPushes++
 	if e.Revision > f.env.Revision {
 		f.env = e
 	}
 	return nil
+}
+
+// EnvPushes is the number of PutEnv calls so far.
+func (f *Fake) EnvPushes() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.envPushes
 }
 
 // Env returns the last applied Env.
@@ -236,6 +252,17 @@ func (f *Fake) Session(_ context.Context, id string) (flowdproto.SessionState, e
 		return flowdproto.SessionState{}, fmt.Errorf("%w: session %s", flowdproto.ErrNotFound, id)
 	}
 	return h.state, nil
+}
+
+// Spec returns the spec a session's host was last ensured with.
+func (f *Fake) Spec(id string) (flowdproto.SessionSpec, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h, ok := f.sessions[id]
+	if !ok {
+		return flowdproto.SessionSpec{}, false
+	}
+	return h.spec, true
 }
 
 // StopSession implements flowdproto.API: a running turn ends lost, as when the unit dies.
@@ -648,34 +675,6 @@ func (f *Fake) JobLog(_ context.Context, id string, after int) ([]flowdproto.Log
 	return out, nil
 }
 
-// EnsureTerminal implements flowdproto.API.
-func (f *Fake) EnsureTerminal(_ context.Context, t flowdproto.TerminalSpec) (flowdproto.TerminalState, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	st := flowdproto.TerminalState{ID: t.ID, Session: t.Session, Unit: flowdproto.UnitActive, Dir: t.Dir}
-	f.terminals[t.ID] = st
-	return st, nil
-}
-
-// AttachTerminal implements flowdproto.API with an echoing terminal.
-func (f *Fake) AttachTerminal(_ context.Context, id string) (flowdproto.TerminalConn, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.terminals[id]; !ok {
-		return nil, fmt.Errorf("%w: terminal %s", flowdproto.ErrNotFound, id)
-	}
-	r, w := io.Pipe()
-	return &echo{r: r, w: w}, nil
-}
-
-// CloseTerminal implements flowdproto.API.
-func (f *Fake) CloseTerminal(_ context.Context, id string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.terminals, id)
-	return nil
-}
-
 // Port implements flowdproto.API with a page that names the port.
 func (f *Fake) Port(port int) http.Handler {
 	page := fmt.Sprintf("preview of port %d", port)
@@ -684,15 +683,3 @@ func (f *Fake) Port(port int) http.Handler {
 		_, _ = io.WriteString(w, page)
 	})
 }
-
-// echo is a terminal that writes back what it reads.
-type echo struct {
-	r          *io.PipeReader
-	w          *io.PipeWriter
-	cols, rows int
-}
-
-func (e *echo) Read(p []byte) (int, error)  { return e.r.Read(p) }
-func (e *echo) Write(p []byte) (int, error) { return e.w.Write(p) }
-func (e *echo) Close() error                { return e.w.Close() }
-func (e *echo) Resize(cols, rows int) error { e.cols, e.rows = cols, rows; return nil }

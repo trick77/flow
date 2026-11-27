@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"iter"
 	"net/http"
@@ -76,6 +77,8 @@ var (
 	// ErrInvalid: flowd or the host refused a request as malformed (CodeInvalid), e.g. a message whose event cannot be
 	// written.
 	ErrInvalid = errors.New("flowd: invalid request")
+	// ErrNotImplemented: flowd cannot do this yet (CodeNotImplemented), e.g. a session of provider opencode.
+	ErrNotImplemented = errors.New("flowd: not implemented")
 )
 
 // ErrorBody is every non-2xx response body; Code is one of the Code* constants.
@@ -94,6 +97,8 @@ const (
 	CodeInternal     = "internal"
 	CodeNotPending   = "not_pending"
 	CodeRepoBroken   = "repo_broken"
+	// CodeNotImplemented: a provider (opencode) or feature this flowd does not have yet.
+	CodeNotImplemented = "not_implemented"
 )
 
 // UnitState is a systemd unit's state as flowd sees it.
@@ -113,11 +118,16 @@ type Hello struct {
 	Protocol    int    `json:"protocol"`
 	MinProtocol int    `json:"minProtocol"`
 	Version     string `json:"version"`
-	Sandbox     string `json:"sandbox"`
-	Arch        string `json:"arch"`
+	// Release is the release directory flowd runs from (layout.Release): its version plus a hash of the delivered
+	// flowd and sidecar bundle, so it names one build even when two builds report the same Version. Flow delivers
+	// again when it differs from the release it would deliver; empty from a flowd older than the field.
+	Release string `json:"release,omitempty"`
+	Sandbox string `json:"sandbox"`
+	Arch    string `json:"arch"`
 	// BootID changes on every sandbox boot: a change tells Flow that every unit is gone.
 	BootID string `json:"bootId"`
-	// EnvRevision is the last Env applied; Flow pushes again when its own is newer.
+	// EnvRevision is the last Env applied, 0 after a flowd restart: flowd then answers a unit start busy until Flow
+	// pushes again (its bring-up after the busy answer does).
 	EnvRevision int64 `json:"envRevision"`
 	// ClaudeSignedIn: the home volume holds a Claude login. flowd checks the file's presence, never reads it.
 	ClaudeSignedIn bool            `json:"claudeSignedIn"`
@@ -174,10 +184,12 @@ type RepoState struct {
 	SetupScript bool `json:"setupScript"`
 }
 
-// Limits bound one unit (MemoryMax, CPUQuota; MemorySwapMax=0 always).
+// Limits bound one unit (MemoryMax, CPUQuota, TasksMax; MemorySwapMax=0 and OOMPolicy=continue always, so the
+// kernel kills the one process past MemoryMax and the unit lives on). Zero leaves a bound unset.
 type Limits struct {
 	MemoryMaxBytes  int64 `json:"memoryMaxBytes"`
 	CPUQuotaPercent int   `json:"cpuQuotaPercent"`
+	TasksMax        int   `json:"tasksMax,omitempty"`
 }
 
 // WorktreeSpec asks for a worktree of Repo on Branch, cut from BaseRef (origin/<default branch>) after a fetch.
@@ -211,6 +223,12 @@ type SessionSpec struct {
 	Limits            Limits               `json:"limits"`
 	// ParentID is set for a started session; flowd passes it to the MCP server's session table.
 	ParentID string `json:"parentId,omitempty"`
+	// Replay plays the recorded demo turn for every message instead of starting the provider's agent: tests and the
+	// demo mode. Provider decides the adapter otherwise (claude: the sidecar; opencode: not implemented yet).
+	Replay bool `json:"replay,omitempty"`
+	// Record has the Claude sidecar append every raw SDK message beside the session's log (layout.SDKRecording),
+	// for contract fixtures from real runs. Off by default; read at each host start.
+	Record bool `json:"record,omitempty"`
 }
 
 // SessionState is a session's host as flowd sees it.
@@ -359,27 +377,75 @@ type LogLine struct {
 	Text string `json:"text"`
 }
 
-// TerminalSpec asks for a terminal unit; idempotent by ID.
+// TerminalSpec asks for a terminal unit (layout.TerminalUnit, running `flowd term`); idempotent by ID: a running
+// terminal is reported as it is, an ended one is started again. Dir is the shell's directory: a session directory
+// or layout.Home. Zero Limits take flowd's defaults.
 type TerminalSpec struct {
 	ID      string `json:"id"`
 	Session string `json:"session,omitempty"`
 	Dir     string `json:"dir"`
 	Cols    int    `json:"cols"`
 	Rows    int    `json:"rows"`
+	Limits  Limits `json:"limits,omitzero"`
+	// ClaudeAuth is the session's Claude mode for a Claude session's terminal: the shell gets that mode's one
+	// credential, as the session's agent does. Empty (another provider, or no session): no provider credential.
+	ClaudeAuth event.ClaudeAuth `json:"claudeAuth,omitempty"`
 }
 
-// TerminalState is a terminal unit as flowd sees it.
+// TerminalState is a terminal unit as flowd sees it. Exited with ExitCode: the shell ended (the unit is gone; flowd
+// keeps the status until the terminal is started again or closed).
 type TerminalState struct {
-	ID      string    `json:"id"`
-	Session string    `json:"session,omitempty"`
-	Unit    UnitState `json:"unit"`
-	Dir     string    `json:"dir"`
+	ID       string    `json:"id"`
+	Session  string    `json:"session,omitempty"`
+	Unit     UnitState `json:"unit"`
+	Dir      string    `json:"dir"`
+	Exited   bool      `json:"exited,omitempty"`
+	ExitCode int       `json:"exitCode,omitempty"`
 }
 
-// TerminalConn is an attached terminal: bytes both ways, plus resizes. The scrollback arrives first.
+// Terminal window bounds: a resize or a spec outside them is refused (a size is the browser's to choose, so it is
+// checked on every leg).
+const (
+	TerminalMaxCols = 500
+	TerminalMaxRows = 200
+)
+
+// ValidTerminalSize reports whether cols x rows is a window flowd accepts.
+func ValidTerminalSize(cols, rows int) bool {
+	return cols >= 1 && cols <= TerminalMaxCols && rows >= 1 && rows <= TerminalMaxRows
+}
+
+// TerminalConn is an attached terminal: bytes both ways, plus resizes. The scrollback arrives first. Once the shell
+// has exited and its output is read, Read returns a *TerminalExit.
 type TerminalConn interface {
 	io.ReadWriteCloser
 	Resize(cols, rows int) error
+}
+
+// TerminalExit is the end of an attached terminal: the shell's exit code, or 128 + the signal that ended it.
+type TerminalExit struct {
+	Code int
+}
+
+func (e *TerminalExit) Error() string { return fmt.Sprintf("terminal exited with status %d", e.Code) }
+
+// TerminalMessage is a text frame on a terminal WebSocket, both legs (Flow↔flowd here, browser↔Flow as the API's
+// TerminalControl and TerminalEvent, same JSON). Binary frames carry the terminal's bytes. Resize goes towards the
+// terminal; Exit comes from it, as its last frame before a normal close.
+type TerminalMessage struct {
+	Resize *TerminalSize `json:"resize,omitempty"`
+	Exit   *TerminalEnd  `json:"exit,omitempty"`
+}
+
+// TerminalSize is a window size in character cells.
+type TerminalSize struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
+// TerminalEnd is the exit status in a TerminalMessage.
+type TerminalEnd struct {
+	Code int `json:"code"`
 }
 
 // API is the protocol, one method per route.
@@ -406,7 +472,11 @@ type API interface {
 	// JobLog returns the job's log lines after line after.
 	JobLog(ctx context.Context, id string, after int) ([]LogLine, error)
 	EnsureTerminal(ctx context.Context, t TerminalSpec) (TerminalState, error)
-	AttachTerminal(ctx context.Context, id string) (TerminalConn, error)
+	// AttachTerminal connects to a running terminal; a valid size resizes it before the scrollback is replayed.
+	// ErrNotFound when it is not running and left no exit status, *TerminalExit when its shell has ended. ctx bounds
+	// the handshake only; the connection lives until Close.
+	AttachTerminal(ctx context.Context, id string, size TerminalSize) (TerminalConn, error)
+	// CloseTerminal stops the terminal (its shell is hung up) and forgets its exit status.
 	CloseTerminal(ctx context.Context, id string) error
 	// Port forwards HTTP and WebSocket requests to the port inside the sandbox (localhost there), for previews.
 	Port(port int) http.Handler

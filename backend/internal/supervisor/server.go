@@ -93,6 +93,7 @@ func (s *Supervisor) Handler(token string) http.Handler {
 		}
 	})
 	mux.HandleFunc(flowdproto.RouteEvents, s.events)
+	s.terminalRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(flowdproto.HeaderProtocol, strconv.Itoa(flowdproto.Protocol))
 		got, ok := httpx.Bearer(r)
@@ -260,7 +261,11 @@ func run(ctx context.Context, log *slog.Logger, version, configPath string, o *O
 	}
 	o.Version, o.Sandbox, o.CloneBase, o.Log = version, cfg.Sandbox, cfg.CloneBase, log
 	s := New(*o)
+	if err := s.prepare(configPath); err != nil {
+		return err
+	}
 	s.Reattach(ctx)
+	s.ReattachTerminals(ctx)
 	l, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/trick77/ship/kit/httpx"
@@ -22,14 +24,17 @@ import (
 	"github.com/trick77/flow/internal/config"
 	"github.com/trick77/flow/internal/credentials"
 	"github.com/trick77/flow/internal/flowdclient"
+	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/httpapi"
 	"github.com/trick77/flow/internal/metering"
+	"github.com/trick77/flow/internal/profile"
 	"github.com/trick77/flow/internal/projects"
 	"github.com/trick77/flow/internal/sandbox"
 	"github.com/trick77/flow/internal/sandbox/incus"
 	"github.com/trick77/flow/internal/sandboxes"
 	"github.com/trick77/flow/internal/sessions"
 	"github.com/trick77/flow/internal/store"
+	"github.com/trick77/flow/internal/terminals"
 	"github.com/trick77/flow/internal/timeline"
 	"github.com/trick77/flow/web"
 )
@@ -106,28 +111,68 @@ func serve() error {
 	return httpx.Serve(context.Background(), srv, shutdownTimeout)
 }
 
-// wire builds the areas of the walking skeleton: projects, sandboxes on Incus, sessions, timeline.
+// sealKey is BACKEND_SEAL_KEY, or in dev mode without one a key made for this run only: every secret stored
+// meanwhile is unreadable after a restart (flowd tokens are then made again; credentials must be stored again).
+// The config refuses oidc mode without a key.
+func sealKey(cfg config.Config) ([]byte, error) {
+	if cfg.SealKey != nil {
+		return cfg.SealKey, nil
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	slog.Warn("BACKEND_SEAL_KEY unset: dev mode seals with a key made for this run only; stored credentials are " +
+		"LOST at the next restart. Set BACKEND_SEAL_KEY (32 bytes, base64) to keep them.")
+	return key, nil
+}
+
+// wire builds the areas of the walking skeleton: projects, sandboxes on Incus, sessions, timeline, credentials.
 func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apitypes.AppEvent], areas *httpapi.Areas) error {
-	sealer, err := credentials.NewAESSealer(cfg.SealKey)
+	key, err := sealKey(cfg)
 	if err != nil {
 		return err
 	}
-	runtime, err := incus.New(incus.Config{URL: cfg.IncusURL, Project: cfg.IncusProject, CertFile: cfg.IncusCert,
-		KeyFile: cfg.IncusKey, ServerCertFile: cfg.IncusServerCert})
+	sealer, err := credentials.NewAESSealer(key)
+	if err != nil {
+		return err
+	}
+	runtime, err := incus.New(incus.Config{URL: cfg.IncusURL, Project: cfg.IncusProject, Pool: cfg.IncusPool,
+		CertFile: cfg.IncusCert, KeyFile: cfg.IncusKey, ServerCertFile: cfg.IncusServerCert})
 	if err != nil {
 		return err
 	}
 	projectStore := projects.SQL{DB: db}
+	creds := &credentials.Service{Store: credentials.SQL{DB: db}, Sealer: sealer, Log: slog.Default(),
+		Profile: profile.SQL{DB: db}}
 	manager := sandboxManager(cfg, db, projectStore, runtime, sealer, hub)
+	manager.Env = creds.Env
+	// A changed credential reaches running sandboxes at once, new session hosts get it at their start.
+	creds.Changed = func() { go manager.PushEnv(context.WithoutCancel(ctx)) }
 	svc := sessionService(db, projectStore, manager, hub)
+	svc.Limits = flowdproto.Limits{MemoryMaxBytes: cfg.Session.MemoryBytes, CPUQuotaPercent: cfg.Session.CPUPercent,
+		TasksMax: cfg.Session.Tasks}
+	svc.Replay = cfg.SessionReplay
+	if cfg.SessionReplay {
+		slog.Warn("BACKEND_SESSION_REPLAY: sessions play the recorded demo turn, no agent runs")
+	}
+	svc.CloseTerminals = func(ctx context.Context, api flowdproto.API, id string) error {
+		return api.CloseTerminal(ctx, terminals.SessionTerminalID(id, 1))
+	}
+	// Archives made while a sandbox was stopped are finished when it is up again.
+	manager.Warmed = func(projectID string, api flowdproto.API) {
+		svc.Sweep(context.WithoutCancel(ctx), projectID, api)
+	}
 	if err := svc.Start(ctx); err != nil {
 		return err
 	}
+	areas.Connections = &credentials.API{Service: creds}
 	areas.Projects = &projects.API{Store: projectStore, Sandboxes: manager,
 		DefaultBranch: projects.RemoteDefaultBranch("https://github.com/", &http.Client{Timeout: 30 * time.Second})}
 	areas.Sandboxes = &sandboxes.API{Manager: manager}
 	areas.Sessions = &sessions.API{Service: svc}
 	areas.Timeline = &timeline.API{Sessions: svc, Hub: hub}
+	areas.Terminals = &terminals.API{Sessions: svc.Store, Projects: projectStore, Sandboxes: manager, Lock: svc.Lock}
 	return nil
 }
 
@@ -141,9 +186,25 @@ func handler(cfg config.Config, opts httpapi.Options) http.Handler {
 // on first use), and the memory ceiling for all running sandboxes from the configuration.
 func sandboxManager(cfg config.Config, db *sql.DB, projectStore projects.SQL, runtime sandbox.Runtime,
 	sealer credentials.Sealer, hub *sse.Hub[apitypes.AppEvent]) *sandboxes.Manager {
+	// Packed once per Flow process: the same files give the same bytes, and so the same release.
+	bundle := sync.OnceValues(func() ([]byte, error) {
+		t0 := time.Now()
+		b, err := sandboxes.Bundle(cfg.SidecarDir)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("sidecar bundle %s: %w", cfg.SidecarDir, err)
+		case b == nil:
+			slog.Warn("no sidecar bundle: Claude sessions cannot start in sandboxes (replay sessions can)",
+				"dir", cfg.SidecarDir)
+		default:
+			slog.Info("sidecar bundle packed", "dir", cfg.SidecarDir, "bytes", len(b), "ms", time.Since(t0).Milliseconds())
+		}
+		return b, nil
+	})
 	return &sandboxes.Manager{Store: sandboxes.SQL{DB: db}, Projects: projectStore, Runtime: runtime,
 		Dialer: flowdclient.NewDialer(), Sealer: sealer, Image: cfg.SandboxImage, Network: cfg.SandboxNetwork,
-		Memory: cfg.SandboxMemory, MemoryTotal: cfg.SandboxMemoryTotal,
+		Memory: cfg.SandboxMemory, CPUs: cfg.SandboxCPUs, MemoryTotal: cfg.SandboxMemoryTotal,
+		HomeVolume: cfg.HomeVolume, Sidecar: bundle,
 		Addresses: sandboxes.SQLAddresses{DB: db, Network: cfg.SandboxNetwork},
 		Version:   version.String(), Log: slog.Default(), Wait: time.Minute, Poll: 200 * time.Millisecond,
 		Flowd: func(arch string) ([]byte, error) {

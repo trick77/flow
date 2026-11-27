@@ -49,9 +49,10 @@ type Options struct {
 
 // Supervisor is flowd's state.
 type Supervisor struct {
-	o   Options
-	mu  sync.Mutex
-	env int64
+	o      Options
+	mu     sync.Mutex
+	env    int64
+	envSet flowdproto.Env
 	// locks serializes work on one repository's main checkout (git takes its own lock and fails instead of waiting).
 	locks sync.Map
 }
@@ -99,8 +100,12 @@ func (s *Supervisor) Hello(ctx context.Context) (flowdproto.Hello, error) {
 	rev := s.env
 	s.mu.Unlock()
 	h := flowdproto.Hello{Protocol: flowdproto.Protocol, MinProtocol: flowdproto.MinProtocol, Version: s.o.Version,
-		Sandbox: s.o.Sandbox, Arch: runtime.GOARCH, BootID: strings.TrimSpace(string(boot)), EnvRevision: rev,
-		Sessions: []flowdproto.SessionState{}, Terminals: []flowdproto.TerminalState{}}
+		Release: s.release(), Sandbox: s.o.Sandbox, Arch: runtime.GOARCH, BootID: strings.TrimSpace(string(boot)),
+		EnvRevision: rev, Sessions: []flowdproto.SessionState{}, Terminals: []flowdproto.TerminalState{}}
+	// Presence only: flowd never reads the login.
+	if _, err := os.Stat(s.p(layout.ClaudeConfig + "/.credentials.json")); err == nil {
+		h.ClaudeSignedIn = true
+	}
 	units, err := s.o.Units.List(ctx, "flow-session-*")
 	if err != nil {
 		return h, err
@@ -111,15 +116,54 @@ func (s *Supervisor) Hello(ctx context.Context) (flowdproto.Hello, error) {
 			h.Sessions = append(h.Sessions, st)
 		}
 	}
+	// One short budget for all terminal sockets: Flow gives the whole Hello 3 s, and a stalled terminal must not cost
+	// the sandbox its flowd. A terminal that does not answer in time is reported by its unit state alone.
+	qctx, cancel := context.WithTimeout(ctx, helloTerminalBudget)
+	defer cancel()
+	if h.Terminals, err = s.terminals(ctx, qctx); err != nil {
+		return h, err
+	}
 	return h, nil
 }
 
-// PutEnv implements flowdproto.API. The skeleton keeps only the revision: no credential reaches a sandbox yet.
+// helloTerminalBudget bounds Hello's questions to the terminal sockets together.
+const helloTerminalBudget = 500 * time.Millisecond
+
+// release is the release directory flowd runs from (Hello.Release), "" when its binary is not in one.
+func (s *Supervisor) release() string {
+	if s.o.Exe == "" || filepath.Dir(filepath.Dir(s.o.Exe)) != s.p(layout.Releases) {
+		return ""
+	}
+	return filepath.Base(filepath.Dir(s.o.Exe))
+}
+
+// errNoEnv: no set was pushed since flowd started, so a unit started now would run without its credential and git
+// identity. Answered as busy (ErrUnavailable to Flow), which Flow meets by forgetting its connection and bringing
+// the sandbox up again: that greeting pushes the set.
+var errNoEnv = fmt.Errorf("%w: no environment pushed since flowd started", errHostDown)
+
+// envReady refuses starting a unit before the first push.
+func (s *Supervisor) envReady() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.env == 0 {
+		return errNoEnv
+	}
+	return nil
+}
+
+// PutEnv implements flowdproto.API. The set is kept in memory (a restarted flowd reports revision 0, and Flow
+// pushes again); session hosts get their part at their next start (sessionEnv), and none starts before the first
+// push (envReady). git and gh delivery is not built.
+// Every push also makes the home volume's directories: Flow pushes at every bring-up, so a volume attached to a
+// running sandbox gets them without a flowd restart.
 func (s *Supervisor) PutEnv(_ context.Context, e flowdproto.Env) error {
+	s.homeDirs()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e.Revision > s.env {
 		s.env = e.Revision
+		s.envSet = e
 	}
 	return nil
 }
@@ -377,12 +421,18 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 	if !layout.ValidName(sp.ID) || !layout.ValidName(sp.Name) {
 		return flowdproto.SessionState{}, invalid("session id %q or name %q", sp.ID, sp.Name)
 	}
+	if err := checkProvider(sp); err != nil {
+		return flowdproto.SessionState{}, err
+	}
 	unit := layout.HostUnit(sp.ID)
 	defer s.lock(unit)()
 	if st, err := s.o.Units.State(ctx, unit); err != nil {
 		return flowdproto.SessionState{}, err
 	} else if st == flowdproto.UnitActive || st == flowdproto.UnitActivating {
 		return s.Session(ctx, sp.ID)
+	}
+	if err := s.envReady(); err != nil {
+		return flowdproto.SessionState{}, err
 	}
 	spec := host.Spec{Session: sp, Dir: layout.SessionDir(sp.Name)}
 	if old, err := s.readSpec(sp.ID); err == nil {
@@ -433,6 +483,14 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 	if sp.Limits.CPUQuotaPercent > 0 {
 		props = append(props, fmt.Sprintf("CPUQuota=%d%%", sp.Limits.CPUQuotaPercent))
 	}
+	if sp.Limits.TasksMax > 0 {
+		props = append(props, fmt.Sprintf("TasksMax=%d", sp.Limits.TasksMax))
+	}
+	envFile, err := s.writeSessionEnv(sp)
+	if err != nil {
+		return flowdproto.SessionState{}, err
+	}
+	props = append(props, "EnvironmentFile="+envFile)
 	if err := s.o.Units.Start(ctx, unit, argv, props); err != nil {
 		return flowdproto.SessionState{}, err
 	}
@@ -521,6 +579,9 @@ func (s *Supervisor) StopSession(ctx context.Context, id string, remove bool) er
 		return err
 	}
 	if err := s.o.Units.Stop(ctx, layout.HostUnit(id)); err != nil {
+		return err
+	}
+	if err := os.Remove(s.p(layout.SessionEnvFile(id))); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if !remove {

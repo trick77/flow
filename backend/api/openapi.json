@@ -395,17 +395,21 @@
     "/api/terminals": {
       "post": {
         "tags": ["terminals"], "operationId": "createTerminal", "x-flow-area": "terminals",
-        "summary": "Open a terminal", "description": "In a session's directory, or in a project's sandbox home without a session (Claude sign-in).",
+        "summary": "Open a terminal", "description": "In a session's directory, or in a project's sandbox home without a session (Claude sign-in). Create or attach: one terminal per session (or project home), its id derived from the session's; a running terminal is returned as it is, an ended one is started again (the restart). Starts a stopped sandbox, as sending a message does; never starts the session's agent.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TerminalCreate" } } } },
-        "responses": { "201": { "description": "Opened.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Terminal" } } } }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "responses": { "201": { "description": "Opened.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Terminal" } } } }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/terminals/{terminalId}/ws": {
       "parameters": [{ "$ref": "#/components/parameters/TerminalID" }],
       "get": {
         "tags": ["terminals"], "operationId": "attachTerminal", "x-flow-area": "terminals",
-        "summary": "Attach to a terminal", "description": "WebSocket. Binary frames: terminal bytes both ways. Text frames from the browser: TerminalControl JSON. On attach the scrollback is replayed first.",
-        "x-flow-websocket-messages": { "$ref": "#/components/schemas/TerminalControl" },
+        "summary": "Attach to a terminal", "description": "WebSocket. Binary frames: terminal bytes both ways. Text frames from the browser: TerminalControl JSON; from the server: TerminalEvent JSON. On attach the scrollback (the last 256 KiB) is replayed first, laid out for cols x rows when given. Close codes: 1000 after an exit event (the shell ended); 4404 the terminal is not running (closed, or the sandbox restarted); 4409 the sandbox is not running (attaching never starts it); anything else (1001, 1011, 1012, a dropped connection) means Flow or flowd went away while the terminal runs on: attach again. Never starts a sandbox.",
+        "parameters": [
+          { "name": "cols", "in": "query", "required": false, "description": "Window width (1 to 500) to resize to before the replay.", "schema": { "type": "integer" } },
+          { "name": "rows", "in": "query", "required": false, "description": "Window height (1 to 200) to resize to before the replay.", "schema": { "type": "integer" } }
+        ],
+        "x-flow-websocket-messages": { "fromBrowser": { "$ref": "#/components/schemas/TerminalControl" }, "fromServer": { "$ref": "#/components/schemas/TerminalEvent" } },
         "responses": { "101": { "description": "Switching to WebSocket." }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
@@ -413,8 +417,8 @@
       "parameters": [{ "$ref": "#/components/parameters/TerminalID" }],
       "delete": {
         "tags": ["terminals"], "operationId": "closeTerminal", "x-flow-area": "terminals",
-        "summary": "Close a terminal", "description": "Ends its shell.",
-        "responses": { "204": { "description": "Closed." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "summary": "Close a terminal", "description": "Ends its shell. Does not start a stopped sandbox (its terminals are gone with it).",
+        "responses": { "204": { "description": "Closed." }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/sessions/{sessionId}/previews": {
@@ -888,8 +892,8 @@
         "properties": {
           "projectId": { "type": "string" },
           "sessionId": { "type": "string", "description": "Start in this session's directory; else in the home directory." },
-          "cols": { "type": "integer" },
-          "rows": { "type": "integer" }
+          "cols": { "type": "integer", "description": "1 to 500." },
+          "rows": { "type": "integer", "description": "1 to 200." }
         }
       },
       "Terminal": {
@@ -906,7 +910,12 @@
         "required": ["resize"],
         "properties": { "resize": { "$ref": "#/components/schemas/TerminalSize" } }
       },
-      "TerminalSize": { "type": "object", "required": ["cols", "rows"], "properties": { "cols": { "type": "integer" }, "rows": { "type": "integer" } } },
+      "TerminalSize": { "type": "object", "required": ["cols", "rows"], "properties": { "cols": { "type": "integer", "description": "1 to 500; others are ignored." }, "rows": { "type": "integer", "description": "1 to 200; others are ignored." } } },
+      "TerminalEvent": {
+        "type": "object", "description": "Text frame from the server on a terminal WebSocket. exit is the last frame before a normal close.",
+        "properties": { "exit": { "$ref": "#/components/schemas/TerminalExit" } }
+      },
+      "TerminalExit": { "type": "object", "required": ["code"], "properties": { "code": { "type": "integer", "description": "The shell's exit code, or 128 + the signal that ended it." } } },
       "Preview": {
         "type": "object", "required": ["port", "url"],
         "properties": {

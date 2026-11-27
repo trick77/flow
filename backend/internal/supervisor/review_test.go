@@ -16,7 +16,8 @@ import (
 )
 
 func sessionSpec(id, name string, repos ...string) flowdproto.SessionSpec {
-	sp := flowdproto.SessionSpec{ID: id, Name: name, Provider: event.ProviderClaude, Model: "m", Mode: "ask"}
+	sp := flowdproto.SessionSpec{ID: id, Name: name, Provider: event.ProviderClaude, Model: "m", Mode: "ask",
+		Replay: true}
 	for _, r := range repos {
 		sp.Worktrees = append(sp.Worktrees, flowdproto.WorktreeSpec{Repo: r, Branch: "flow/" + name, BaseRef: "origin/master"})
 	}
