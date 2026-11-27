@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/trick77/flow/internal/apitypes"
 	"github.com/trick77/flow/internal/httpapi"
@@ -25,15 +26,29 @@ type Sandboxes interface {
 	Setup(projectID string)
 	// Describe is the project's sandbox as the API shows it.
 	Describe(ctx context.Context, projectID string) apitypes.Sandbox
+	// Delete stops and deletes the project's sandbox instance and keeps anything from bringing it up again; an
+	// *apitypes.Error (sandbox_busy, sandbox_unavailable) when it cannot.
+	Delete(ctx context.Context, projectID string) error
 }
 
-// API implements httpapi.Projects (list, create, get; the rest answer not_implemented).
+// API implements httpapi.Projects (list, create, get, delete; the rest answer not_implemented).
 type API struct {
 	httpapi.NotImplemented
 	Store     Store
 	Sandboxes Sandboxes
 	// DefaultBranch finds a repository's default branch; RemoteDefaultBranch by default.
 	DefaultBranch func(ctx context.Context, fullName string) (string, error)
+	// ActiveSessions counts a project's sessions that are not archived: a delete is refused while one exists. nil
+	// counts none.
+	ActiveSessions func(ctx context.Context, projectID string) (int, error)
+	// Publish sends an app event (project.updated, project.removed); nil: none.
+	Publish func(apitypes.AppEvent)
+}
+
+func (a *API) publish(e apitypes.AppEvent) {
+	if a.Publish != nil {
+		a.Publish(e)
+	}
 }
 
 var repoRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$`)
@@ -149,7 +164,7 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(in.Name)
-	if name == "" || len(name) > 64 {
+	if name == "" || utf8.RuneCountInString(name) > 64 { // characters, as the form and its message count
 		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "name"})
 		return
 	}
@@ -185,7 +200,6 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, err)
 		return
 	}
-	a.Sandboxes.Setup(p.ID)
 	p, err := a.Store.Get(r.Context(), p.ID)
 	if err != nil {
 		httpapi.WriteError(w, err)
@@ -196,5 +210,49 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, err)
 		return
 	}
+	// The project's event goes out before its setup starts: a browser drops a sandbox.updated of a project it does
+	// not know yet, and a bring-up that fails at once would otherwise be followed by this event's older state.
+	a.publish(apitypes.AppEvent{Kind: apitypes.AppEventKindProjectUpdated, Project: &ap, ProjectID: ap.ID})
+	a.Sandboxes.Setup(p.ID)
+	ap.Sandbox = a.Sandboxes.Describe(r.Context(), p.ID)
 	httpapi.WriteJSON(w, http.StatusCreated, ap)
+}
+
+// DeleteProject implements httpapi.Projects: refused while a session of the project is not archived (the owner
+// archives first: archiving keeps uncommitted work on disk and says so, a delete would not); then the sandbox
+// instance goes, then the project's rows with its archived sessions.
+func (a *API) DeleteProject(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("projectId")
+	if _, err := a.Store.Get(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			err = apitypes.Fail(apitypes.ErrorCodeNotFound, "")
+		}
+		httpapi.WriteError(w, err)
+		return
+	}
+	if a.ActiveSessions != nil {
+		n, err := a.ActiveSessions(r.Context(), id)
+		if err != nil {
+			httpapi.WriteError(w, err)
+			return
+		}
+		if n > 0 {
+			httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeProjectHasSessions, ""))
+			return
+		}
+	}
+	if err := a.Sandboxes.Delete(r.Context(), id); err != nil {
+		httpapi.WriteError(w, err)
+		return
+	}
+	// The instance is gone whatever the caller does now: the rows must follow it.
+	if err := a.Store.Delete(context.WithoutCancel(r.Context()), id); err != nil && !errors.Is(err, ErrNotFound) {
+		if errors.Is(err, ErrHasSessions) {
+			err = apitypes.Fail(apitypes.ErrorCodeProjectHasSessions, "")
+		}
+		httpapi.WriteError(w, err)
+		return
+	}
+	a.publish(apitypes.AppEvent{Kind: apitypes.AppEventKindProjectRemoved, ProjectID: id})
+	w.WriteHeader(http.StatusNoContent)
 }

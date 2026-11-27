@@ -90,6 +90,13 @@ type Manager struct {
 	// flowd (a start, the reconnect after a Flow restart or a dropped connection), with that flowd: the sessions area
 	// finishes archives made while the sandbox was stopped. nil: nobody.
 	Warmed func(projectID string, api flowdproto.API)
+	// LockWait is how long Delete, Rebuild and the setup mark wait for a project's lock before they answer
+	// sandbox_busy (or skip): short holders (a Warm from a session follower or an environment push) pass, a bring-up
+	// does not. 0: not at all.
+	LockWait time.Duration
+	// ActiveSessions counts a project's sessions that are not archived, asked again under the project's lock by
+	// Delete and Rebuild: a session made after the API's own count must not lose its sandbox. nil counts none.
+	ActiveSessions func(ctx context.Context, projectID string) (int, error)
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -261,8 +268,9 @@ func (m *Manager) roomFor(ctx context.Context, st sandbox.State) error {
 	return nil
 }
 
-func (m *Manager) lock(projectID string) func() {
+func (m *Manager) projectLock(projectID string) *sync.Mutex {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.locks == nil {
 		m.locks, m.apis = map[string]*sync.Mutex{}, map[string]cachedAPI{}
 	}
@@ -271,9 +279,44 @@ func (m *Manager) lock(projectID string) func() {
 		l = &sync.Mutex{}
 		m.locks[projectID] = l
 	}
-	m.mu.Unlock()
+	return l
+}
+
+func (m *Manager) lock(projectID string) func() {
+	l := m.projectLock(projectID)
 	l.Lock()
 	return l.Unlock
+}
+
+// tryLock takes the project's lock when it is free within LockWait: a bring-up holds it for minutes, and an owner's
+// delete or rebuild answers sandbox_busy instead of waiting that long; a Warm or an environment push holds it for a
+// moment only and must not make them fail.
+func (m *Manager) tryLock(projectID string) (func(), error) {
+	l := m.projectLock(projectID)
+	deadline := time.Now().Add(m.LockWait)
+	for !l.TryLock() {
+		if !time.Now().Before(deadline) {
+			return nil, apitypes.Fail(apitypes.ErrorCodeSandboxBusy, "the sandbox is busy")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return l.Unlock, nil
+}
+
+// noSessions refuses with project_has_sessions while a session of the project is not archived; asked under the
+// project's lock, so a session's start (Ensure) cannot slip in between the count and the removal.
+func (m *Manager) noSessions(ctx context.Context, projectID string) error {
+	if m.ActiveSessions == nil {
+		return nil
+	}
+	n, err := m.ActiveSessions(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return apitypes.Fail(apitypes.ErrorCodeProjectHasSessions, "")
+	}
+	return nil
 }
 
 func (m *Manager) cached(projectID string) cachedAPI {
@@ -337,6 +380,14 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bringTimeout)
 	defer cancel()
 	sb, err := m.Store.ByProject(ctx, projectID)
+	if err == nil && sb.State == StateDeleting {
+		// Its instance is gone or going, the project's rows follow: nothing may make it again (a queued setup, an
+		// environment push, a session's start).
+		if !mayStart {
+			return nil, ErrNotWarm
+		}
+		return nil, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, "sandbox being deleted")
+	}
 	if c := m.cached(projectID); c.api != nil && err == nil {
 		// Two cheap looks: a sandbox stopped behind Flow's back, or running but cut off from the bridge or on another
 		// address, must not keep its dead connection. A look that fails (the bridge's ports not readable just now)
@@ -793,6 +844,9 @@ func (m *Manager) Stop(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
+	if sb.State == StateDeleting {
+		return nil // nothing runs, and the state must stay what keeps a bring-up away
+	}
 	m.setState(ctx, &sb, StateStopping, "")
 	if err := m.Runtime.Stop(ctx, sb.Instance, 30*time.Second); err != nil {
 		m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
@@ -802,8 +856,120 @@ func (m *Manager) Stop(ctx context.Context, projectID string) error {
 	return nil
 }
 
-// Setup brings a sandbox up in the background.
+// removeTimeout bounds removing an instance (a clean stop of up to 30 s, then the delete). A var for tests.
+var removeTimeout = 2 * time.Minute
+
+// removeInstance stops an instance when it runs and deletes it; one that does not exist is removed already.
+func (m *Manager) removeInstance(ctx context.Context, name string) error {
+	st, err := m.Runtime.State(ctx, name)
+	if errors.Is(err, sandbox.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st.Status != sandbox.StatusStopped {
+		if err := m.Runtime.Stop(ctx, name, 30*time.Second); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
+			return fmt.Errorf("stop: %w", err)
+		}
+	}
+	if err := m.Runtime.Delete(ctx, name); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
+		return fmt.Errorf("delete: %w", err)
+	}
+	return nil
+}
+
+// Delete removes a project's sandbox instance for the project's deletion, refused with sandbox_busy while a
+// bring-up holds the project. The row stays in state deleting, so nothing brings the sandbox up again (a queued
+// setup, an environment push, a session start), until the project's rows take it with them; a project without a row
+// gets one in that state for the same reason. The address is released. A removal that fails leaves the row failed
+// and the project in place, so the delete can be tried again. The home volume stays: every sandbox shares it.
+func (m *Manager) Delete(ctx context.Context, projectID string) error {
+	unlock, err := m.tryLock(projectID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := m.noSessions(ctx, projectID); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
+	defer cancel()
+	m.remember(projectID, cachedAPI{})
+	sb, err := m.Store.ByProject(ctx, projectID)
+	if errors.Is(err, ErrNotFound) {
+		sb = Sandbox{ID: store.NewID(), ProjectID: projectID, Instance: InstanceName(projectID), State: StateDeleting}
+		err = m.Store.Put(ctx, sb)
+	}
+	if err != nil {
+		return err
+	}
+	m.setState(ctx, &sb, StateDeleting, "")
+	if err := m.removeInstance(ctx, sb.Instance); err != nil {
+		// ctx may be what ran out: the failure is recorded all the same.
+		m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
+		return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+	}
+	if addrs, err := m.addresses(ctx); err != nil {
+		m.Log.Warn("sandbox deleted, its address not released", "sandbox", sb.Instance, "err", err)
+	} else if err := addrs.Release(ctx, sb.ID); err != nil {
+		m.Log.Warn("sandbox deleted, its address not released", "sandbox", sb.Instance, "err", err)
+	}
+	m.Log.Info("sandbox deleted", "sandbox", sb.Instance)
+	return nil
+}
+
+// Rebuild makes the project's sandbox again from the base image: the instance is deleted (the row keeps its address
+// and flowd token) and a bring-up in the background creates it, delivers flowd and clones every repository afresh.
+// sandbox_busy while a bring-up holds the project. The caller makes sure no session needs the old instance: whatever
+// was on its filesystem (worktrees, logs) is gone.
+func (m *Manager) Rebuild(ctx context.Context, projectID string) error {
+	unlock, err := m.tryLock(projectID)
+	if err != nil {
+		return err
+	}
+	err = m.noSessions(ctx, projectID)
+	if err == nil {
+		err = m.dropInstance(ctx, projectID)
+	}
+	unlock()
+	if err != nil {
+		return err
+	}
+	m.Setup(projectID)
+	return nil
+}
+
+// dropInstance is Rebuild's first half, under the project's lock: the row turns setup and the instance goes.
+func (m *Manager) dropInstance(ctx context.Context, projectID string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
+	defer cancel()
+	m.remember(projectID, cachedAPI{})
+	sb, err := m.Store.ByProject(ctx, projectID)
+	if errors.Is(err, ErrNotFound) {
+		return nil // never brought up: the bring-up makes it
+	}
+	if err != nil {
+		return err
+	}
+	if sb.State == StateDeleting {
+		return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, "sandbox being deleted")
+	}
+	m.setState(ctx, &sb, StateSetup, "")
+	if err := m.removeInstance(ctx, sb.Instance); err != nil {
+		// ctx may be what ran out: the failure is recorded all the same.
+		m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
+		return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+	}
+	m.Log.Info("sandbox instance deleted for a rebuild", "sandbox", sb.Instance)
+	return nil
+}
+
+// Setup brings a sandbox up in the background. One that is not up shows setup at once, so the answer to the request
+// that asked for it (a project's creation, a start) already says so, before the app event of the bring-up's own
+// state reaches a browser that may not know the project yet.
 func (m *Manager) Setup(projectID string) {
+	m.markSetup(projectID)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
@@ -813,20 +979,85 @@ func (m *Manager) Setup(projectID string) {
 	}()
 }
 
-// Describe is the API's view of a project's sandbox.
-func (m *Manager) Describe(ctx context.Context, projectID string) apitypes.Sandbox {
-	sb, err := m.Store.ByProject(ctx, projectID)
+// markSetup records a sandbox about to be brought up as setup: a project's first row, or a stopped or failed one.
+// Only while no bring-up holds the project (that one records its own state); a sandbox being deleted stays so.
+func (m *Manager) markSetup(projectID string) {
+	unlock, err := m.tryLock(projectID)
 	if err != nil {
-		return apitypes.Sandbox{State: apitypes.SandboxStateNone}
+		return
 	}
-	return apitypes.Sandbox{State: apitypes.SandboxState(sb.State), ProgressCode: sb.ProgressCode,
-		ErrorCode: apitypes.ErrorCode(sb.ErrorCode), LastUsedAt: sb.LastUsedAt, FlowdVersion: sb.FlowdVersion}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sb, err := m.Store.ByProject(ctx, projectID)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		if _, err := m.Projects.Get(ctx, projectID); err != nil {
+			return
+		}
+		sb = Sandbox{ID: store.NewID(), ProjectID: projectID, Instance: InstanceName(projectID), State: StateSetup}
+		if err := m.Store.Put(ctx, sb); err != nil {
+			m.Log.Warn("sandbox row", "project", projectID, "err", err)
+			return
+		}
+		m.changed(projectID)
+	case err != nil:
+		m.Log.Warn("sandbox row", "project", projectID, "err", err)
+	case sb.State == StateStopped || sb.State == StateFailed || sb.State == StateNone:
+		m.setState(ctx, &sb, StateSetup, "")
+	}
 }
 
-// API implements httpapi.Sandboxes: state, start and stop (setup logs and rebuild answer not_implemented).
+// Describe is the API's view of a project's sandbox.
+func (m *Manager) Describe(ctx context.Context, projectID string) apitypes.Sandbox {
+	sb, _ := m.Lookup(ctx, projectID)
+	return sb
+}
+
+// Lookup is Describe with the store's error: state none for a project without a row (and no error), state none and
+// the error when the row could not be read, so a caller can tell an unknown state from none.
+func (m *Manager) Lookup(ctx context.Context, projectID string) (apitypes.Sandbox, error) {
+	sb, err := m.Store.ByProject(ctx, projectID)
+	if errors.Is(err, ErrNotFound) {
+		return apitypes.Sandbox{State: apitypes.SandboxStateNone}, nil
+	}
+	if err != nil {
+		return apitypes.Sandbox{State: apitypes.SandboxStateNone}, err
+	}
+	return apitypes.Sandbox{State: apitypes.SandboxState(sb.State), ProgressCode: sb.ProgressCode,
+		ErrorCode: apitypes.ErrorCode(sb.ErrorCode), LastUsedAt: sb.LastUsedAt, FlowdVersion: sb.FlowdVersion}, nil
+}
+
+// Reconcile is called at Flow's start, before anything else touches a sandbox: no bring-up, stop or removal can run
+// then, so a row still in setup, stopping or deleting was left by one cut off (a restart mid-way, a store error after
+// the state was written) and would keep the sandbox in that state for good. Such a row turns failed: the state that
+// says "not warm, the instance may still run", from which a start, a rebuild and a delete all work. Incus is not
+// asked: a start or a delete finds out what is left.
+func (m *Manager) Reconcile(ctx context.Context) error {
+	rows, err := m.Store.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, sb := range rows {
+		switch sb.State {
+		case StateSetup, StateStopping, StateDeleting:
+			m.Log.Warn("sandbox left mid-operation, recorded failed", "sandbox", sb.Instance, "state", sb.State)
+			if err := m.Store.SetState(ctx, sb.ID, StateFailed, "", string(apitypes.ErrorCodeSandboxUnavailable)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// API implements httpapi.Sandboxes: state, start, stop and rebuild (setup logs answer not_implemented until flowd
+// runs setup jobs).
 type API struct {
 	httpapi.NotImplemented
 	Manager *Manager
+	// ActiveSessions counts a project's sessions that are not archived: a rebuild is refused while one exists (its
+	// worktrees and host live on the instance). nil counts none.
+	ActiveSessions func(ctx context.Context, projectID string) (int, error)
 }
 
 func (a *API) known(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -865,6 +1096,31 @@ func (a *API) StopSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.Manager.Stop(r.Context(), id); err != nil && !errors.Is(err, ErrNotFound) {
 		httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error()))
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusAccepted, a.Manager.Describe(r.Context(), id))
+}
+
+// RebuildSandbox implements httpapi.Sandboxes: refused while a session of the project is not archived; the bring-up
+// runs in the background, poll GetSandbox or follow sandbox.updated.
+func (a *API) RebuildSandbox(w http.ResponseWriter, r *http.Request) {
+	id, ok := a.known(w, r)
+	if !ok {
+		return
+	}
+	if a.ActiveSessions != nil {
+		n, err := a.ActiveSessions(r.Context(), id)
+		if err != nil {
+			httpapi.WriteError(w, err)
+			return
+		}
+		if n > 0 {
+			httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeProjectHasSessions, ""))
+			return
+		}
+	}
+	if err := a.Manager.Rebuild(r.Context(), id); err != nil {
+		httpapi.WriteError(w, err)
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusAccepted, a.Manager.Describe(r.Context(), id))

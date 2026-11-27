@@ -9,7 +9,11 @@ import (
 	"net/netip"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/trick77/ship/kit/sse"
+
+	"github.com/trick77/flow/internal/apitypes"
 	"github.com/trick77/flow/internal/config"
 	"github.com/trick77/flow/internal/httpapi"
 	"github.com/trick77/flow/internal/metering"
@@ -65,6 +69,40 @@ func TestSandboxManagerWiring(t *testing.T) {
 	}
 	if st, ok := m.Store.(sandboxes.SQL); !ok || st.DB != db {
 		t.Errorf("Store = %T, not the server's database", m.Store)
+	}
+}
+
+// A sandbox change goes out with the row's state; a row that cannot be read publishes nothing rather than none.
+func TestSandboxChanged(t *testing.T) {
+	db := testDB(t)
+	ps := projects.SQL{DB: db}
+	if err := ps.Create(t.Context(), projects.Project{ID: "p1", Name: "demo"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(t.Context(), `INSERT INTO sandboxes (id, project_id, instance, state)
+		VALUES ('sb1', 'p1', 'flow-1', 'warm')`); err != nil {
+		t.Fatal(err)
+	}
+	hub := sse.NewHub[apitypes.AppEvent](sse.HubOptions{})
+	defer hub.Close()
+	ch, cancel, _ := hub.Subscribe("t")
+	defer cancel()
+	m := sandboxManager(testConfig(), db, ps, nil, nil, hub)
+	m.Changed("p1")
+	select {
+	case e := <-ch:
+		if e.Kind != apitypes.AppEventKindSandboxUpdated || e.Sandbox == nil || e.Sandbox.State != apitypes.SandboxStateWarm {
+			t.Errorf("event %+v", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no event")
+	}
+	_ = db.Close()
+	m.Changed("p1")
+	select {
+	case e := <-ch:
+		t.Errorf("published on a read error: %+v", e)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
