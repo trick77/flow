@@ -713,6 +713,7 @@
           "gatePosition": { "type": "integer", "description": "Position in the check queue while status is queued." },
           "queued": { "type": "integer", "description": "Messages waiting in the session's queue." },
           "turnStartedAt": { "type": "string", "format": "date-time" },
+          "lastSeq": { "type": "integer", "description": "The last seq of the session's log Flow has mirrored: what a mark as seen names while the log cannot be read (sandbox stopped)." },
           "lastActivityAt": { "type": "string", "format": "date-time" },
           "createdAt": { "type": "string", "format": "date-time" }
         }
