@@ -110,7 +110,8 @@ func (a *API) project(ctx context.Context, id string) (projectID string, archive
 }
 
 // stopped reports whether a no-start lookup failed because the sandbox does not run (or does not exist), the only
-// failures that prove its terminals are gone. Store, runtime and dial errors prove nothing.
+// failures that prove its terminals are gone. Store, runtime and dial errors prove nothing, nor does
+// sandboxes.ErrMayRun (not warm by the records, its instance maybe running).
 func stopped(err error) bool {
 	return errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound)
 }
@@ -141,10 +142,13 @@ func (a *API) CreateTerminal(w http.ResponseWriter, r *http.Request) {
 	out := apitypes.Terminal{ProjectID: in.ProjectID}
 	spec := flowdproto.TerminalSpec{Cols: in.Cols, Rows: in.Rows}
 	if in.SessionID != "" {
-		if a.Lock != nil {
-			defer a.Lock(in.SessionID)()
-		}
+		// The session must exist before its lock is taken (a lock per made-up id would stay); the archived check is
+		// read again under the lock.
 		se, err := a.Sessions.Get(ctx, in.SessionID)
+		if err == nil && a.Lock != nil {
+			defer a.Lock(in.SessionID)()
+			se, err = a.Sessions.Get(ctx, in.SessionID)
+		}
 		if errors.Is(err, sessions.ErrNotFound) || err == nil && se.ProjectID != in.ProjectID {
 			httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "sessionId"})
 			return
@@ -264,7 +268,8 @@ func (a *API) AttachTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	var exit *flowdproto.TerminalExit
 	switch {
-	case stopped(err):
+	case stopped(err), errors.Is(err, sandboxes.ErrMayRun):
+		// Not usable until it is started again (a failed sandbox whose shell may run is not reachable either).
 		wsterm.Refuse(w, r, wsterm.CloseNoSandbox, "sandbox not running")
 		return
 	case errors.As(err, &exit):

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -286,6 +287,15 @@ func TestCreate_underTheSessionLock(t *testing.T) {
 	if h, _ := fake.Hello(context.Background()); len(h.Terminals) != 0 {
 		t.Errorf("a shell started for an archived session: %+v", h.Terminals)
 	}
+	// A session id that names nothing takes no lock (each would stay in the lock map).
+	req = httptest.NewRequest(http.MethodPost, "/api/terminals",
+		strings.NewReader(`{"projectId":"`+pid+`","sessionId":"made-up","cols":80,"rows":24}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	a.CreateTerminal(w, req)
+	if locked != 1 || !strings.Contains(w.Body.String(), "invalid_request") {
+		t.Errorf("unknown session: %d %s (locked %d)", w.Code, w.Body, locked)
+	}
 }
 
 func TestCreateFailures(t *testing.T) {
@@ -503,6 +513,20 @@ func TestWarmFailuresAreNotStopped(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil || resp.StatusCode == http.StatusNoContent {
 		t.Fatalf("close on a transient failure answered %v %v", resp, err)
+	}
+	// Not warm by the records (failed) while the instance may run: close reports it instead of claiming the shell gone;
+	// attach tells the browser the sandbox is not usable.
+	r.sb.warmErr = fmt.Errorf("%w (recorded failed)", sbx.ErrMayRun)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("close on a failed, running sandbox answered %v %v", resp, err)
+	}
+	c, _, err = r.dial(id, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := closeOf(t, c); code != 4409 {
+		t.Fatalf("attach on a failed, running sandbox: close %d", code)
 	}
 	// The project has no sandbox at all: nothing can run, so that is "stopped" too.
 	r.sb.warmErr = sbx.ErrNotFound

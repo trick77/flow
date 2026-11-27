@@ -30,7 +30,8 @@ type Sandboxes interface {
 	// Ensure brings the project's sandbox to warm and returns its flowd.
 	Ensure(ctx context.Context, projectID string) (flowdproto.API, error)
 	// Warm returns the flowd of a sandbox that is warm by Flow's records, never starting one: sandboxes.ErrNotWarm
-	// (or sandboxes.ErrNotFound, no sandbox yet) when it does not run.
+	// (or sandboxes.ErrNotFound, no sandbox yet) when it does not run, sandboxes.ErrMayRun when it is not warm but
+	// its instance may run.
 	Warm(ctx context.Context, projectID string) (flowdproto.API, error)
 	// Forget drops a cached connection after it failed.
 	Forget(projectID string)
@@ -68,7 +69,7 @@ type Service struct {
 	mu      sync.Mutex
 	base    context.Context
 	follows map[string]*follower
-	locks   map[string]*sync.Mutex
+	locks   map[string]*sessionLock
 }
 
 // follower is one session's running follow; cancel ends it (Archive).
@@ -77,19 +78,35 @@ type follower struct{ cancel context.CancelFunc }
 // Lock serializes, per session, whatever starts something of the session in its sandbox (Host, the creation of its
 // terminal) with Archive: a start that read the row before an archive would otherwise recreate the host, worktrees
 // or shell after it. Held across a sandbox bring-up. Returns the unlock.
+// An entry lives while someone holds or waits for it: the last unlock drops it, so the map holds no lock of a
+// session nobody works on (an archived one, an id that named nothing).
 func (s *Service) Lock(id string) func() {
 	s.mu.Lock()
 	if s.locks == nil {
-		s.locks = map[string]*sync.Mutex{}
+		s.locks = map[string]*sessionLock{}
 	}
 	l, ok := s.locks[id]
 	if !ok {
-		l = &sync.Mutex{}
+		l = &sessionLock{}
 		s.locks[id] = l
 	}
+	l.users++
 	s.mu.Unlock()
-	l.Lock()
-	return l.Unlock
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		s.mu.Lock()
+		if l.users--; l.users == 0 {
+			delete(s.locks, id)
+		}
+		s.mu.Unlock()
+	}
+}
+
+// sessionLock is one session's lock and how many hold or wait for it (guarded by Service.mu).
+type sessionLock struct {
+	mu    sync.Mutex
+	users int
 }
 
 // Start follows every session that is not archived, until ctx ends.
@@ -156,6 +173,9 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	if !slices.Contains(event.PermissionModeValues, event.PermissionMode(in.Mode)) {
 		return apitypes.Session{}, invalid("mode")
 	}
+	if in.ClaudeAuth != "" && !slices.Contains(event.ClaudeAuthValues, event.ClaudeAuth(in.ClaudeAuth)) {
+		return apitypes.Session{}, invalid("claudeAuth")
+	}
 	if strings.TrimSpace(in.Model) == "" {
 		return apitypes.Session{}, invalid("model")
 	}
@@ -190,7 +210,7 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	}
 	title = cut(title, 80)
 	base := Slug(title)
-	name, err := s.uniqueName(ctx, in.ProjectID, base)
+	name, suffix, err := s.uniqueName(ctx, in.ProjectID, base)
 	if err != nil {
 		return apitypes.Session{}, err
 	}
@@ -203,8 +223,9 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 		}
 	}
 	// The name was chosen outside the insert's transaction: a creation with the same title at the same moment may
-	// take it first (the unique index on project and name says so). Then the next suffix, a few times.
-	for attempt := 2; ; attempt++ {
+	// take it first (the unique index on project and name says so). Then the next suffix after the chosen one (those
+	// before it are known to be taken), a few times.
+	for attempt := 1; ; attempt++ {
 		se.Name, se.Branch = name, "flow/"+name
 		var wts []Worktree
 		for _, r := range chosen {
@@ -215,10 +236,11 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 		if err == nil {
 			break
 		}
-		if !strings.Contains(err.Error(), "sessions.name") || attempt > 10 {
+		if !strings.Contains(err.Error(), "sessions.name") || attempt >= 10 {
 			return apitypes.Session{}, err
 		}
-		name = fmt.Sprintf("%s-%d", base, attempt)
+		suffix++
+		name = fmt.Sprintf("%s-%d", base, suffix)
 	}
 	// Until the session is usable a failure takes it back out: in the sandbox first (host unit, worktrees, the
 	// directory's claim; EnsureSession may have got that far before failing), through the no-start path so a
@@ -252,22 +274,24 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	return s.Describe(ctx, se)
 }
 
-func (s *Service) uniqueName(ctx context.Context, projectID, base string) (string, error) {
+// uniqueName is the first free name of base, base-2, base-3, …, and its suffix (1 for base itself).
+func (s *Service) uniqueName(ctx context.Context, projectID, base string) (string, int, error) {
 	taken := map[string]bool{}
 	for _, archived := range []bool{false, true} {
 		list, err := s.Store.List(ctx, ListFilter{ProjectID: projectID, Archived: archived})
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		for _, se := range list {
 			taken[se.Name] = true
 		}
 	}
-	name := base
-	for i := 2; taken[name]; i++ {
-		name = fmt.Sprintf("%s-%d", base, i)
+	name, suffix := base, 1
+	for taken[name] {
+		suffix++
+		name = fmt.Sprintf("%s-%d", base, suffix)
 	}
-	return name, nil
+	return name, suffix, nil
 }
 
 // Spec is what flowd needs to run a session's host.
@@ -346,9 +370,10 @@ func (s *Service) stop(ctx context.Context, api flowdproto.API, id string, remov
 }
 
 // Archive closes a session's terminals, stops its host and removes its worktrees (branches with commits of their own
-// stay), then marks it archived and ends its follower; its log stays readable. A stopped sandbox is not started for
-// it: nothing of the session runs there, so the session is marked archived with its cleanup pending, which the
-// sandbox's next bring-up does (Sweep). Archiving an archived session again changes nothing.
+// stay, and flowd keeps a worktree with uncommitted or untracked changes), then marks it archived and ends its
+// follower; its log stays readable. A stopped sandbox is not started for it: nothing of the session runs there, so
+// the session is marked archived with its cleanup pending, which the sandbox's next bring-up does (Sweep). One that
+// is not warm while its instance may run fails the archive. Archiving an archived session again changes nothing.
 func (s *Service) Archive(ctx context.Context, id string) error {
 	defer s.Lock(id)()
 	se, err := s.Store.Get(ctx, id)
@@ -359,8 +384,12 @@ func (s *Service) Archive(ctx context.Context, id string) error {
 		return err
 	}
 	api, err := s.Sandboxes.Warm(ctx, se.ProjectID)
-	// Only these prove nothing runs; any other failure may leave a host with the session's credential running.
+	// Only these prove nothing runs; any other failure (sandboxes.ErrMayRun among them: not warm, the instance not
+	// proven stopped) may leave a host with the session's credential running.
 	pending := errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound)
+	if errors.Is(err, sandboxes.ErrMayRun) {
+		return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+	}
 	if err != nil && !pending {
 		return err
 	}

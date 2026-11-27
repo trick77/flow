@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,6 +179,15 @@ func TestArchive_stoppedSandbox(t *testing.T) {
 	if se, _ := r.svc.Store.Get(ctx, id); se.ArchivedAt != nil {
 		t.Fatal("archived on an error that proves nothing")
 	}
+	// Not warm by the records (failed) while the instance runs: no proof either, told as sandbox_unavailable.
+	r.sb.warmErr = fmt.Errorf("%w (recorded failed)", sandboxes.ErrMayRun)
+	var ae *apitypes.Error
+	if err := r.svc.Archive(ctx, id); !errors.As(err, &ae) || ae.Code != apitypes.ErrorCodeSandboxUnavailable {
+		t.Fatalf("archive on a failed, running sandbox: %v", err)
+	}
+	if se, _ := r.svc.Store.Get(ctx, id); se.ArchivedAt != nil {
+		t.Fatal("archived while the sandbox may run")
+	}
 	r.sb.warmErr = sandboxes.ErrNotWarm
 	ensures := r.sb.ensures.Load()
 	if err := r.svc.Archive(ctx, id); err != nil {
@@ -196,6 +208,38 @@ func TestArchive_stoppedSandbox(t *testing.T) {
 	}
 	if se, _ := r.svc.Store.Get(ctx, id); se.CleanupPending {
 		t.Error("still pending after the sweep")
+	}
+}
+
+// The per-session lock excludes as before, and its entry goes with the last holder: archived sessions and ids that
+// named nothing leave no lock behind.
+func TestLock_entriesDoNotPileUp(t *testing.T) {
+	r := newRig(t)
+	var wg sync.WaitGroup
+	inside := atomic.Int32{}
+	for range 50 {
+		wg.Go(func() {
+			unlock := r.svc.Lock("s1")
+			if inside.Add(1) != 1 {
+				t.Error("two holders of one session's lock")
+			}
+			time.Sleep(100 * time.Microsecond)
+			inside.Add(-1)
+			unlock()
+		})
+	}
+	wg.Wait()
+	w := create(t, r, `{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask"}`)
+	var s apitypes.Session
+	_ = json.Unmarshal(w.Body.Bytes(), &s)
+	if err := r.svc.Archive(t.Context(), s.Summary.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.svc.mu.Lock()
+	n := len(r.svc.locks)
+	r.svc.mu.Unlock()
+	if n != 0 {
+		t.Errorf("%d lock entries left", n)
 	}
 }
 
