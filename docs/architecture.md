@@ -197,7 +197,11 @@ sandbox (Incus system container, one per project)
   leftover branch of its name resets it to the fresh base when it has no commits of its own, and is refused when it
   has some. Session ids that are no `layout.ValidName` are refused before they become paths.
 - **host.shutdown** without `whenIdle` during a turn: the host tells the agent to stop and writes the turn's end as
-  `interrupted` itself (with the shutdown's command id), then stops once the command's reply is written. Request
+  `interrupted` itself (with the shutdown's command id), then stops once the command's reply is written. flowd's
+  session stop (`DELETE /v1/sessions/{id}`, reason `stop`, or `archive` with remove) sends it before stopping the
+  unit (bounded, 5 s), so a stop or archive mid-turn leaves no open turn in the log; the agent's own `turn.ended`
+  arrives after that and is dropped, so the cut-off turn's cost stays unreported. The stop needs no spec (one
+  missing or tampered with never keeps a host and its credential running); only the remove step reads it. Request
   drafts (permission, question, plan) wait for the owner only when logged inside a turn; otherwise the host answers
   the adapter with a deny at once, so no session waits on a request nobody can see.
 - **Command results** say whether a `message.send` was queued (`CommandResult.queued`, from the host): the browser's
@@ -453,9 +457,8 @@ and without a ban chain, then end to end with Flow itself.
   it is not used. Active file cache is counted (hot, reclaimed only under pressure), as Kubernetes' working set
   does. An instance the metrics do not measure (refused, or missing) counts with its `memory.usage`, cache
   included: too much rather than nothing, never an open door, never a block for good; an instance list that fails
-  refuses the start (`sandbox_unavailable`) until the next one. Incus' project `limits.memory` was rejected as the
-  default: it counts stopped instances too (measured) and would cap how many sandboxes exist; host-setup sets it
-  only with `INCUS_PROJECT_MEMORY=1` (refused while the total is 0).
+  refuses the start (`sandbox_unavailable`) until the next one. Incus' project `limits.memory` was rejected: it
+  counts stopped instances too (measured) and would cap how many sandboxes exist; host-setup sets none.
 
 ## Lifecycles
 
