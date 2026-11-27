@@ -95,6 +95,23 @@ const (
 // PermissionModeValues lists every PermissionMode.
 var PermissionModeValues = []PermissionMode{PermissionModePlan, PermissionModeAsk, PermissionModeAcceptEdits, PermissionModeAuto, PermissionModeFullAccess}
 
+// Effort: The agent's reasoning effort, least to most: low, medium, high, xhigh, max. default: Flow passes none
+// and the agent uses its own (per model). An absent effort reads as default.
+type Effort string
+
+// Effort values.
+const (
+	EffortDefault Effort = "default"
+	EffortLow     Effort = "low"
+	EffortMedium  Effort = "medium"
+	EffortHigh    Effort = "high"
+	EffortXhigh   Effort = "xhigh"
+	EffortMax     Effort = "max"
+)
+
+// EffortValues lists every Effort.
+var EffortValues = []Effort{EffortDefault, EffortLow, EffortMedium, EffortHigh, EffortXhigh, EffortMax}
+
 // SessionStatus is part of the contract.
 type SessionStatus string
 
@@ -118,6 +135,7 @@ type SessionStarted struct {
 	Provider          Provider       `json:"provider"`
 	ClaudeAuth        ClaudeAuth     `json:"claudeAuth,omitempty"`
 	Model             string         `json:"model"`
+	Effort            Effort         `json:"effort,omitempty"`
 	Mode              PermissionMode `json:"mode"`
 	ModeCap           PermissionMode `json:"modeCap,omitempty"`
 	ProviderSessionID string         `json:"providerSessionId,omitempty"`
@@ -148,6 +166,7 @@ type SessionResumed struct {
 // SessionSettings: The session's settings after a change; absent fields did not change.
 type SessionSettings struct {
 	Model   string         `json:"model,omitempty"`
+	Effort  Effort         `json:"effort,omitempty"`
 	Mode    PermissionMode `json:"mode,omitempty"`
 	ModeCap PermissionMode `json:"modeCap,omitempty"`
 }
@@ -235,6 +254,8 @@ type TurnStarted struct {
 	// The model the session is set to as the turn starts, written by the host. A session can change model between
 	// turns.
 	Model string `json:"model,omitempty"`
+	// The effort the session is set to as the turn starts, written by the host (default included), as model.
+	Effort Effort `json:"effort,omitempty"`
 }
 
 // TurnOutcome: lost: the agent process ended mid-turn (crash, sandbox stop); the host writes it on its next
@@ -798,7 +819,9 @@ type PlanReply struct {
 
 // SettingsSet is part of the contract.
 type SettingsSet struct {
-	Model   string         `json:"model,omitempty"`
+	Model string `json:"model,omitempty"`
+	// default puts the agent back on its own effort; absent keeps the effort.
+	Effort  Effort         `json:"effort,omitempty"`
 	Mode    PermissionMode `json:"mode,omitempty"`
 	ModeCap PermissionMode `json:"modeCap,omitempty"`
 }

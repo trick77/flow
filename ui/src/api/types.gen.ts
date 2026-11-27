@@ -70,10 +70,12 @@ export interface ProfileUpdate {
 }
 
 /**
- * disconnected: no connection (in a poll answer: the code was denied or Flow holds none). pending: a
- * device code is out (in a poll answer: not confirmed yet). connected: Flow holds a renewable
- * authorization. expired: the authorization can no longer be renewed, the owner connects again (in a
- * poll answer: the device code expired).
+ * disconnected: no connection (in a poll answer: the code was denied, or Flow holds no code and no
+ * connection). pending: a device code is out (in a poll answer: not confirmed yet, or confirmed and
+ * the account not read yet). connected: Flow holds a renewable authorization (in a poll answer: also
+ * when Flow holds no code but the connection exists, e.g. another tab's poll completed it). expired:
+ * the authorization can no longer be renewed, the owner connects again (in a poll answer: the device
+ * code expired, or Flow holds no code and the stored authorization is expired).
  */
 export type GitHubState = "disconnected" | "pending" | "connected" | "expired";
 export const GIT_HUB_STATE_VALUES: readonly GitHubState[] = ["disconnected", "pending", "connected", "expired"];
@@ -138,6 +140,11 @@ export interface DeviceFlow {
   userCode: string;
   verificationUri: string;
   expiresAt: string;
+  /**
+   * Seconds the code has left when this answer was made: a client counts its deadline from it with its
+   * own clock, never from expiresAt (the clocks may differ). The poll's expired answer is the authority.
+   */
+  expiresInSeconds: number;
   intervalSeconds: number;
 }
 
@@ -226,6 +233,13 @@ export const CLAUDE_AUTH_VALUES: readonly ClaudeAuth[] = ["subscription_token", 
 export type PermissionMode = "plan" | "ask" | "accept_edits" | "auto" | "full_access";
 export const PERMISSION_MODE_VALUES: readonly PermissionMode[] = ["plan", "ask", "accept_edits", "auto", "full_access"];
 
+/**
+ * The agent's reasoning effort, least to most: low, medium, high, xhigh, max. default: Flow passes
+ * none and the agent uses its own (per model). An absent effort reads as default.
+ */
+export type Effort = "default" | "low" | "medium" | "high" | "xhigh" | "max";
+export const EFFORT_VALUES: readonly Effort[] = ["default", "low", "medium", "high", "xhigh", "max"];
+
 export type SessionStatus = "idle" | "working" | "queued" | "approval" | "plan" | "question" | "done" | "failed";
 export const SESSION_STATUS_VALUES: readonly SessionStatus[] = ["idle", "working", "queued", "approval", "plan", "question", "done", "failed"];
 
@@ -250,6 +264,13 @@ export interface ProviderInfo {
   models: ModelInfo[];
   /** Id of the model a new session gets unless the owner picks another; one of models. */
   defaultModel?: string;
+  /**
+   * The effort levels the agent takes, least to most, without default (always offered). Absent: the
+   * agent takes no effort. A model without a level runs it lowered (Claude Code downgrades it).
+   */
+  efforts?: Effort[];
+  /** The effort a new session gets unless the owner picks another. */
+  defaultEffort?: Effort;
 }
 
 export interface AgentCatalog {
@@ -268,6 +289,7 @@ export interface SessionSummary {
   provider: Provider;
   claudeAuth?: ClaudeAuth;
   model: string;
+  effort?: Effort;
   mode: PermissionMode;
   modeCap?: PermissionMode;
   status: SessionStatus;
@@ -331,6 +353,8 @@ export interface SessionCreate {
   /** For provider claude; default subscription_token. Never inferred from which credentials exist. */
   claudeAuth?: ClaudeAuth;
   model: string;
+  /** Absent: default. */
+  effort?: Effort;
   mode: PermissionMode;
   /** Else derived from the first message. */
   title?: string;
@@ -340,6 +364,7 @@ export interface SessionCreate {
 export interface SessionUpdate {
   title?: string;
   model?: string;
+  effort?: Effort;
   mode?: PermissionMode;
 }
 

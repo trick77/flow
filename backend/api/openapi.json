@@ -93,7 +93,7 @@
     "/api/connections/github/device/poll": {
       "post": {
         "tags": ["connections"], "operationId": "pollGitHubDeviceFlow", "x-flow-area": "connections",
-        "summary": "Poll GitHub device flow", "description": "Pending until the owner confirmed on GitHub. Flow asks GitHub at most at GitHub's interval; a poll in between answers pending from memory.",
+        "summary": "Poll GitHub device flow", "description": "Pending until the owner confirmed on GitHub. Flow asks GitHub at most at GitHub's interval; a poll in between answers pending from memory. A poll while Flow holds no code answers the connection as it stands. An error answer (502, 500) means the code is over: poll no further.",
         "responses": { "200": { "$ref": "#/components/responses/GitHubConnection" }, "502": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
@@ -249,7 +249,7 @@
       },
       "patch": {
         "tags": ["sessions"], "operationId": "updateSession", "x-flow-area": "sessions",
-        "summary": "Change a session", "description": "Title, model or permission mode; absent or empty fields stay as they are. A mode above the cap is mode_above_cap; an empty title after trimming, a control character, or a model id with white space is invalid_request. A model or mode change reaches the agent as a settings change (logged as session.settings, applied to a running agent at once, else at its next start); like sending a message it starts a stopped sandbox, since the log is what a restarted agent takes its settings from. A title change touches only the session. session.updated follows on the app stream.",
+        "summary": "Change a session", "description": "Title, model, effort or permission mode; absent or empty fields stay as they are (effort default puts the agent back on its own). A mode above the cap is mode_above_cap; an empty title after trimming, a control character, or a model id with white space is invalid_request. A model, effort or mode change reaches the agent as a settings change (logged as session.settings, applied to a running agent at once, else at its next start); like sending a message it starts a stopped sandbox, since the log is what a restarted agent takes its settings from. A title change touches only the session. session.updated follows on the app stream.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUpdate" } } } },
         "responses": { "200": { "$ref": "#/components/responses/Session" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       },
@@ -540,7 +540,7 @@
       },
       "GitHubState": {
         "type": "string",
-        "description": "disconnected: no connection (in a poll answer: the code was denied or Flow holds none). pending: a device code is out (in a poll answer: not confirmed yet). connected: Flow holds a renewable authorization. expired: the authorization can no longer be renewed, the owner connects again (in a poll answer: the device code expired).",
+        "description": "disconnected: no connection (in a poll answer: the code was denied, or Flow holds no code and no connection). pending: a device code is out (in a poll answer: not confirmed yet, or confirmed and the account not read yet). connected: Flow holds a renewable authorization (in a poll answer: also when Flow holds no code but the connection exists, e.g. another tab's poll completed it). expired: the authorization can no longer be renewed, the owner connects again (in a poll answer: the device code expired, or Flow holds no code and the stored authorization is expired).",
         "enum": ["disconnected", "pending", "connected", "expired"]
       },
       "GitHubConnection": {
@@ -597,11 +597,12 @@
         }
       },
       "DeviceFlow": {
-        "type": "object", "required": ["userCode", "verificationUri", "expiresAt", "intervalSeconds"],
+        "type": "object", "required": ["userCode", "verificationUri", "expiresAt", "expiresInSeconds", "intervalSeconds"],
         "properties": {
           "userCode": { "type": "string" },
           "verificationUri": { "type": "string" },
           "expiresAt": { "type": "string", "format": "date-time" },
+          "expiresInSeconds": { "type": "integer", "description": "Seconds the code has left when this answer was made: a client counts its deadline from it with its own clock, never from expiresAt (the clocks may differ). The poll's expired answer is the authority." },
           "intervalSeconds": { "type": "integer" }
         }
       },
@@ -675,6 +676,11 @@
         "enum": ["subscription_token", "subscription_login", "api_key"]
       },
       "PermissionMode": { "type": "string", "enum": ["plan", "ask", "accept_edits", "auto", "full_access"] },
+      "Effort": {
+        "type": "string",
+        "description": "The agent's reasoning effort, least to most: low, medium, high, xhigh, max. default: Flow passes none and the agent uses its own (per model). An absent effort reads as default.",
+        "enum": ["default", "low", "medium", "high", "xhigh", "max"]
+      },
       "SessionStatus": { "type": "string", "enum": ["idle", "working", "queued", "approval", "plan", "question", "done", "failed"] },
       "ModelInfo": {
         "type": "object", "required": ["id", "label"],
@@ -692,7 +698,9 @@
           "available": { "type": "boolean", "description": "False without a sign-in or key." },
           "claudeAuths": { "type": "array", "items": { "$ref": "#/components/schemas/ClaudeAuth" }, "description": "For claude, the credential modes usable now: subscription_token when a token is stored, subscription_login when the home volume holds a login, api_key when a key is stored." },
           "models": { "type": "array", "items": { "$ref": "#/components/schemas/ModelInfo" } },
-          "defaultModel": { "type": "string", "description": "Id of the model a new session gets unless the owner picks another; one of models." }
+          "defaultModel": { "type": "string", "description": "Id of the model a new session gets unless the owner picks another; one of models." },
+          "efforts": { "type": "array", "items": { "$ref": "#/components/schemas/Effort" }, "description": "The effort levels the agent takes, least to most, without default (always offered). Absent: the agent takes no effort. A model without a level runs it lowered (Claude Code downgrades it)." },
+          "defaultEffort": { "$ref": "#/components/schemas/Effort", "description": "The effort a new session gets unless the owner picks another." }
         }
       },
       "AgentCatalog": {
@@ -713,6 +721,7 @@
           "provider": { "$ref": "#/components/schemas/Provider" },
           "claudeAuth": { "$ref": "#/components/schemas/ClaudeAuth" },
           "model": { "type": "string" },
+          "effort": { "$ref": "#/components/schemas/Effort" },
           "mode": { "$ref": "#/components/schemas/PermissionMode" },
           "modeCap": { "$ref": "#/components/schemas/PermissionMode" },
           "status": { "$ref": "#/components/schemas/SessionStatus" },
@@ -768,6 +777,7 @@
           "provider": { "$ref": "#/components/schemas/Provider" },
           "claudeAuth": { "$ref": "#/components/schemas/ClaudeAuth", "description": "For provider claude; default subscription_token. Never inferred from which credentials exist." },
           "model": { "type": "string" },
+          "effort": { "$ref": "#/components/schemas/Effort", "description": "Absent: default." },
           "mode": { "$ref": "#/components/schemas/PermissionMode" },
           "title": { "type": "string", "description": "Else derived from the first message." },
           "message": { "$ref": "#/components/schemas/MessageCreate" }
@@ -778,6 +788,7 @@
         "properties": {
           "title": { "type": "string" },
           "model": { "type": "string" },
+          "effort": { "$ref": "#/components/schemas/Effort" },
           "mode": { "$ref": "#/components/schemas/PermissionMode" }
         }
       },

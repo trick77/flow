@@ -120,6 +120,11 @@
       "description": "Flow's modes, ordered from least to most permissive: plan, ask, accept_edits, auto, full_access.",
       "enum": ["plan", "ask", "accept_edits", "auto", "full_access"]
     },
+    "Effort": {
+      "type": "string",
+      "description": "The agent's reasoning effort, least to most: low, medium, high, xhigh, max. default: Flow passes none and the agent uses its own (per model). An absent effort reads as default.",
+      "enum": ["default", "low", "medium", "high", "xhigh", "max"]
+    },
     "SessionStatus": {
       "type": "string",
       "enum": ["idle", "working", "queued", "approval", "plan", "question", "done", "failed"]
@@ -131,6 +136,7 @@
         "provider": { "$ref": "#/$defs/Provider" },
         "claudeAuth": { "$ref": "#/$defs/ClaudeAuth" },
         "model": { "type": "string" },
+        "effort": { "$ref": "#/$defs/Effort" },
         "mode": { "$ref": "#/$defs/PermissionMode" },
         "modeCap": { "$ref": "#/$defs/PermissionMode" },
         "providerSessionId": { "type": "string" },
@@ -151,6 +157,7 @@
       "description": "The session's settings after a change; absent fields did not change.",
       "properties": {
         "model": { "type": "string" },
+        "effort": { "$ref": "#/$defs/Effort" },
         "mode": { "$ref": "#/$defs/PermissionMode" },
         "modeCap": { "$ref": "#/$defs/PermissionMode" }
       }
@@ -207,7 +214,8 @@
       "properties": {
         "messageId": { "type": "string" },
         "provider": { "$ref": "#/$defs/Provider", "description": "The session's provider, written by the host." },
-        "model": { "type": "string", "description": "The model the session is set to as the turn starts, written by the host. A session can change model between turns." }
+        "model": { "type": "string", "description": "The model the session is set to as the turn starts, written by the host. A session can change model between turns." },
+        "effort": { "$ref": "#/$defs/Effort", "description": "The effort the session is set to as the turn starts, written by the host (default included), as model." }
       }
     },
     "TurnOutcome": {
@@ -632,6 +640,7 @@
       "type": "object",
       "properties": {
         "model": { "type": "string" },
+        "effort": { "$ref": "#/$defs/Effort", "description": "default puts the agent back on its own effort; absent keeps the effort." },
         "mode": { "$ref": "#/$defs/PermissionMode" },
         "modeCap": { "$ref": "#/$defs/PermissionMode" }
       }
