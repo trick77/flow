@@ -221,6 +221,8 @@ func (a *API) ReadSessionLog(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, err)
 		return
 	}
+	// Past the end there is nothing to read; clamped, after+limit cannot overflow into a negative page.
+	after = min(after, st.LastSeq)
 	lo, hi := after+1, min(st.LastSeq, after+limit)
 	if hasBefore {
 		hi = min(before-1, st.LastSeq)

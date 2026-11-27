@@ -164,12 +164,19 @@ export function permissionResult(
     case "allow_once":
       return { behavior: "allow", updatedInput: req.input };
     case "allow_always":
+      // "Allow for this session": the provider's suggestions, kept for the
+      // session's agent only. Their own destination (often localSettings)
+      // would write a settings file into the session's worktree and outlive
+      // the session.
       return {
         behavior: "allow",
         updatedInput: req.input,
         ...(req.suggestions !== undefined &&
           req.suggestions.length > 0 && {
-            updatedPermissions: req.suggestions,
+            updatedPermissions: req.suggestions.map((s) => ({
+              ...s,
+              destination: "session" as const,
+            })),
           }),
       };
     default:

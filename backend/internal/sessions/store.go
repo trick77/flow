@@ -37,6 +37,13 @@ type Mirror struct {
 	ModeCap string
 }
 
+// Patch is what the owner changes on a session row; "" keeps a field. A title is the owner's (title_source owner).
+type Patch struct {
+	Title string
+	Model string
+	Mode  string
+}
+
 // Store keeps session and worktree rows.
 type Store interface {
 	List(ctx context.Context, f ListFilter) ([]Session, error)
@@ -45,7 +52,8 @@ type Store interface {
 	ByClientID(ctx context.Context, clientID string) (Session, error)
 	// Create inserts the session and its worktrees; ErrClientIDTaken when a session holds its ClientID.
 	Create(ctx context.Context, s Session, worktrees []Worktree) error
-	Update(ctx context.Context, s Session) error
+	// Update writes only the patch's fields, so it cannot undo a mirror written meanwhile.
+	Update(ctx context.Context, id string, p Patch) error
 	// ApplyMirror records progress through the log; it never moves LastSeq backwards.
 	ApplyMirror(ctx context.Context, id string, m Mirror) error
 	MarkSeen(ctx context.Context, id string, seq int64) error

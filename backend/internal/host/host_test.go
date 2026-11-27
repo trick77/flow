@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -554,6 +555,75 @@ func TestRestart_sandboxStartKeepsTheQueue(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("the queue was never drained after the owner's start")
 	}
+}
+
+// A host started held with messages queued runs a new message after them, not ahead: it is queued and the queue
+// drains in order.
+func TestIdleWithAQueue_newMessageGoesBehind(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	f := newFake()
+	r := start(t, path, f)
+	_, _ = r.h.Command(send(t, "m1", "first"))
+	_, _ = r.h.Command(send(t, "m2", "queued before the stop"))
+	<-f.got
+	r.stop()
+
+	f = newFake()
+	r = startFor(t, path, f, event.ResumeReasonSandboxStart)
+	if _, err := r.h.Command(send(t, "m3", "newer")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case c := <-f.got:
+		if c.ID != "m2" {
+			t.Fatalf("the adapter got %s first, want the queued m2", c.ID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing started")
+	}
+	if !r.h.Queued("m3") {
+		t.Error("m3 is not queued behind m2")
+	}
+	f.out <- draft(event.KindTurnEnded, event.TurnEnded{Outcome: event.TurnOutcomeCompleted})
+	select {
+	case c := <-f.got:
+		if c.ID != "m3" {
+			t.Fatalf("after m2 the adapter got %s, want m3", c.ID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("m3 never ran")
+	}
+}
+
+// A question reply naming a question or option the request does not have is refused and leaves the request open;
+// a known option and free text are taken.
+func TestQuestionReply_refusesUnknownIds(t *testing.T) {
+	f := newFake()
+	r := start(t, filepath.Join(t.TempDir(), "events.jsonl"), f)
+	_, _ = r.h.Command(send(t, "m1", "ask me"))
+	<-f.got
+	f.out <- draft(event.KindQuestionAsked, event.QuestionAsked{RequestID: "q1", Questions: []event.Question{
+		{ID: "q0", Text: "Which?", Options: []event.QuestionOption{{ID: "o0", Label: "A"}, {ID: "o1", Label: "B"}}}}})
+	r.waitKind(event.KindQuestionAsked, 1)
+	for i, answers := range [][]event.Answer{
+		{{QuestionID: "q9", OptionIds: []string{"o0"}}},
+		{{QuestionID: "q0", OptionIds: []string{"o7"}}},
+	} {
+		_, err := r.h.Command(cmd(t, "bad"+strconv.Itoa(i), event.CmdQuestionReply,
+			event.QuestionReply{RequestID: "q1", Answers: answers}))
+		var ce *CommandError
+		if !errors.As(err, &ce) || ce.Code != hostproto.CodeInvalid {
+			t.Errorf("answers %+v: %v, want invalid", answers, err)
+		}
+	}
+	if n := count(r.events(), event.KindQuestionResolved); n != 0 {
+		t.Fatalf("%d question.resolved after refused replies", n)
+	}
+	if _, err := r.h.Command(cmd(t, "ok", event.CmdQuestionReply, event.QuestionReply{RequestID: "q1",
+		Answers: []event.Answer{{QuestionID: "q0", OptionIds: []string{"o1"}}}})); err != nil {
+		t.Fatal(err)
+	}
+	r.waitKind(event.KindQuestionResolved, 1)
 }
 
 // The queue's order survives a restart: a message sent with interrupt and a queued one sent now go to the head,

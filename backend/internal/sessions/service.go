@@ -177,8 +177,15 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	if in.ClaudeAuth != "" && !slices.Contains(event.ClaudeAuthValues, event.ClaudeAuth(in.ClaudeAuth)) {
 		return apitypes.Session{}, invalid("claudeAuth")
 	}
-	if strings.TrimSpace(in.Model) == "" {
+	if !validModel(in.Model) {
 		return apitypes.Session{}, invalid("model")
+	}
+	title := ""
+	if in.Title != "" {
+		var ok bool
+		if title, ok = ownerTitle(in.Title); !ok {
+			return apitypes.Session{}, invalid("title")
+		}
 	}
 	if in.Message != nil && (in.Message.ClientID == "" || len(in.Message.ClientID) > 64 ||
 		strings.TrimSpace(in.Message.Text) == "" || !event.TextFits(in.Message.Text)) {
@@ -218,11 +225,11 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	if len(chosen) == 0 {
 		return apitypes.Session{}, invalid("repoIds")
 	}
-	title := strings.TrimSpace(in.Title)
 	if title == "" && in.Message != nil {
+		// Derived from the message's first line, which may hold a tab or a CR: never refused for it.
 		title, _, _ = strings.Cut(strings.TrimSpace(in.Message.Text), "\n")
+		title = cut(strings.TrimSpace(title), 80)
 	}
-	title = cut(title, 80)
 	base := Slug(title)
 	name, suffix, err := s.uniqueName(ctx, in.ProjectID, base)
 	if err != nil {
@@ -306,6 +313,19 @@ func clean(text string) bool {
 	return !strings.ContainsFunc(text, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
+// ownerTitle is a title the owner gave, as stored (trimmed, at most 80 bytes); ok false for a blank one or one with a
+// control character. Create and Update share it.
+func ownerTitle(in string) (title string, ok bool) {
+	title = cut(strings.TrimSpace(in), 80)
+	return title, title != "" && clean(title)
+}
+
+// validModel: a model id as the agent gets it (the spec, every turn.started, setModel): at most 200 bytes, no
+// whitespace or control character. Create and Update share it.
+func validModel(m string) bool {
+	return m != "" && len(m) <= 200 && !strings.ContainsFunc(m, unicode.IsSpace) && clean(m)
+}
+
 // Update changes a session's title, model or permission mode; absent (empty) fields stay. A mode above the session's
 // cap is mode_above_cap. A model or mode change goes to the agent as settings.set (the host logs session.settings,
 // the sidecar calls setModel / setPermissionMode on a running query, or starts its next one with them): the log is
@@ -323,12 +343,15 @@ func (s *Service) Update(ctx context.Context, id string, in apitypes.SessionUpda
 	if se.ArchivedAt != nil {
 		return apitypes.Session{}, apitypes.Fail(apitypes.ErrorCodeSessionArchived, "")
 	}
-	title := cut(strings.TrimSpace(in.Title), 80)
-	if in.Title != "" && (title == "" || !clean(title)) {
-		return apitypes.Session{}, invalid("title")
+	title := ""
+	if in.Title != "" {
+		var ok bool
+		if title, ok = ownerTitle(in.Title); !ok {
+			return apitypes.Session{}, invalid("title")
+		}
 	}
 	model := in.Model
-	if model != "" && (len(model) > 200 || strings.ContainsFunc(model, unicode.IsSpace) || !clean(model)) {
+	if model != "" && !validModel(model) {
 		return apitypes.Session{}, invalid("model")
 	}
 	mode := event.PermissionMode(in.Mode)
@@ -351,21 +374,12 @@ func (s *Service) Update(ctx context.Context, id string, in apitypes.SessionUpda
 			return apitypes.Session{}, err
 		}
 	}
-	unlock := s.Lock(id)
-	se, err = s.Store.Get(ctx, id)
+	// Only the columns this request changes: the follower mirrors settings into the same row without the session's
+	// lock, and a whole-row write could put an older mode, model or provider session id back.
+	err = s.Store.Update(ctx, id, Patch{Title: title, Model: set.Model, Mode: string(set.Mode)})
 	if err == nil {
-		if title != "" {
-			se.Title, se.TitleSource = title, "owner"
-		}
-		if set.Model != "" {
-			se.Model = set.Model
-		}
-		if set.Mode != "" {
-			se.Mode = string(set.Mode)
-		}
-		err = s.Store.Update(ctx, se)
+		se, err = s.Store.Get(ctx, id)
 	}
-	unlock()
 	if err != nil {
 		return apitypes.Session{}, err
 	}
@@ -710,8 +724,9 @@ func commandError(err error) error {
 
 // CommandIfRunning sends a command that only matters to a running session (an interrupt, a reply): a stopped
 // sandbox is not started for it. ran false: the sandbox is stopped or has none, so nothing of the session runs and
-// the command had nothing to act on. In a warm sandbox it is Command: a host that is down starts, logs the cut-off
-// turn lost and so closes what the owner still sees open.
+// the command had nothing to act on. In a warm sandbox a host that is down starts held (CommandHeld): it logs the
+// cut-off turn lost, which closes what the owner still sees open, and leaves the queue as it is; it is stopped
+// again right after, as closeLostTurn does. A Stop or a stale reply must not start the queued messages.
 func (s *Service) CommandIfRunning(ctx context.Context, id, cmdID string, kind event.CommandKind, payload any) (flowdproto.CommandResult, bool, error) {
 	se, err := s.Store.Get(ctx, id)
 	if err != nil {
@@ -727,7 +742,7 @@ func (s *Service) CommandIfRunning(ctx context.Context, id, cmdID string, kind e
 	if err != nil {
 		return flowdproto.CommandResult{}, false, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
 	}
-	res, err := s.Command(ctx, id, cmdID, kind, payload)
+	res, _, err := s.CommandHeld(ctx, id, cmdID, kind, payload, true, true)
 	return res, true, err
 }
 
@@ -741,7 +756,8 @@ func (s *Service) Summary(ctx context.Context, se Session) (apitypes.SessionSumm
 		Provider: apitypes.Provider(se.Provider), ClaudeAuth: apitypes.ClaudeAuth(se.ClaudeAuth), Model: se.Model,
 		Mode: apitypes.PermissionMode(se.Mode), ModeCap: apitypes.PermissionMode(se.ModeCap),
 		Status: apitypes.SessionStatus(se.Status), Unseen: se.Unseen, Repos: []string{}, Branch: se.Branch,
-		TurnStartedAt: se.TurnStartedAt, LastActivityAt: se.LastActivityAt, CreatedAt: se.CreatedAt}
+		TurnStartedAt: se.TurnStartedAt, LastSeq: int(se.LastSeq), LastActivityAt: se.LastActivityAt,
+		CreatedAt: se.CreatedAt}
 	if se.ParentID != nil {
 		sum.ParentID = *se.ParentID
 	}

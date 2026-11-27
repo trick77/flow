@@ -602,9 +602,7 @@ func TestSQL(t *testing.T) {
 	if list, _ := s.List(ctx, ListFilter{ParentID: "p"}); len(list) != 1 || *list[0].ParentID != "p" {
 		t.Errorf("children %+v", list)
 	}
-	se, _ := s.Get(ctx, "c")
-	se.Title = "new"
-	if err := s.Update(ctx, se); err != nil {
+	if err := s.Update(ctx, "c", Patch{Title: "new"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ApplyMirror(ctx, "c", Mirror{LastSeq: 9, Status: "done", TurnStarted: true, Unseen: true}); err != nil {
@@ -616,14 +614,14 @@ func TestSQL(t *testing.T) {
 	if err := s.MarkSeen(ctx, "c", 9); err != nil {
 		t.Fatal(err)
 	}
-	se, _ = s.Get(ctx, "c")
+	se, _ := s.Get(ctx, "c")
 	if se.Title != "new" || se.LastSeq != 9 || se.Unseen || se.SeenSeq != 9 || se.TurnStartedAt != nil {
 		t.Errorf("row %+v", se)
 	}
 	if err := s.AddWorktree(ctx, Worktree{ID: "w", SessionID: "c", RepoID: "r1", Branch: "b", Path: "/p", BaseRef: "origin/master"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, err := range []error{s.Update(ctx, Session{ID: "x"}), s.ApplyMirror(ctx, "x", Mirror{}), s.MarkSeen(ctx, "x", 1),
+	for _, err := range []error{s.Update(ctx, "x", Patch{}), s.ApplyMirror(ctx, "x", Mirror{}), s.MarkSeen(ctx, "x", 1),
 		s.Archive(ctx, "x", false), s.CleanedUp(ctx, "x"), s.UpdateWorktree(ctx, Worktree{ID: "x"})} {
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("missing row: %v", err)

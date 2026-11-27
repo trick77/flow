@@ -240,6 +240,18 @@ describe("assistant text and thinking", () => {
     ]);
   });
 
+  it("an unknown stream event of a subagent keeps its parent tool", () => {
+    const tr = translator();
+    const m = {
+      ...stream({ type: "content_block_hologram", index: 0 }),
+      parent_tool_use_id: "toolu_A",
+    };
+    const out = valid(tr.translate(m).drafts);
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe("provider.passthrough");
+    expect(out[0].parentTool).toBe("toolu_A");
+  });
+
   it("[docs only] an assistant error is a notice and the turn's error code", () => {
     const tr = translator();
     const t = turn();
@@ -878,7 +890,7 @@ describe("permission callback", () => {
     ...extra,
   });
 
-  it("[docs only] allow once, allow always with the suggestions, deny with a message", () => {
+  it("[docs only] allow once, allow for the session with the suggestions scoped to it, deny with a message", () => {
     const suggestions = [
       {
         type: "addRules" as const,
@@ -896,7 +908,7 @@ describe("permission callback", () => {
     ).toEqual({
       behavior: "allow",
       updatedInput: r.input,
-      updatedPermissions: suggestions,
+      updatedPermissions: [{ ...suggestions[0], destination: "session" }],
     });
     expect(
       permissionResult(r, {

@@ -88,9 +88,7 @@ func TestUpdateSession(t *testing.T) {
 		t.Errorf("unchanged model sent again: %d, %v", w.Code, settingsOf(t, r, id))
 	}
 
-	se, _ = r.svc.Store.Get(t.Context(), id)
-	se.ModeCap = "accept_edits"
-	_ = r.svc.Store.Update(t.Context(), se)
+	_ = r.svc.Store.ApplyMirror(t.Context(), id, Mirror{ModeCap: "accept_edits"})
 	for body, code := range map[string]string{
 		`{"mode":"full_access"}`: "mode_above_cap", `{"mode":"root"}`: "invalid_request",
 		`{"model":"a b"}`: "invalid_request", `{"title":"   "}`: "invalid_request", `{"title":"a\u0007b"}`: "invalid_request",
@@ -204,6 +202,96 @@ func TestCommandHeld_keepsTheQueueStill(t *testing.T) {
 	}
 }
 
+// mirrorOnGet is a Store whose second Get is followed at once by a mirror of the given settings: the follower writing
+// while a rename is under way.
+type mirrorOnGet struct {
+	Store
+	id   string
+	m    Mirror
+	gets int
+}
+
+func (s *mirrorOnGet) Get(ctx context.Context, id string) (Session, error) {
+	se, err := s.Store.Get(ctx, id)
+	if id == s.id {
+		if s.gets++; s.gets == 2 {
+			_ = s.ApplyMirror(ctx, id, s.m)
+		}
+	}
+	return se, err
+}
+
+// A rename writes the title only: a mode, model or provider session id mirrored meanwhile stays.
+func TestUpdate_renameKeepsAConcurrentMirror(t *testing.T) {
+	r := newRig(t)
+	id := newSession(t, r)
+	r.svc.Store = &mirrorOnGet{Store: r.svc.Store, id: id,
+		m: Mirror{Mode: "auto", Model: "x-model", ProviderSessionID: "prov-2"}}
+	if w := patch(t, r, id, `{"title":"Renamed"}`); w.Code != http.StatusOK {
+		t.Fatalf("rename: %d %s", w.Code, w.Body)
+	}
+	se, _ := r.svc.Store.Get(t.Context(), id)
+	if se.Title != "Renamed" || se.TitleSource != "owner" || se.Mode != "auto" || se.Model != "x-model" ||
+		se.ProviderSessionID != "prov-2" {
+		t.Errorf("row after the rename: %+v", se)
+	}
+}
+
+// Create refuses the model and title values Update refuses.
+func TestCreate_sharesUpdatesValidation(t *testing.T) {
+	r := newRig(t)
+	for _, body := range []string{
+		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"x\ny","mode":"ask"}`,
+		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"a b","mode":"ask"}`,
+		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"` + strings.Repeat("m", 201) + `","mode":"ask"}`,
+		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","title":"a\u0007b"}`,
+		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","title":"   "}`,
+	} {
+		if w := create(t, r, body); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_request") {
+			t.Errorf("%s: %d %s", body, w.Code, w.Body)
+		}
+	}
+	// A title derived from the first message may hold a tab or a CR: never refused for it.
+	w := create(t, r, `{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask",`+
+		`"message":{"clientId":"c1","text":"fix\tit\r\nmore"}}`)
+	if w.Code != http.StatusCreated {
+		t.Errorf("derived title: %d %s", w.Code, w.Body)
+	}
+}
+
+// A Stop or a stale reply on a session whose host is down starts it held: the cut-off turn is closed, the queue is
+// left as it is (resume reason sandbox_start, not message) and the host started for it is stopped again.
+func TestCommandIfRunning_startsTheHostHeld(t *testing.T) {
+	r := newRig(t)
+	id := newSession(t, r)
+	if err := r.sb.api.StopSession(t.Context(), id, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, ran, err := r.svc.CommandIfRunning(t.Context(), id, "interrupt-1", event.CmdTurnInterrupt,
+		event.TurnInterrupt{}); err != nil || !ran {
+		t.Fatalf("interrupt: %v, ran %v", err, ran)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	var reasons []event.ResumeReason
+	for e, err := range r.sb.api.Events(ctx, id, 0) {
+		if err != nil {
+			break
+		}
+		if e.Kind == event.KindSessionResumed {
+			var p event.SessionResumed
+			_ = json.Unmarshal(e.Data, &p)
+			reasons = append(reasons, p.Reason)
+		}
+	}
+	if len(reasons) != 1 || reasons[0] != event.ResumeReasonSandboxStart {
+		t.Errorf("host started with resume reasons %v, want one sandbox_start (queue left as it is)", reasons)
+	}
+	if st, _ := r.sb.api.Session(t.Context(), id); st.Unit == "active" {
+		t.Error("the host started for the interrupt keeps running")
+	}
+}
+
 // The database holds a message clientId once (the backstop behind the in-process lock); sessions without one are
 // not affected by the index.
 func TestSQL_clientIDUnique(t *testing.T) {
@@ -239,6 +327,11 @@ func TestMarkSessionSeen(t *testing.T) {
 	id := newSession(t, r)
 	if err := r.svc.Store.ApplyMirror(t.Context(), id, Mirror{LastSeq: 7, Unseen: true}); err != nil {
 		t.Fatal(err)
+	}
+	// The summary names the mirrored last seq: what the UI marks with while the log cannot be read.
+	row, _ := r.svc.Store.Get(t.Context(), id)
+	if sum, err := r.svc.Summary(t.Context(), row); err != nil || sum.LastSeq != 7 {
+		t.Errorf("summary lastSeq %d, %v", sum.LastSeq, err)
 	}
 	seen := func(id, body string) int {
 		w := httptest.NewRecorder()
