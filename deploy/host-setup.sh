@@ -43,11 +43,6 @@
 #   traefik.docker.network=<the proxy's network>). Flow refuses every browser request arriving over $DOCKER_NETWORK,
 #   which sandboxes reach at L2; with no other network it answers nothing and logs that at start. A Flow container
 #   made before flow-sb-incus existed has another address: `docker compose up -d` makes it again.
-#   Optional (INCUS_PROJECT_MEMORY=1): limits.memory on the project = BACKEND_SANDBOX_MEMORY_TOTAL_MIB. Incus counts
-#   every instance of the project in it, stopped ones too (measured), so it caps how many sandboxes exist, not how
-#   many run. Flow admits a sandbox only while the running sandboxes' measured memory plus
-#   BACKEND_SANDBOX_MEMORY_HEADROOM_MIB fits under it. Refused while the total is 0 (Flow's "no check"). Off by
-#   default.
 #
 # Required, else it refuses before changing anything (preflight in host-lib.sh): firewalld on nftables with
 # Docker's zone `docker`, Docker on iptables-nft as docker.service, FORWARD's policy DROP with DOCKER-USER before
@@ -67,11 +62,11 @@
 # of what it creates, each entry before the thing is made, so the teardown removes exactly that, also after an
 # interrupted run. A re-run completes what is missing, the DOCKER-USER rule included.
 #
-# Settings (environment): BACKEND_SANDBOX_BRIDGE, _SUBNET, _RANGE, _GATEWAY, _MEMORY_TOTAL_MIB, BACKEND_INCUS_POOL
+# Settings (environment): BACKEND_SANDBOX_BRIDGE, _SUBNET, _RANGE, _GATEWAY, BACKEND_INCUS_POOL
 # and BACKEND_INCUS_PROJECT as Flow reads them (PROJECT overrides the latter); DOCKER_NETWORK, DOCKER_RANGE,
 # BAN_CHAIN (empty: none), BAN_REQUIRE, BAN_WAIT, INCUS_LISTEN, CONTAINER_ADDRESS, INCUS_DIR, CERT_DIR, CERT_OWNER,
-# POOL_DRIVER (btrfs, or dir where loop devices are refused), POOL_SIZE, STATE_DIR, INCUS_PROJECT_MEMORY,
-# OTHER_CHURN. Defaults in host-lib.sh.
+# POOL_DRIVER (btrfs, or dir where loop devices are refused), POOL_SIZE, STATE_DIR, OTHER_CHURN. Defaults in
+# host-lib.sh.
 set -eu
 
 SCRIPT=host-setup
@@ -87,12 +82,6 @@ done
 [ "$(id -u)" -eq 0 ] || die "run as root"
 
 check_settings
-case "${INCUS_PROJECT_MEMORY:-0}" in
-0) ;;
-1) [ "$MEMORY_TOTAL_MIB" -gt 0 ] 2>/dev/null ||
-	die "INCUS_PROJECT_MEMORY=1 needs BACKEND_SANDBOX_MEMORY_TOTAL_MIB above 0 (it is '$MEMORY_TOTAL_MIB'; 0 would set a 0 MiB project limit)" ;;
-*) die "INCUS_PROJECT_MEMORY must be 0 or 1" ;;
-esac
 manifest_settings
 ban_from_manifest
 preflight
@@ -372,9 +361,6 @@ WantedBy=docker.service"
 	fi
 	run incus project set "$PROJECT" restricted.containers.nesting=allow restricted.snapshots=allow \
 		restricted.devices.nic=allow </dev/null
-	if [ "${INCUS_PROJECT_MEMORY:-0}" = 1 ]; then
-		run incus project set "$PROJECT" limits.memory="${MEMORY_TOTAL_MIB}MiB" </dev/null
-	fi
 	# A root device on another pool was refused above. Recorded also in a project this setup did not make: the
 	# teardown removes it, or the pool it made could not be deleted.
 	if ! incus profile device get default root pool --project "$PROJECT" </dev/null >/dev/null 2>&1; then
