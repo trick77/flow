@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -242,11 +245,46 @@ func TestCreate_concurrentSameTitle(t *testing.T) {
 	}
 }
 
+// hiding does not see one name, as a concurrent creation that took it after the names were listed.
+type hiding struct {
+	SQL
+	name string
+}
+
+func (h hiding) List(ctx context.Context, f ListFilter) ([]Session, error) {
+	list, err := h.SQL.List(ctx, f)
+	return slices.DeleteFunc(list, func(se Session) bool { return se.Name == h.name }), err
+}
+
+// The retry after losing a name continues after the chosen suffix instead of walking the taken names from -2 again.
+func TestCreate_raceRetryContinuesAfterTheChosenName(t *testing.T) {
+	r := newRig(t)
+	sq := r.svc.Store.(SQL)
+	for i := 1; i <= 13; i++ {
+		name := "fix"
+		if i > 1 {
+			name = fmt.Sprintf("fix-%d", i)
+		}
+		if err := sq.Create(t.Context(), Session{ID: "s" + strconv.Itoa(i), ProjectID: "p1", Name: name,
+			Provider: "claude", Model: "m", Mode: "ask", Branch: "flow/" + name}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.svc.Store = hiding{SQL: sq, name: "fix-13"}
+	w := create(t, r, `{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","title":"fix"}`)
+	var s apitypes.Session
+	_ = json.Unmarshal(w.Body.Bytes(), &s)
+	if w.Code != 201 || s.Summary.Branch != "flow/fix-14" {
+		t.Errorf("create after losing fix-13: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestCreate_refusals(t *testing.T) {
 	r := newRig(t)
 	for body, code := range map[string]int{
 		`{"projectId":"p1","repoIds":["r1"],"provider":"x","model":"m","mode":"ask"}`:                                400,
 		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"x"}`:                             400,
+		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","claudeAuth":"apikey"}`:     400,
 		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":" ","mode":"ask"}`:                           400,
 		`{"projectId":"px","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask"}`:                           400,
 		`{"projectId":"p1","repoIds":[],"provider":"claude","model":"m","mode":"ask"}`:                               400,
