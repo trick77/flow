@@ -749,8 +749,10 @@ func TestServe(t *testing.T) {
 	defer conn.Close()
 	enc, dec := json.NewEncoder(conn), json.NewDecoder(bufio.NewReader(conn))
 	c := send(t, "m1", "go")
+	notice := event.Notice{Code: "github_disconnected", Level: event.NoticeLevelError}
 	for _, req := range []hostproto.Request{{ID: "1", Op: hostproto.OpHello}, {ID: "2", Op: hostproto.OpCommand, Command: &c},
-		{ID: "3", Op: hostproto.OpCommand}, {ID: "4", Op: "nope"}} {
+		{ID: "3", Op: hostproto.OpCommand}, {ID: "4", Op: "nope"}, {ID: "5", Op: hostproto.OpNotice, Notice: &notice},
+		{ID: "6", Op: hostproto.OpNotice}} {
 		_ = enc.Encode(req)
 		var resp hostproto.Response
 		if err := dec.Decode(&resp); err != nil {
@@ -761,15 +763,31 @@ func TestServe(t *testing.T) {
 			if resp.Hello == nil || resp.Hello.Session != sid {
 				t.Errorf("hello %+v", resp)
 			}
-		case "2":
+		case "2", "5":
 			if resp.Error != "" {
-				t.Errorf("command: %+v", resp)
+				t.Errorf("request %s: %+v", req.ID, resp)
 			}
 		default:
 			if resp.Error != hostproto.CodeInvalid {
 				t.Errorf("request %s: %+v", req.ID, resp)
 			}
 		}
+	}
+	// flowd's notice is in the log (git asked for a GitHub token the sandbox does not have).
+	evs, err := eventlog.NewReader(filepath.Join(dir, "events.jsonl")).Read(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range evs {
+		if p, err := e.Payload(); err == nil {
+			if n, ok := p.(*event.Notice); ok && n.Code == "github_disconnected" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("flowd's notice is not in the log")
 	}
 	sub, _ := net.Dial("unix", filepath.Join(dir, "h.sock"))
 	_ = json.NewEncoder(sub).Encode(hostproto.Request{ID: "s", Op: hostproto.OpSubscribe})

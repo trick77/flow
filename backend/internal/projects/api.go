@@ -54,8 +54,8 @@ func (a *API) publish(e apitypes.AppEvent) {
 
 var repoRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$`)
 
-// NormalizeRepo turns owner/name or a public https clone URL of github.com into owner/name. The GitHub App is not
-// wired yet: repositories are cloned anonymously, so only public ones work.
+// NormalizeRepo turns owner/name or an https clone URL of github.com into owner/name. Private repositories need the
+// GitHub connection: flowd clones through git's credential helper, which serves the connection's token.
 func NormalizeRepo(s string) (string, bool) {
 	s = strings.TrimSpace(s)
 	for _, p := range []string{"https://github.com/", "http://github.com/", "github.com/"} {
@@ -68,7 +68,20 @@ func NormalizeRepo(s string) (string, bool) {
 	return s, true
 }
 
-// RemoteDefaultBranch asks github.com anonymously (git's smart HTTP ref advertisement) which branch HEAD names.
+// StatusError is RemoteDefaultBranch's answer for a refused lookup: GitHub answers 401 for a private repository
+// (or none) asked anonymously.
+type StatusError struct {
+	Repo   string
+	Status int
+}
+
+func (e *StatusError) Error() string { return fmt.Sprintf("%s: status %d", e.Repo, e.Status) }
+
+// HTTPStatus is the status GitHub answered.
+func (e *StatusError) HTTPStatus() int { return e.Status }
+
+// RemoteDefaultBranch asks github.com anonymously (git's smart HTTP ref advertisement) which branch HEAD names: the
+// lookup for public repositories, and for every one while GitHub is not connected (github.Service.DefaultBranch).
 func RemoteDefaultBranch(base string, client *http.Client) func(ctx context.Context, fullName string) (string, error) {
 	return func(ctx context.Context, fullName string) (string, error) {
 		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -83,7 +96,7 @@ func RemoteDefaultBranch(base string, client *http.Client) func(ctx context.Cont
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("%s: %s", fullName, resp.Status)
+			return "", &StatusError{Repo: fullName, Status: resp.StatusCode}
 		}
 		br := bufio.NewReader(io.LimitReader(resp.Body, 1<<20))
 		for {
@@ -187,8 +200,12 @@ func (a *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		}
 		dirs[dir] = true
 		branch, err := a.DefaultBranch(r.Context(), full)
+		var ae *apitypes.Error
+		if err != nil && !errors.As(err, &ae) {
+			err = apitypes.Fail(apitypes.ErrorCodeUpstream, err.Error())
+		}
 		if err != nil {
-			httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeUpstream, err.Error()))
+			httpapi.WriteError(w, err)
 			return
 		}
 		repos = append(repos, Repo{ID: store.NewID(), ProjectID: p.ID, FullName: full, DefaultBranch: branch})

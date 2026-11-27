@@ -25,6 +25,7 @@ import (
 	"github.com/trick77/flow/internal/credentials"
 	"github.com/trick77/flow/internal/flowdclient"
 	"github.com/trick77/flow/internal/flowdproto"
+	"github.com/trick77/flow/internal/github"
 	"github.com/trick77/flow/internal/httpapi"
 	"github.com/trick77/flow/internal/metering"
 	"github.com/trick77/flow/internal/profile"
@@ -150,6 +151,15 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 	manager.Env = creds.Env
 	// A changed credential reaches running sandboxes at once, new session hosts get it at their start.
 	creds.Changed = func() { go manager.PushEnv(context.WithoutCancel(ctx)) }
+	gh := githubService(cfg, creds, hub)
+	creds.GitHub = gh
+	meter := &metering.Recorder{Store: metering.SQL{DB: db}}
+	gh.RenewalFailed = func(class string) {
+		if err := meter.RecordCounter(context.WithoutCancel(ctx), metering.Counter{
+			Counter: metering.CounterRenewalFailure, Class: class, At: time.Now()}); err != nil {
+			slog.Warn("metering a GitHub renewal failure", "err", err)
+		}
+	}
 	svc := sessionService(db, projectStore, manager, hub)
 	svc.Limits = flowdproto.Limits{MemoryMaxBytes: cfg.Session.MemoryBytes, CPUQuotaPercent: cfg.Session.CPUPercent,
 		TasksMax: cfg.Session.Tasks}
@@ -179,11 +189,12 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 	if err := svc.Start(ctx); err != nil {
 		return err
 	}
+	// After Reconcile: a renewal due at start pushes to sandbox rows that are settled.
+	go gh.Run(ctx)
 	publish := func(e apitypes.AppEvent) { hub.Publish(e) }
 	areas.Profile = &profile.API{Store: profile.SQL{DB: db}, Changed: creds.Changed, Publish: publish}
-	areas.Connections = &credentials.API{Service: creds}
-	areas.Projects = &projects.API{Store: projectStore, Sandboxes: manager,
-		DefaultBranch:  projects.RemoteDefaultBranch("https://github.com/", &http.Client{Timeout: 30 * time.Second}),
+	areas.Connections = &credentials.API{Service: creds, GitHub: gh}
+	areas.Projects = &projects.API{Store: projectStore, Sandboxes: manager, DefaultBranch: gh.DefaultBranch,
 		ActiveSessions: active, Publish: publish}
 	areas.Sandboxes = &sandboxes.API{Manager: manager, ActiveSessions: active}
 	areas.Sessions = &sessions.API{Service: svc, Keys: creds, ClaudeSignedIn: manager.ClaudeSignedIn}
@@ -191,6 +202,21 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 	areas.Review = &review.API{Sessions: svc}
 	areas.Terminals = &terminals.API{Sessions: svc.Store, Projects: projectStore, Sandboxes: manager, Lock: svc.Lock}
 	return nil
+}
+
+// githubService is the GitHub App area: the device flow and the user token, renewed by its Run loop and pushed to
+// warm sandboxes on every change (creds.Changed); unavailable without BACKEND_GITHUB_CLIENT_ID.
+func githubService(cfg config.Config, creds *credentials.Service, hub *sse.Hub[apitypes.AppEvent]) *github.Service {
+	gh := &github.Service{Store: creds.Store, Sealer: creds.Sealer, Log: slog.Default(),
+		Changed:   func() { creds.Changed() },
+		Publish:   func() { hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindConnectionsUpdated}) },
+		Anonymous: projects.RemoteDefaultBranch(github.WebURL+"/", &http.Client{Timeout: 30 * time.Second})}
+	if cfg.GitHubClientID != "" {
+		gh.Client = github.NewClient(cfg.GitHubClientID)
+	} else {
+		slog.Warn("BACKEND_GITHUB_CLIENT_ID unset: GitHub cannot be connected, only public repositories work")
+	}
+	return gh
 }
 
 // handler is the server's whole handler: the browser API and the UI, never served to a request that arrives over

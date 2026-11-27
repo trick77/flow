@@ -80,12 +80,15 @@ const PlaywrightDir = "/opt/ms-playwright"
 // /run (tmpfs).
 const (
 	Run         = "/run/flow"
-	Credentials = Run + "/credentials" // 0700 flow
-	// GHConfigDir is GH_CONFIG_DIR of every unit: flowd rewrites its hosts.yml atomically (temp file + rename) on
-	// every token renewal, and gh reads it on every call, so a process running for days sees the current token.
-	// Never GH_TOKEN: an environment variable is frozen at process start.
+	Credentials = Run + "/credentials" // root 0711: root-written files the agent reads by name
+	// GHConfigDir is GH_CONFIG_DIR of every unit (root 0755): flowd rewrites its hosts.yml (root 0644) atomically
+	// (temp file + rename) on every push, and every gh run is a new process that reads it, so a process running
+	// for days sees the current token. Never GH_TOKEN: an environment variable is frozen at process start.
 	GHConfigDir = Credentials + "/gh"
 	GHHosts     = GHConfigDir + "/hosts.yml"
+	// GHConfig is gh's config.yml beside it: the config version gh expects (no migration attempt in a directory
+	// the agent cannot write) and https for git.
+	GHConfig = GHConfigDir + "/config.yml"
 	// ProviderEnv is the EnvironmentFile of the opencode serve unit: OpenCode provider keys, which change only when
 	// the owner edits them (flowd restarts opencode serve at idle then). Never ANTHROPIC_API_KEY: that one is set per
 	// session, only for sessions started in API-key mode.
@@ -99,9 +102,14 @@ const (
 	FlowdSocket = Run + "/flowd.sock"
 )
 
-// GitCredentialHelper is the helper line flowd writes into /etc/gitconfig for github.com: flowd's multi-call
-// binary, answering from its current token through FlowdSocket.
-const GitCredentialHelper = BinDir + "/git-credential-flow"
+// GitCredentialHelper is the helper line flowd writes into SystemGitConfig for https://github.com: flowd's
+// multi-call binary (an absolute path: git runs it as written, appending get, store or erase), asking flowd for
+// the current token through FlowdSocket on every use.
+const GitCredentialHelper = BinDir + "/flowd git-credential"
+
+// SystemGitConfig is git's system-wide config, written by flowd (root) at its start: the credential helper and the
+// push defaults, for every git run in the sandbox (sessions, terminals, setup scripts, flowd's own clones).
+const SystemGitConfig = "/etc/gitconfig"
 
 // OpenCodePort is where opencode serve listens, on localhost, one per sandbox.
 const OpenCodePort = 4096
