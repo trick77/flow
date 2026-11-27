@@ -949,3 +949,35 @@ func TestSystemd(t *testing.T) {
 		t.Error("ExecRunner hid an exit code")
 	}
 }
+
+// The spec's resume reason reaches the host's session.resumed; the answer says whether this call started the host.
+// A reason outside the contract is refused.
+func TestEnsureSession_resumeReasonAndStarted(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	sp := sessionSpec("s1", "s1")
+	st, err := r.api.EnsureSession(ctx, sp)
+	if err != nil || !st.Started {
+		t.Fatalf("first start: started %v, %v", st.Started, err)
+	}
+	if st, err := r.api.EnsureSession(ctx, sp); err != nil || st.Started {
+		t.Errorf("running host: started %v, %v", st.Started, err)
+	}
+	if err := r.api.StopSession(ctx, "s1", false); err != nil {
+		t.Fatal(err)
+	}
+	sp.ResumeReason = event.ResumeReasonSandboxStart
+	if st, err := r.api.EnsureSession(ctx, sp); err != nil || !st.Started {
+		t.Fatalf("restart: started %v, %v", st.Started, err)
+	}
+	evs := collect(t, r.api, 0, kindIs(event.KindSessionResumed))
+	var res event.SessionResumed
+	_ = json.Unmarshal(evs[len(evs)-1].Data, &res)
+	if res.Reason != event.ResumeReasonSandboxStart {
+		t.Errorf("session.resumed reason %q", res.Reason)
+	}
+	sp.ID, sp.Name, sp.ResumeReason = "s2", "s2", "whenever"
+	if _, err := r.api.EnsureSession(ctx, sp); !errors.Is(err, flowdproto.ErrInvalid) {
+		t.Errorf("unknown reason: %v", err)
+	}
+}

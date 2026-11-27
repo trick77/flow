@@ -39,7 +39,14 @@ type rig struct {
 
 func start(t *testing.T, path string, a Adapter) *rig {
 	t.Helper()
-	h, err := New(Config{Spec: spec(), LogPath: path, Adapter: a, Version: "test", Log: slog.New(slog.DiscardHandler)})
+	return startFor(t, path, a, "")
+}
+
+// startFor is start with the session.resumed reason the host is started for.
+func startFor(t *testing.T, path string, a Adapter, reason event.ResumeReason) *rig {
+	t.Helper()
+	h, err := New(Config{Spec: spec(), LogPath: path, Adapter: a, Version: "test", ResumeReason: reason,
+		Log: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,6 +471,55 @@ func TestRestart_drainsTheRecoveredQueue(t *testing.T) {
 	evs := r.waitKind(event.KindMessageQueued, 2)
 	if last := evs[len(evs)-1]; last.Kind != event.KindMessageQueued || last.Cmd != "m3" {
 		t.Errorf("m3 not queued behind m2: %s %s", last.Kind, last.Cmd)
+	}
+}
+
+// A host started after a sandbox start only to log the cut-off turn lost starts no turn: the queued message waits
+// for the owner, and the next start for a message drains it.
+func TestRestart_sandboxStartKeepsTheQueue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	f := newFake()
+	r := start(t, path, f)
+	_, _ = r.h.Command(send(t, "m1", "first"))
+	_, _ = r.h.Command(send(t, "m2", "queued before the stop"))
+	<-f.got
+	r.stop() // the sandbox stops mid-turn with m2 queued
+
+	f = newFake()
+	r = startFor(t, path, f, event.ResumeReasonSandboxStart)
+	select {
+	case c := <-f.got:
+		t.Fatalf("the adapter got %s, nobody asked for a turn", c.ID)
+	case <-time.After(300 * time.Millisecond):
+	}
+	evs := r.events()
+	var lost, resumed bool
+	for _, e := range evs {
+		p, _ := e.Payload()
+		switch p := p.(type) {
+		case *event.TurnEnded:
+			lost = lost || p.Outcome == event.TurnOutcomeLost
+		case *event.SessionResumed:
+			resumed = resumed || p.Reason == event.ResumeReasonSandboxStart
+		}
+	}
+	if !lost || !resumed || kinds(evs)[len(evs)-1] != event.KindSessionResumed {
+		t.Errorf("lost %v, resumed for sandbox_start %v: %v", lost, resumed, kinds(evs))
+	}
+	if !r.h.Queued("m2") {
+		t.Error("m2 left the queue")
+	}
+	r.stop()
+
+	f = newFake()
+	start(t, path, f)
+	select {
+	case c := <-f.got:
+		if c.ID != "m2" {
+			t.Fatalf("the next start sent %s, want the queued m2", c.ID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the queue was never drained after the owner's start")
 	}
 }
 

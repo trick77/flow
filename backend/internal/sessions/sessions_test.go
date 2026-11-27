@@ -272,18 +272,29 @@ func TestFollow_stoppedSandboxEndsTheTurn(t *testing.T) {
 	}
 }
 
-// ensureCounter records the sessions whose host EnsureSession was asked to start.
+// ensureCounter records the sessions whose host EnsureSession was asked to start, with the reason, and those
+// StopSession stopped.
 type ensureCounter struct {
 	flowdproto.API
-	mu  sync.Mutex
-	ids []string
+	mu      sync.Mutex
+	ids     []string
+	reasons []event.ResumeReason
+	stopped []string
 }
 
 func (e *ensureCounter) EnsureSession(ctx context.Context, s flowdproto.SessionSpec) (flowdproto.SessionState, error) {
 	e.mu.Lock()
 	e.ids = append(e.ids, s.ID)
+	e.reasons = append(e.reasons, s.ResumeReason)
 	e.mu.Unlock()
 	return e.API.EnsureSession(ctx, s)
+}
+
+func (e *ensureCounter) StopSession(ctx context.Context, id string, remove bool) error {
+	e.mu.Lock()
+	e.stopped = append(e.stopped, id)
+	e.mu.Unlock()
+	return e.API.StopSession(ctx, id, remove)
 }
 
 // After a bring-up only the hosts of sessions whose log ends in a turn a sandbox stop cut off are started: not an
@@ -317,10 +328,34 @@ func TestCloseLostTurns(t *testing.T) {
 	if sum, err := r.svc.Summary(ctx, se); err != nil || sum.Status != apitypes.SessionStatusFailed || sum.TurnStartedAt != nil {
 		t.Errorf("cut-off summary %+v, %v", sum, err)
 	}
+	// The sandbox stop ended every host.
+	for _, id := range ids {
+		_ = r.sb.api.StopSession(ctx, id, false)
+	}
 	api := &ensureCounter{API: r.sb.api}
 	r.svc.CloseLostTurns(ctx, "p1", api)
 	if !slices.Equal(api.ids, []string{ids["cut"]}) {
 		t.Errorf("hosts started for %v, want only %s", api.ids, ids["cut"])
+	}
+	// Started for the sandbox start (no queued message runs), then stopped: no idle host stays.
+	if !slices.Equal(api.reasons, []event.ResumeReason{event.ResumeReasonSandboxStart}) ||
+		!slices.Equal(api.stopped, []string{ids["cut"]}) {
+		t.Errorf("reasons %v, stopped %v", api.reasons, api.stopped)
+	}
+	if st, _ := r.sb.api.Session(ctx, ids["cut"]); st.Unit == flowdproto.UnitActive {
+		t.Error("the host that closed the lost turn still runs")
+	}
+	// A reconnect: the host runs (a message started it), so it is neither stopped nor counted as started.
+	if _, err := r.sb.api.EnsureSession(ctx, flowdproto.SessionSpec{ID: ids["cut"]}); err != nil {
+		t.Fatal(err)
+	}
+	api = &ensureCounter{API: r.sb.api}
+	r.svc.CloseLostTurns(ctx, "p1", api)
+	if len(api.stopped) != 0 {
+		t.Errorf("a running host was stopped: %v", api.stopped)
+	}
+	if st, _ := r.sb.api.Session(ctx, ids["cut"]); st.Unit != flowdproto.UnitActive {
+		t.Error("the running host is gone")
 	}
 }
 

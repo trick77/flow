@@ -210,11 +210,12 @@ func repoName(full string) string {
 }
 
 // EnsureSession implements flowdproto.API: a new host logs session.started and its worktrees; a known one that is
-// stopped logs session.resumed.
+// stopped logs session.resumed with the spec's reason. Started says whether it started the host.
 func (f *Fake) EnsureSession(_ context.Context, s flowdproto.SessionSpec) (flowdproto.SessionState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	h, ok := f.sessions[s.ID]
+	started := !ok || h.state.Unit != flowdproto.UnitActive
 	if !ok {
 		dir := "/home/flow/work/.sessions/" + s.Name
 		h = &host{spec: s, cmds: map[string]bool{}, state: flowdproto.SessionState{ID: s.ID, Dir: dir,
@@ -226,12 +227,17 @@ func (f *Fake) EnsureSession(_ context.Context, s flowdproto.SessionSpec) (flowd
 			f.addWorktree(h, w)
 		}
 	} else if h.state.Unit != flowdproto.UnitActive {
-		f.append(h, event.KindSessionResumed, "", event.SessionResumed{Reason: event.ResumeReasonMessage,
-			ProviderSessionID: s.ID})
+		reason := s.ResumeReason
+		if reason == "" {
+			reason = event.ResumeReasonMessage
+		}
+		f.append(h, event.KindSessionResumed, "", event.SessionResumed{Reason: reason, ProviderSessionID: s.ID})
 	}
 	h.state.Unit, h.state.HostVersion, h.state.HostProtocol = flowdproto.UnitActive, "fake", flowdproto.Protocol
 	f.notify()
-	return h.state, nil
+	st := h.state
+	st.Started = started
+	return st, nil
 }
 
 func (f *Fake) addWorktree(h *host, w flowdproto.WorktreeSpec) flowdproto.WorktreeState {

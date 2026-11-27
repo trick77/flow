@@ -229,6 +229,9 @@ type SessionSpec struct {
 	// Record has the Claude sidecar append every raw SDK message beside the session's log (layout.SDKRecording),
 	// for contract fixtures from real runs. Off by default; read at each host start.
 	Record bool `json:"record,omitempty"`
+	// ResumeReason goes into the session.resumed of a host this call starts (empty: message). sandbox_start starts
+	// it only to log a turn a sandbox stop cut off as lost: the host leaves queued messages queued.
+	ResumeReason event.ResumeReason `json:"resumeReason,omitempty"`
 }
 
 // SessionState is a session's host as flowd sees it.
@@ -241,6 +244,8 @@ type SessionState struct {
 	Status       event.SessionStatus `json:"status"`
 	Dir          string              `json:"dir"`
 	Worktrees    []WorktreeState     `json:"worktrees"`
+	// Started: this EnsureSession started the host (it did not run before). Set only in EnsureSession's answer.
+	Started bool `json:"started,omitempty"`
 }
 
 // CommandResult acknowledges a command once the host has accepted it (not when its effect is done).
