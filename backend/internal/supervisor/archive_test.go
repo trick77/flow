@@ -55,6 +55,27 @@ func TestStopWithRemove_keepsADirtyWorktree(t *testing.T) {
 	}
 }
 
+// Archiving works after the base ref is gone (fetch --prune after an upstream rename): the branch is judged against
+// the recorded base commit and, holding nothing of its own, deleted.
+func TestStopWithRemove_baseRefGone(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	if _, err := r.api.EnsureSession(ctx, sessionSpec("s1", "demo", "trick77/toolkit")); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(r.root, layout.Checkout("toolkit"))
+	gitRun(t, checkout, "update-ref", "-d", "refs/remotes/origin/master")
+	if err := r.api.StopSession(ctx, "s1", true); err != nil {
+		t.Fatalf("archive without the base ref: %v", err)
+	}
+	if got := gitOut(t, checkout, "branch", "--list", "flow/demo"); got != "" {
+		t.Errorf("branch without commits of its own kept: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(r.root, layout.Worktree("demo", "toolkit"))); err == nil {
+		t.Error("the clean worktree was kept")
+	}
+}
+
 // A host that accepts on its socket but never answers costs Hello at most its short budget, well inside Flow's 3 s,
 // and is reported by its unit state alone.
 func TestHello_stalledHost(t *testing.T) {

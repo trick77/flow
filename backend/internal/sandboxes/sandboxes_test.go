@@ -93,6 +93,12 @@ func newRig(t *testing.T) *rig {
 	return r
 }
 
+// lock takes the project's lock as a holder that never gives up does.
+func (m *Manager) lock(projectID string) func() {
+	unlock, _ := m.lockCtx(context.Background(), projectID, false)
+	return unlock
+}
+
 // release is the manager's release for the fake's architecture.
 func (r *rig) release(t *testing.T) string {
 	t.Helper()

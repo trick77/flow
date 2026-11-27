@@ -164,6 +164,18 @@ func (m *Manager) logAPI(ctx context.Context, sb Sandbox) flowdproto.API {
 // was: only the last job's lines grow. A sandbox that is stopped, never made or being deleted has no log to read
 // (sandbox_unavailable); one in setup whose flowd does not answer yet has no lines yet.
 func (m *Manager) SetupLog(ctx context.Context, projectID string, after int) (apitypes.SetupLog, error) {
+	return m.setupLog(ctx, projectID, after, 0)
+}
+
+// SetupLogTail is the last tail lines of the setup log (at most a page): where a failed script's error and exit
+// status are. The first line's number says whether earlier ones exist.
+func (m *Manager) SetupLogTail(ctx context.Context, projectID string, tail int) (apitypes.SetupLog, error) {
+	return m.setupLog(ctx, projectID, 0, max(min(tail, setupLogPage), 1))
+}
+
+// setupLog is SetupLog; tail above 0 replaces after with the number tail lines before the end of the jobs' logs as
+// their states count them now.
+func (m *Manager) setupLog(ctx context.Context, projectID string, after, tail int) (apitypes.SetupLog, error) {
 	sb, err := m.Store.ByProject(ctx, projectID)
 	if errors.Is(err, ErrNotFound) {
 		return apitypes.SetupLog{}, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, "the sandbox was never set up")
@@ -192,7 +204,11 @@ func (m *Manager) SetupLog(ctx context.Context, projectID string, after int) (ap
 	if err != nil {
 		return apitypes.SetupLog{}, err
 	}
-	n := 0 // the last number given out
+	type job struct {
+		repo, id string
+		st       flowdproto.JobState
+	}
+	var jobs []job
 	for _, r := range repos {
 		dir, ok := layout.RepoDir(r.FullName)
 		if !ok {
@@ -206,10 +222,22 @@ func (m *Manager) SetupLog(ctx context.Context, projectID string, after int) (ap
 		if err != nil {
 			return unreachable(err)
 		}
+		jobs = append(jobs, job{repo: r.FullName, id: id, st: st})
+	}
+	if tail > 0 {
+		end := 0
+		for _, j := range jobs {
+			end += 1 + j.st.Lines // its header, then its lines
+		}
+		after = max(end-tail, 0)
+	}
+	n := 0 // the last number given out
+	for _, j := range jobs {
+		id, st := j.id, j.st
 		header := n + 1
 		if header > after {
 			out.Lines = append(out.Lines, apitypes.SetupLine{N: header,
-				Text: "== " + r.FullName + ": " + layout.SetupScript + " =="})
+				Text: "== " + j.repo + ": " + layout.SetupScript + " =="})
 		}
 		total := st.Lines
 		for from := max(after-header, 0); from < total || st.Running(); {
@@ -249,7 +277,22 @@ func (a *API) GetSetupLog(w http.ResponseWriter, r *http.Request) {
 		}
 		after = n
 	}
-	log, err := a.Manager.SetupLog(r.Context(), id, after)
+	tail := 0
+	if v := r.URL.Query().Get("tail"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || r.URL.Query().Has("after") {
+			httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "tail"})
+			return
+		}
+		tail = n
+	}
+	var log apitypes.SetupLog
+	var err error
+	if tail > 0 {
+		log, err = a.Manager.SetupLogTail(r.Context(), id, tail)
+	} else {
+		log, err = a.Manager.SetupLog(r.Context(), id, after)
+	}
 	if err != nil {
 		httpapi.WriteError(w, err)
 		return

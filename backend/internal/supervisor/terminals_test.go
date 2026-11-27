@@ -528,9 +528,9 @@ func TestTermDirAndUnrooted(t *testing.T) {
 	if New(Options{}).unrooted("/x") != "/x" {
 		t.Error("unrooted without root")
 	}
-	if p := termProps(flowdproto.Limits{MemoryMaxBytes: 1 << 30, CPUQuotaPercent: 50}); p[0] != "MemoryMax=1073741824" ||
-		p[1] != "CPUQuota=50%" {
-		t.Errorf("props = %v", p[:2])
+	if p := termProps(flowdproto.Limits{MemoryMaxBytes: 1 << 30, CPUQuotaPercent: 50, TasksMax: 256}); p[0] != "MemoryMax=1073741824" ||
+		p[1] != "CPUQuota=50%" || p[2] != "TasksMax=256" {
+		t.Errorf("props = %v", p[:3])
 	}
 }
 

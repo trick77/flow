@@ -103,8 +103,10 @@ type Manager struct {
 	SetupLimits  flowdproto.Limits
 
 	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	locks map[string]chan struct{}
 	apis  map[string]cachedAPI
+	// bringing marks the projects whose lock a bring-up that may start the sandbox holds (Warm answers at once).
+	bringing map[string]bool
 	// dialed is the flowd each project's last bring-up greeted (logAPI).
 	dialed map[string]cachedAPI
 	// addrMu guards setting up Addresses (addrReady).
@@ -355,24 +357,48 @@ func (m *Manager) admit(ctx context.Context, name, step string) (release func(),
 	}), nil
 }
 
-func (m *Manager) projectLock(projectID string) *sync.Mutex {
+// projectLock is a project's lock: a channel of one, so a waiter can give up when its caller leaves.
+func (m *Manager) projectLock(projectID string) chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.locks == nil {
-		m.locks, m.apis = map[string]*sync.Mutex{}, map[string]cachedAPI{}
+		m.locks, m.apis = map[string]chan struct{}{}, map[string]cachedAPI{}
 	}
 	l, ok := m.locks[projectID]
 	if !ok {
-		l = &sync.Mutex{}
+		l = make(chan struct{}, 1)
 		m.locks[projectID] = l
 	}
 	return l
 }
 
-func (m *Manager) lock(projectID string) func() {
+// lockPoll is how often a waiter for a project's lock looks again whether a bring-up took it meanwhile.
+const lockPoll = 10 * time.Millisecond
+
+// lockCtx takes the project's lock, waiting as long as ctx lasts: a bring-up holds it for minutes (setup scripts), and a
+// caller that left must not stay parked behind it. warm (the no-start path) does not wait behind a bring-up at all:
+// it answers ErrMayRun at once (the sandbox is being brought up), since a reader of a warm sandbox's flowd has nothing
+// to gain from waiting minutes; short holders (another Warm, an environment push) are waited for.
+func (m *Manager) lockCtx(ctx context.Context, projectID string, warm bool) (func(), error) {
 	l := m.projectLock(projectID)
-	l.Lock()
-	return l.Unlock
+	unlock := func() { <-l }
+	for {
+		select {
+		case l <- struct{}{}:
+			return unlock, nil
+		default:
+		}
+		if warm && m.isBringing(projectID) {
+			return nil, fmt.Errorf("%w (being brought up)", ErrMayRun)
+		}
+		select {
+		case l <- struct{}{}:
+			return unlock, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(lockPoll):
+		}
+	}
 }
 
 // tryLock takes the project's lock when it is free within LockWait: a bring-up holds it for minutes, and an owner's
@@ -381,13 +407,37 @@ func (m *Manager) lock(projectID string) func() {
 func (m *Manager) tryLock(projectID string) (func(), error) {
 	l := m.projectLock(projectID)
 	deadline := time.Now().Add(m.LockWait)
-	for !l.TryLock() {
+	for {
+		select {
+		case l <- struct{}{}:
+			return func() { <-l }, nil
+		default:
+		}
 		if !time.Now().Before(deadline) {
 			return nil, apitypes.Fail(apitypes.ErrorCodeSandboxBusy, "the sandbox is busy")
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(lockPoll)
 	}
-	return l.Unlock, nil
+}
+
+// isBringing reports whether a bring-up that may start the sandbox holds the project's lock.
+func (m *Manager) isBringing(projectID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bringing[projectID]
+}
+
+func (m *Manager) setBringing(projectID string, on bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.bringing == nil {
+		m.bringing = map[string]bool{}
+	}
+	if on {
+		m.bringing[projectID] = true
+	} else {
+		delete(m.bringing, projectID)
+	}
 }
 
 // noSessions refuses with project_has_sessions while a session of the project is not archived; asked under the
@@ -456,13 +506,18 @@ const bringTimeout = 15 * time.Minute
 
 // Ensure brings the project's sandbox to warm and returns its flowd.
 func (m *Manager) Ensure(ctx context.Context, projectID string) (flowdproto.API, error) {
-	return m.ensure(ctx, projectID, true)
+	return m.ensure(ctx, projectID, true, true)
 }
 
 // ensure is Ensure; with mayStart false a sandbox that is not running is ErrNotWarm (and recorded as stopped)
-// instead of being started, one not warm by the records but maybe running ErrMayRun.
-func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (flowdproto.API, error) {
-	defer m.lock(projectID)()
+// instead of being started, one not warm by the records but maybe running ErrMayRun. wait: wait for a bring-up that
+// holds the project (Ensure, the environment push); without it the no-start path answers ErrMayRun at once.
+func (m *Manager) ensure(ctx context.Context, projectID string, mayStart, wait bool) (flowdproto.API, error) {
+	unlock, err := m.lockCtx(ctx, projectID, !wait)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	// Bring-up runs to its end on its own context: a caller that leaves (a page reload) must not leave a healthy
 	// sandbox marked failed, nor a half-made one. One that may bring the sandbox up (no connection cached) may run
 	// the setup scripts too.
@@ -483,9 +538,13 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 	}
 	if c := m.cached(projectID); c.api != nil && err == nil {
 		// Two cheap looks: a sandbox stopped behind Flow's back, or running but cut off from the bridge or on another
-		// address, must not keep its dead connection. A look that fails (the bridge's ports not readable just now)
-		// proves nothing: the connection stays.
-		if st, serr := m.Runtime.State(ctx, sb.Instance); serr == nil && st.Status == sandbox.StatusRunning {
+		// address, must not keep its dead connection. A look that fails (the runtime or the bridge's ports not
+		// readable just now) proves nothing: the connection stays.
+		st, serr := m.Runtime.State(ctx, sb.Instance)
+		if serr != nil && !errors.Is(serr, sandbox.ErrNotFound) {
+			return c.api, nil
+		}
+		if serr == nil && st.Status == sandbox.StatusRunning {
 			if why := m.misplaced(ctx, st, c.addr); why == nil || !relocate(why) {
 				return c.api, nil
 			}
@@ -526,17 +585,24 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 	if setup {
 		m.setState(ctx, &sb, StateSetup, "")
 	}
-	c, err := m.bring(ctx, &sb, mayStart, setup)
+	if mayStart {
+		m.setBringing(projectID, true)
+	}
+	var touched bool
+	c, err := m.bring(ctx, &sb, mayStart, setup, &touched)
+	if mayStart {
+		m.setBringing(projectID, false)
+	}
 	if errors.Is(err, ErrNotWarm) {
 		m.setState(ctx, &sb, StateStopped, "")
 		return nil, err
 	}
 	if err != nil {
 		m.Log.Error("sandbox setup", "sandbox", sb.Instance, "err", err)
-		// A reconnect (no start) that failed leaves a running, warm sandbox warm: the next call tries again (a fetch
-		// that failed, flowd briefly away). Only one cut off from its bridge or on another address needs a start, which
-		// failed says.
-		if mayStart || relocate(err) {
+		// A reconnect that failed leaves a running, warm sandbox warm, whether it was allowed to start or not: the
+		// next call tries again (a fetch that failed, flowd briefly away). Failed is recorded only when the sandbox
+		// was not warm before, or this call had to create, start or move its instance (or found it needs moving).
+		if setup || touched || relocate(err) {
 			m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(failCode(err)))
 		}
 		return nil, apitypes.Fail(failCode(err), err.Error())
@@ -552,7 +618,8 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 // records the error and waits for the next bring-up, it never retries by itself. A running instance cut off from
 // the bridge or carrying another address than its assigned one is restarted when mayStart, else reported; without
 // mayStart a stopped instance is ErrNotWarm, never started. setup: run the repositories' setup scripts (greet).
-func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart, setup bool) (cachedAPI, error) {
+// touched is set once the instance was found missing, stopped or misplaced: this call creates, starts or moves it.
+func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart, setup bool, touched *bool) (cachedAPI, error) {
 	t0 := time.Now()
 	if !m.Network.Configured() {
 		return cachedAPI{}, errors.New("sandbox network not configured")
@@ -576,6 +643,7 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart, setup bool) 
 	st, err := m.Runtime.State(ctx, sb.Instance)
 	releaseCreate := func() {}
 	if errors.Is(err, sandbox.ErrNotFound) {
+		*touched = true
 		// Before the create (about 40 s): a start refused afterwards would leave a whole instance behind. Its headroom
 		// stays reserved until the start below returned; start checks again, the authoritative one.
 		release, aerr := m.admit(ctx, sb.Instance, "create")
@@ -618,6 +686,7 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart, setup bool) 
 			if !relocate(why) {
 				return cachedAPI{}, why // a failed look proves nothing: never stop a healthy sandbox for it
 			}
+			*touched = true
 			if !mayStart {
 				return cachedAPI{}, fmt.Errorf("%w: start it again", why)
 			}
@@ -639,7 +708,7 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart, setup bool) 
 		if !mayStart {
 			return cachedAPI{}, ErrNotWarm
 		}
-		started = true
+		started, *touched = true, true
 		if err := m.start(ctx, st, nic, !restart); err != nil {
 			return cachedAPI{}, err
 		}
@@ -876,8 +945,8 @@ func (m *Manager) pushEnv(ctx context.Context, api flowdproto.API) error {
 
 // PushEnv pushes the current set to every warm sandbox, never starting one (a stopped sandbox gets it at its next
 // bring-up). Called when a credential changes; failures are logged, never with the set's values. The stored state
-// is not filtered on: a sandbox in setup has had its set pushed already and turns warm with it, so Warm waits for
-// that bring-up (the project's lock) and the push follows it. One goroutine per sandbox, so a long bring-up holds up
+// is not filtered on: a sandbox in setup has had its set pushed already and turns warm with it, so the push waits
+// for that bring-up (the project's lock) and follows it. One goroutine per sandbox, so a long bring-up holds up
 // no other; PushEnv returns when all are done.
 func (m *Manager) PushEnv(ctx context.Context) {
 	rows, err := m.Store.List(ctx)
@@ -888,7 +957,7 @@ func (m *Manager) PushEnv(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, sb := range rows {
 		wg.Go(func() {
-			api, err := m.Warm(ctx, sb.ProjectID)
+			api, err := m.ensure(ctx, sb.ProjectID, false, true) // Warm, waiting for a bring-up
 			if err == nil {
 				err = m.pushEnv(ctx, api)
 			}
@@ -954,15 +1023,24 @@ var ErrNotWarm = errors.New("sandboxes: not warm")
 var ErrMayRun = errors.New("sandboxes: not warm, but its instance may still run")
 
 // Warm returns the flowd of a sandbox that is warm by Flow's records, reconnecting after Flow's own restart; it
-// never starts a stopped sandbox. ErrNotWarm: nothing runs; ErrMayRun: not warm, the instance may run.
+// never starts a stopped sandbox. ErrNotWarm: nothing runs; ErrMayRun: not warm, the instance may run (also at once
+// while a bring-up holds the project).
 func (m *Manager) Warm(ctx context.Context, projectID string) (flowdproto.API, error) {
-	return m.ensure(ctx, projectID, false)
+	return m.ensure(ctx, projectID, false, false)
 }
 
 // Stop stops a project's sandbox; its filesystem stays. An instance that does not exist (a bring-up failed before
 // creating it, or deleted outside Flow) is stopped already.
 func (m *Manager) Stop(ctx context.Context, projectID string) error {
-	defer m.lock(projectID)()
+	unlock, err := m.lockCtx(ctx, projectID, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Once begun the stop runs to its end on its own context: a caller that leaves (a page reload) must not leave a
+	// cleanly stopping sandbox recorded failed or stopping.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
+	defer cancel()
 	m.remember(projectID, cachedAPI{})
 	sb, err := m.Store.ByProject(ctx, projectID)
 	if err != nil {
@@ -979,6 +1057,9 @@ func (m *Manager) Stop(ctx context.Context, projectID string) error {
 	m.setState(ctx, &sb, StateStopped, "")
 	return nil
 }
+
+// stopTimeout bounds Stop: a clean stop of up to 30 s, a forced one after it, and the state writes.
+const stopTimeout = 2 * time.Minute
 
 // removeTimeout bounds removing an instance (a clean stop of up to 30 s, then the delete). A var for tests.
 var removeTimeout = 2 * time.Minute
