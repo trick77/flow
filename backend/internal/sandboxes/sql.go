@@ -16,14 +16,15 @@ type SQL struct{ DB *sql.DB }
 var _ Store = SQL{}
 
 const cols = `id, project_id, instance, state, progress_code, error_code, arch, flowd_version, flowd_token, setup_hash,
-	last_used_at, started_at, created_at, updated_at`
+	ipv4, last_used_at, started_at, created_at, updated_at`
 
 func scan(sc interface{ Scan(...any) error }) (Sandbox, error) {
 	var s Sandbox
-	var lastUsed, started sql.NullString
+	var ipv4, lastUsed, started sql.NullString
 	var created, updated string
 	err := sc.Scan(&s.ID, &s.ProjectID, &s.Instance, &s.State, &s.ProgressCode, &s.ErrorCode, &s.Arch, &s.FlowdVersion,
-		&s.FlowdToken, &s.SetupHash, &lastUsed, &started, &created, &updated)
+		&s.FlowdToken, &s.SetupHash, &ipv4, &lastUsed, &started, &created, &updated)
+	s.IPv4 = ipv4.String
 	s.LastUsedAt, s.StartedAt = store.ParseNull(lastUsed), store.ParseNull(started)
 	s.CreatedAt, s.UpdatedAt = store.Parse(created), store.Parse(updated)
 	return s, err

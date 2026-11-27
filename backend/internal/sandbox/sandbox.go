@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net/netip"
 	"time"
 )
 
@@ -20,6 +21,9 @@ var (
 	ErrNotFound = errors.New("sandbox: instance not found")
 	ErrExists   = errors.New("sandbox: instance exists")
 	ErrState    = errors.New("sandbox: wrong state for the operation")
+	// ErrNetworkMissing: the host bridge sandboxes attach to does not exist (Docker deletes it on
+	// `docker network rm`, also with sandboxes attached). Starting cannot help until the host has it again.
+	ErrNetworkMissing = errors.New("sandbox: host bridge missing")
 )
 
 // Status of an instance.
@@ -49,9 +53,8 @@ type Spec struct {
 	Limits Limits
 	// Nesting allows Docker inside (security.nesting; the project must allow it).
 	Nesting bool
-	// Network is the managed bridge; the NIC gets MAC and IPv4 filtering so an instance cannot answer as
-	// another.
-	Network string
+	// NIC is the instance's one network interface.
+	NIC NIC
 }
 
 // Volume is a custom storage volume, such as the one home volume.
@@ -99,9 +102,15 @@ type State struct {
 	Status Status
 	// Arch is the Go architecture of the instance (amd64, arm64), from Incus' x86_64 / aarch64.
 	Arch string
-	// IPv4 is the address on the bridge, empty until the instance has one: Flow's only way to reach flowd.
+	// IPv4 is the address the guest reports on eth0, empty until its network is up.
 	IPv4 string
 	MAC  string
+	// Address is the static address configured on the NIC (invalid when it has none); HostIface is the NIC's host
+	// side while running, a port of the bridge unless the bridge was deleted and made again under it.
+	Address   netip.Addr
+	HostIface string
+	// MemoryLimitBytes is the configured limits.memory, 0 when unset.
+	MemoryLimitBytes int64
 	// Usage, present while running.
 	MemoryBytes     int64
 	MemoryPeakBytes int64
@@ -114,10 +123,17 @@ type State struct {
 
 // Runtime is everything Flow does with Incus.
 type Runtime interface {
-	// Create makes a stopped instance from the base image.
+	// Create makes a stopped instance from the base image, its NIC and guest network configured.
 	Create(ctx context.Context, s Spec) error
-	// Clone makes a copy-on-write copy of a stopped or running instance under a new name.
+	// Clone makes a copy-on-write copy of a stopped or running instance under a new name. The copy has no NIC, so
+	// it can never come up on the source's address: SetNIC gives it its own.
 	Clone(ctx context.Context, from, to string) error
+	// SetNIC replaces a stopped instance's NIC and rewrites its guest network configuration (NIC.GuestFiles)
+	// through the file API: no exec, nothing running inside. Setting the same NIC again changes nothing.
+	SetNIC(ctx context.Context, name string, n NIC) error
+	// BridgePorts lists the host interfaces attached to a host bridge; ErrNetworkMissing when it does not exist.
+	BridgePorts(ctx context.Context, bridge string) ([]string, error)
+	// Start starts an instance; ErrNetworkMissing when its NIC's bridge does not exist.
 	Start(ctx context.Context, name string) error
 	// Stop stops cleanly within timeout, then forcibly. The filesystem stays.
 	Stop(ctx context.Context, name string, timeout time.Duration) error
