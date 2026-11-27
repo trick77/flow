@@ -313,22 +313,50 @@ func sessionOfPID(pid int) string {
 }
 
 // raiseNotice has the session's host log a notice, at most once per noticeEvery and code. A host that is down or
-// predates hostproto.OpNotice drops it.
+// predates hostproto.OpNotice drops it; a notice not logged silences nothing (the next git failure tries again).
+// The slot is taken before dialing so two helpers at once raise one notice, and given back when it was not logged.
 func (s *Supervisor) raiseNotice(ctx context.Context, id, code string) {
-	key := id + " " + code
+	key := noticeKey(id, code)
 	now := time.Now()
 	s.mu.Lock()
-	if last, ok := s.notices[key]; ok && now.Sub(last) < noticeEvery {
+	last, had := s.notices[key]
+	if had && now.Sub(last) < noticeEvery {
 		s.mu.Unlock()
 		return
 	}
 	s.notices[key] = now
 	s.mu.Unlock()
+	if !s.sendNotice(ctx, id, code) {
+		s.mu.Lock()
+		if s.notices[key].Equal(now) {
+			if had {
+				s.notices[key] = last
+			} else {
+				delete(s.notices, key)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+func noticeKey(id, code string) string { return id + " " + code }
+
+// forgetNotices drops a removed session's notice times.
+func (s *Supervisor) forgetNotices(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, code := range []string{NoticeGitHubDisconnected, NoticeGitHubTokenExpired} {
+		delete(s.notices, noticeKey(id, code))
+	}
+}
+
+// sendNotice reports whether the session's host logged the notice.
+func (s *Supervisor) sendNotice(ctx context.Context, id, code string) bool {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	conn, err := s.dialHost(ctx, id)
 	if err != nil {
-		return
+		return false
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
@@ -337,5 +365,7 @@ func (s *Supervisor) raiseNotice(ctx context.Context, id, code string) {
 		Notice: &event.Notice{Code: code, Level: level}})
 	if err != nil || resp.Error != "" {
 		s.o.Log.Info("notice not logged", "session", id, "code", code, "answer", resp.Error)
+		return false
 	}
+	return true
 }

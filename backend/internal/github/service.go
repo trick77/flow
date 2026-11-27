@@ -37,6 +37,8 @@ const (
 	maxInstallationPages = 10
 	// reuseFlow: a start while a device code has more than this left hands out the same code.
 	reuseFlow = time.Minute
+	// refusalPause: after a refresh refusal with a code Flow does not know, GitHub is not asked again before this.
+	refusalPause = 5 * time.Minute
 )
 
 // Service is the GitHub App area: the device flow, the one user token (renewed single-flight, the rotating refresh
@@ -72,6 +74,8 @@ type Service struct {
 	// unsaved: cur holds what GitHub handed out but the store does not have yet. Nothing is handed out until it is
 	// written; the write is tried again on every use, GitHub is never asked again with the old refresh token.
 	unsaved bool
+	// retryAt: no renewal before then (refusalPause after an unknown refusal code).
+	retryAt time.Time
 
 	flowMu sync.Mutex
 	flow   *deviceFlow
@@ -95,6 +99,9 @@ type deviceFlow struct {
 	expiresAt, next           time.Time
 	interval                  time.Duration
 	slowed                    bool
+	// tok: GitHub confirmed the code (at confirmed), the account is not read yet.
+	tok       *Token
+	confirmed time.Time
 }
 
 func (s *Service) now() time.Time {
@@ -234,6 +241,18 @@ func (s *Service) token(ctx context.Context) (t credentials.GitHubToken, changed
 		s.markLost(ctx, "the GitHub authorization ran out")
 		return t, true
 	}
+	// keep hands out the current token while it is valid: the authorization stays, the renewal is tried again.
+	keep := func() (credentials.GitHubToken, bool) {
+		if now.Before(exp) {
+			t.State, t.Token, t.ExpiresAt = flowdproto.GitHubConnected, r.tokens.AccessToken, exp
+			return t, changed
+		}
+		t.State = flowdproto.GitHubExpired
+		return t, changed
+	}
+	if now.Before(s.retryAt) {
+		return keep()
+	}
 	// Not the caller's context: a renewal cut off after GitHub answered would lose the only valid refresh token.
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), callTimeout)
 	nt, err := s.Client.Refresh(rctx, r.tokens.RefreshToken)
@@ -247,19 +266,21 @@ func (s *Service) token(ctx context.Context) (t credentials.GitHubToken, changed
 			}
 			s.RenewalFailed(class)
 		}
-		if Transient(err) || (errors.As(err, &oe) && oe.Code == "incorrect_client_credentials") {
-			// incorrect_client_credentials is Flow's configuration (a wrong BACKEND_GITHUB_CLIENT_ID), not the
-			// authorization: it is kept for when the setting is fixed.
-			s.log().Warn("renewing the GitHub token failed; trying again", "err", err)
-			if now.Before(exp) {
-				t.State, t.Token, t.ExpiresAt = flowdproto.GitHubConnected, r.tokens.AccessToken, exp
-				return t, changed
-			}
-			t.State = flowdproto.GitHubExpired
-			return t, changed
+		if Refused(err) {
+			s.markLost(ctx, "GitHub refused the refresh token")
+			return t, true
 		}
-		s.markLost(ctx, "GitHub refused the refresh token")
-		return t, true
+		if !Transient(err) && errors.As(err, &oe) && oe.Code != "incorrect_client_credentials" {
+			// A code Flow does not know is never taken as a refusal (that would drop a refresh token that may still
+			// be good): kept, and GitHub is asked again only after a pause. incorrect_client_credentials is Flow's
+			// configuration (a wrong BACKEND_GITHUB_CLIENT_ID), not the authorization: kept for when it is fixed.
+			s.retryAt = now.Add(refusalPause)
+			s.log().Warn("GitHub answered the renewal with an unknown error; keeping the authorization, trying again later",
+				"code", oe.Code, "retryAt", s.retryAt)
+			return keep()
+		}
+		s.log().Warn("renewing the GitHub token failed; trying again", "err", err)
+		return keep()
 	}
 	r.tokens = tokens(nt, now, r.tokens.AccountID)
 	s.unsaved = true
@@ -324,11 +345,25 @@ func (s *Service) Run(ctx context.Context) {
 
 // Connection implements credentials.GitHub.
 func (s *Service) Connection(ctx context.Context) apitypes.GitHubConnection {
-	c := apitypes.GitHubConnection{State: apitypes.GitHubStateDisconnected, Available: s.Client != nil}
+	c, has := s.connection(ctx)
+	if !has {
+		s.flowMu.Lock()
+		if s.Client != nil && s.flow != nil && (s.flow.tok != nil || s.now().Before(s.flow.expiresAt)) {
+			c.State = apitypes.GitHubStatePending
+		}
+		s.flowMu.Unlock()
+	}
+	return c
+}
+
+// connection is the stored connection's state, the device flow left out; has says whether there is one. It never
+// takes flowMu: PollDeviceFlow answers with it while holding that lock.
+func (s *Service) connection(ctx context.Context) (c apitypes.GitHubConnection, has bool) {
+	c = apitypes.GitHubConnection{State: apitypes.GitHubStateDisconnected, Available: s.Client != nil}
 	s.mu.Lock()
 	err := s.load(ctx)
 	var r record
-	has := s.cur != nil
+	has = s.cur != nil
 	if has {
 		r = *s.cur
 	}
@@ -337,19 +372,14 @@ func (s *Service) Connection(ctx context.Context) apitypes.GitHubConnection {
 		s.log().Error("reading the GitHub connection", "err", err)
 	}
 	if !has {
-		s.flowMu.Lock()
-		if s.Client != nil && s.flow != nil && s.now().Before(s.flow.expiresAt) {
-			c.State = apitypes.GitHubStatePending
-		}
-		s.flowMu.Unlock()
-		return c
+		return c, false
 	}
 	c.Login = r.login
 	created := r.createdAt
 	c.ConnectedAt = &created
 	if r.lost() || s.Client == nil {
 		c.State = apitypes.GitHubStateExpired
-		return c
+		return c, true
 	}
 	c.State = apitypes.GitHubStateConnected
 	if exp := r.tokens.AccessExpiresAt; !exp.IsZero() {
@@ -358,7 +388,7 @@ func (s *Service) Connection(ctx context.Context) apitypes.GitHubConnection {
 	if exp := r.tokens.RefreshExpiresAt; !exp.IsZero() {
 		c.RefreshExpiresAt = &exp
 	}
-	return c
+	return c, true
 }
 
 func upstream(detail string) error { return apitypes.Fail(apitypes.ErrorCodeUpstream, detail) }
@@ -405,7 +435,8 @@ func (s *Service) StartDeviceFlow(w http.ResponseWriter, r *http.Request) {
 	}
 	f := s.flow
 	httpapi.WriteJSON(w, http.StatusOK, apitypes.DeviceFlow{UserCode: f.userCode, VerificationURI: f.uri,
-		ExpiresAt: f.expiresAt.UTC(), IntervalSeconds: int(f.interval / time.Second)})
+		ExpiresAt: f.expiresAt.UTC(), ExpiresInSeconds: max(0, int(f.expiresAt.Sub(now)/time.Second)),
+		IntervalSeconds: int(f.interval / time.Second)})
 }
 
 // PollDeviceFlow implements credentials.GitHub. GitHub is asked at most once per its interval (longer after a
@@ -428,9 +459,13 @@ func (s *Service) PollDeviceFlow(w http.ResponseWriter, r *http.Request) {
 	f, now := s.flow, s.now()
 	switch {
 	case f == nil:
-		answer(apitypes.GitHubStateDisconnected)
+		// No code out (over, or another tab's poll ended it): the connection as it stands, so a confirmed one
+		// never reads as denied.
+		c, _ := s.connection(r.Context())
+		httpapi.WriteJSON(w, http.StatusOK, c)
 		return
-	case !now.Before(f.expiresAt):
+	case !now.Before(f.expiresAt) && f.tok == nil:
+		// A confirmed code outlives its expiry: the tokens it brought are good for hours.
 		s.flow = nil
 		answer(apitypes.GitHubStateExpired)
 		return
@@ -440,7 +475,13 @@ func (s *Service) PollDeviceFlow(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), callTimeout)
 	defer cancel()
-	tok, err := s.Client.PollDeviceToken(ctx, f.deviceCode)
+	var tok Token
+	var err error
+	if f.tok != nil {
+		tok = *f.tok // confirmed already; only the account is still to be read
+	} else {
+		tok, err = s.Client.PollDeviceToken(ctx, f.deviceCode)
+	}
 	var oe *OAuthError
 	switch {
 	case err == nil:
@@ -474,28 +515,35 @@ func (s *Service) PollDeviceFlow(w http.ResponseWriter, r *http.Request) {
 		answer(apitypes.GitHubStatePending)
 		return
 	}
-	s.flow = nil
+	if f.tok == nil {
+		// GitHub spent the device code: from here the tokens are what is kept, their lifetimes counted from now.
+		f.tok, f.confirmed = &tok, now
+	}
 	u, err := s.Client.User(ctx, tok.AccessToken)
 	if err != nil {
-		s.log().Warn("reading the connected GitHub account failed", "err", err)
-		httpapi.WriteError(w, upstream(detail(err)))
+		// The authorization stays with the flow; the next poll reads the account again.
+		s.log().Warn("reading the connected GitHub account failed; trying again", "err", err)
+		f.next = now.Add(f.interval)
+		answer(apitypes.GitHubStatePending)
 		return
 	}
-	if err := s.connect(ctx, u, tok); err != nil {
+	s.flow = nil
+	if err := s.connect(ctx, u, tok, f.confirmed); err != nil {
 		httpapi.WriteError(w, err)
 		return
 	}
 	s.notify()
-	httpapi.WriteJSON(w, http.StatusOK, s.Connection(r.Context()))
+	// Not Connection: it takes flowMu, held here.
+	c, _ := s.connection(r.Context())
+	httpapi.WriteJSON(w, http.StatusOK, c)
 }
 
-// connect replaces the stored connection with a new one.
-func (s *Service) connect(ctx context.Context, u User, tok Token) error {
+// connect replaces the stored connection with a new one, its token issued at now.
+func (s *Service) connect(ctx context.Context, u User, tok Token, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
 	s.cur = &record{id: store.NewID(), login: u.Login, tokens: tokens(tok, now, u.ID), createdAt: now.UTC()}
-	s.loaded, s.unsaved = true, true
+	s.loaded, s.unsaved, s.retryAt = true, true, time.Time{}
 	if tok.RefreshToken == "" && tok.ExpiresIn > 0 {
 		s.log().Warn("GitHub handed out an expiring token without a refresh token; check the App's settings")
 	}
@@ -513,15 +561,17 @@ func (s *Service) connect(ctx context.Context, u User, tok Token) error {
 // secret, which Flow does not hold; the owner revokes the authorization on GitHub if wanted.
 func (s *Service) Disconnect(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	err := s.load(r.Context())
-	if err == nil && s.cur != nil {
-		err = s.Store.Delete(r.Context(), s.cur.id)
-		if errors.Is(err, credentials.ErrNotFound) {
-			err = nil
-		}
+	// The stored row by kind, not by the id in memory: after a reconnect whose write failed, memory holds a new id
+	// while the old row is still stored, and it would come back after a restart.
+	row, err := s.Store.Get(r.Context(), credentials.KindGitHub, "")
+	if err == nil {
+		err = s.Store.Delete(r.Context(), row.ID)
+	}
+	if errors.Is(err, credentials.ErrNotFound) {
+		err = nil
 	}
 	if err == nil {
-		s.cur, s.unsaved = nil, false
+		s.cur, s.unsaved, s.loaded = nil, false, true
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -611,11 +661,13 @@ func (s *Service) repos(ctx context.Context) ([]Repo, error) {
 type statusError interface{ HTTPStatus() int }
 
 // DefaultBranch finds a repository's default branch for a new project: with the connection through the REST API
-// (private repositories included), else, and for a public repository the installation does not cover (404),
-// anonymously. A repository neither way finds is github_not_connected while not connected (it may be private),
-// else invalid_request.
+// (private repositories included), else, and for a public repository the installation does not cover (404) or the
+// token is refused for (401/403: revoked on GitHub, an org's SSO), anonymously. A repository neither way finds is
+// github_not_connected while not connected (it may be private), upstream when the token was refused, else
+// invalid_request.
 func (s *Service) DefaultBranch(ctx context.Context, fullName string) (string, error) {
 	connected := false
+	var refused error
 	if s.Client != nil {
 		if t := s.Token(ctx); t.State == flowdproto.GitHubConnected {
 			connected = true
@@ -627,6 +679,8 @@ func (s *Service) DefaultBranch(ctx context.Context, fullName string) (string, e
 			case err == nil && rp.DefaultBranch != "":
 				return rp.DefaultBranch, nil
 			case errors.As(err, &se) && se.Status == http.StatusNotFound:
+			case errors.As(err, &se) && (se.Status == http.StatusUnauthorized || se.Status == http.StatusForbidden):
+				refused = err
 			case err != nil:
 				return "", upstream(detail(err))
 			}
@@ -636,6 +690,9 @@ func (s *Service) DefaultBranch(ctx context.Context, fullName string) (string, e
 	var st statusError
 	if err != nil && errors.As(err, &st) && (st.HTTPStatus() == http.StatusUnauthorized ||
 		st.HTTPStatus() == http.StatusNotFound) {
+		if refused != nil {
+			return "", upstream(detail(refused))
+		}
 		if connected {
 			return "", &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "repos", Detail: fullName}
 		}
