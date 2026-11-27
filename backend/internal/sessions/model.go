@@ -27,6 +27,7 @@ type Session struct {
 	TurnStartedAt     *time.Time
 	LastActivityAt    time.Time
 	ArchivedAt        *time.Time
+	CleanupPending    bool
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }

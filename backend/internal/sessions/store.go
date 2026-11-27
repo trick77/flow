@@ -16,6 +16,8 @@ type ListFilter struct {
 	ProjectID string
 	ParentID  string
 	Archived  bool
+	// CleanupPending: only sessions whose sandbox still holds their host and worktrees (with Archived).
+	CleanupPending bool
 }
 
 // Mirror is what following a log changes on a session row, applied in one statement.
@@ -37,7 +39,10 @@ type Store interface {
 	// ApplyMirror records progress through the log; it never moves LastSeq backwards.
 	ApplyMirror(ctx context.Context, id string, m Mirror) error
 	MarkSeen(ctx context.Context, id string, seq int64) error
-	Archive(ctx context.Context, id string) error
+	// Archive marks a session archived; cleanupPending: its sandbox was stopped, so its host and worktrees are still
+	// there, to be removed at the next bring-up (CleanedUp then).
+	Archive(ctx context.Context, id string, cleanupPending bool) error
+	CleanedUp(ctx context.Context, id string) error
 	// Delete removes a session and its worktree rows: only for a creation that failed before the session was
 	// usable.
 	Delete(ctx context.Context, id string) error

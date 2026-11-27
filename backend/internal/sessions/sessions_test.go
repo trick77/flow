@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -25,14 +26,33 @@ import (
 )
 
 type fakeSandboxes struct {
-	api     *flowdfake.Fake
-	err     error
+	api *flowdfake.Fake
+	err error
+	// warmErr, when set, is Warm's answer instead of err (a stopped sandbox: sandboxes.ErrNotWarm).
+	warmErr error
 	forgets int
+	ensures atomic.Int32
+	// ensuring, when set, is told on every Ensure, which then waits for proceed (a bring-up in progress).
+	ensuring chan struct{}
+	proceed  chan struct{}
 }
 
-func (f *fakeSandboxes) Ensure(context.Context, string) (flowdproto.API, error) { return f.api, f.err }
-func (f *fakeSandboxes) Warm(context.Context, string) (flowdproto.API, error)   { return f.api, f.err }
-func (f *fakeSandboxes) Forget(string)                                          { f.forgets++ }
+func (f *fakeSandboxes) Ensure(context.Context, string) (flowdproto.API, error) {
+	f.ensures.Add(1)
+	if f.ensuring != nil {
+		f.ensuring <- struct{}{}
+		<-f.proceed
+	}
+	return f.api, f.err
+}
+
+func (f *fakeSandboxes) Warm(context.Context, string) (flowdproto.API, error) {
+	if f.warmErr != nil {
+		return nil, f.warmErr
+	}
+	return f.api, f.err
+}
+func (f *fakeSandboxes) Forget(string) { f.forgets++ }
 
 type rig struct {
 	svc *Service
@@ -190,7 +210,7 @@ func TestFollow_survivesTransientStoreErrors(t *testing.T) {
 		r.svc.mu.Lock()
 		following := r.svc.follows[s.Summary.ID]
 		r.svc.mu.Unlock()
-		if !following {
+		if following == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -371,7 +391,7 @@ func TestCommandAndHost(t *testing.T) {
 	if _, err := r.svc.Command(ctx, "nope", "c", event.CmdTurnInterrupt, event.TurnInterrupt{}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("unknown session: %v", err)
 	}
-	if err := r.svc.Store.Archive(ctx, s.Summary.ID); err != nil {
+	if err := r.svc.Store.Archive(ctx, s.Summary.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	var ae *apitypes.Error
@@ -430,15 +450,25 @@ func TestSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, err := range []error{s.Update(ctx, Session{ID: "x"}), s.ApplyMirror(ctx, "x", Mirror{}), s.MarkSeen(ctx, "x", 1),
-		s.Archive(ctx, "x"), s.UpdateWorktree(ctx, Worktree{ID: "x"})} {
+		s.Archive(ctx, "x", false), s.CleanedUp(ctx, "x"), s.UpdateWorktree(ctx, Worktree{ID: "x"})} {
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("missing row: %v", err)
 		}
 	}
-	if err := s.Archive(ctx, "c"); err != nil {
+	if err := s.Archive(ctx, "c", true); err != nil {
 		t.Fatal(err)
 	}
 	if list, _ := s.List(ctx, ListFilter{Archived: true}); len(list) != 1 {
 		t.Errorf("archived list %d", len(list))
+	}
+	pending := ListFilter{ProjectID: "p1", Archived: true, CleanupPending: true}
+	if list, _ := s.List(ctx, pending); len(list) != 1 || !list[0].CleanupPending {
+		t.Errorf("pending cleanup %+v", list)
+	}
+	if err := s.CleanedUp(ctx, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := s.List(ctx, pending); len(list) != 0 {
+		t.Errorf("still pending after CleanedUp: %+v", list)
 	}
 }
