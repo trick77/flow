@@ -10,8 +10,12 @@
 #   1. Docker network $DOCKER_NETWORK on bridge $BRIDGE ($SUBNET, Docker allocating only from $DOCKER_RANGE): Docker
 #      provides forwarding, masquerading, the firewalld zone `docker` and the separation from other Docker networks.
 #   2. firewalld policies flow-sb-host (the sandbox range may not reach the host; IPv6 from the zone `docker` is
-#      rejected), flow-sb-docker (nor other Docker bridges, including a routed hairpin back onto $BRIDGE) and
-#      flow-sb-lan (nor $LAN_DESTINATIONS behind the host: LAN, cloud metadata; the internet stays reachable).
+#      rejected), flow-sb-docker (nor other Docker bridges, including a routed hairpin back onto $BRIDGE),
+#      flow-sb-lan (nor $LAN_DESTINATIONS behind the host: LAN, cloud metadata; the internet stays reachable) and
+#      flow-sb-incus (no container but Flow's, $CONTAINER_ADDRESS, reaches the Incus API at $INCUS_LISTEN: every
+#      Docker bridge is in zone `docker`, and a client certificate alone was the only bar before). Matched by source
+#      address: a container on $DOCKER_NETWORK with raw sockets could forge it or take the address over on the
+#      bridge (not measured); Incus' client certificate stays the other bar.
 #   3. One DOCKER-USER rule: sandboxes may not reach other containers' published ports (firewalld accepts DNAT'd
 #      traffic before any policy). Persistence: the systemd unit flow-sandbox-published.service, bound to
 #      docker.service (WantedBy + PartOf + After) and ordered before incus.service, inserts it once Docker has made
@@ -26,19 +30,24 @@
 #      project's default profile gets its root disk on that pool; a root disk on another pool is refused, never
 #      re-pointed.
 #   5. systemd drop-in: incus.service starts after Docker has made $BRIDGE (else autostart fails three times and
-#      leaves the sandboxes stopped; measured).
+#      leaves the sandboxes stopped; measured), waiting at most 120 s. The unit flow-incus-listen.service (bound to
+#      docker.service like the rule's unit, after incus.service) makes Incus listen on $INCUS_LISTEN once the
+#      address exists: Incus started before it (Docker slow at boot) tries once more after 30 s and then never.
 #   6. The restricted Incus project $PROJECT and Flow's client certificate, trusted for that project only. The
 #      project needs restricted.devices.nic=allow: a restricted project refuses NICs on an unmanaged bridge
 #      ("Only managed network devices are allowed", measured), and Incus has nothing narrower. $CERT_DIR (client
 #      certificate and key, Incus' server certificate) belongs to $CERT_OWNER, the uid Flow's container runs as and
 #      reads them with through a read-only mount; set again on every run.
-#   Flow's container (not made here) joins $DOCKER_NETWORK to dial flowd and must also be on the reverse proxy's
-#   network, where the proxy reaches it (Traefik: label traefik.docker.network=<the proxy's network>). Flow refuses
-#   every browser request arriving over $DOCKER_NETWORK, which sandboxes reach at L2; with no other network it
-#   answers nothing and logs that at start.
+#   Flow's container (not made here) joins $DOCKER_NETWORK at $CONTAINER_ADDRESS (compose.yaml) to dial flowd and
+#   Incus, and must also be on the reverse proxy's network, where the proxy reaches it (Traefik: label
+#   traefik.docker.network=<the proxy's network>). Flow refuses every browser request arriving over $DOCKER_NETWORK,
+#   which sandboxes reach at L2; with no other network it answers nothing and logs that at start. A Flow container
+#   made before flow-sb-incus existed has another address: `docker compose up -d` makes it again.
 #   Optional (INCUS_PROJECT_MEMORY=1): limits.memory on the project = BACKEND_SANDBOX_MEMORY_TOTAL_MIB. Incus counts
 #   every instance of the project in it, stopped ones too (measured), so it caps how many sandboxes exist, not how
-#   many run; Flow enforces the same ceiling on running sandboxes itself. Off by default.
+#   many run. Flow admits a sandbox only while the running sandboxes' measured memory plus
+#   BACKEND_SANDBOX_MEMORY_HEADROOM_MIB fits under it. Refused while the total is 0 (Flow's "no check"). Off by
+#   default.
 #
 # Required, else it refuses before changing anything (preflight in host-lib.sh): firewalld on nftables with
 # Docker's zone `docker`, Docker on iptables-nft as docker.service, FORWARD's policy DROP with DOCKER-USER before
@@ -60,9 +69,9 @@
 #
 # Settings (environment): BACKEND_SANDBOX_BRIDGE, _SUBNET, _RANGE, _GATEWAY, _MEMORY_TOTAL_MIB, BACKEND_INCUS_POOL
 # and BACKEND_INCUS_PROJECT as Flow reads them (PROJECT overrides the latter); DOCKER_NETWORK, DOCKER_RANGE,
-# BAN_CHAIN (empty: none), BAN_REQUIRE, BAN_WAIT, INCUS_LISTEN, INCUS_DIR, CERT_DIR, CERT_OWNER, POOL_DRIVER (btrfs,
-# or dir where loop devices are refused), POOL_SIZE, STATE_DIR, INCUS_PROJECT_MEMORY, OTHER_CHURN. Defaults in
-# host-lib.sh.
+# BAN_CHAIN (empty: none), BAN_REQUIRE, BAN_WAIT, INCUS_LISTEN, CONTAINER_ADDRESS, INCUS_DIR, CERT_DIR, CERT_OWNER,
+# POOL_DRIVER (btrfs, or dir where loop devices are refused), POOL_SIZE, STATE_DIR, INCUS_PROJECT_MEMORY,
+# OTHER_CHURN. Defaults in host-lib.sh.
 set -eu
 
 SCRIPT=host-setup
@@ -78,6 +87,12 @@ done
 [ "$(id -u)" -eq 0 ] || die "run as root"
 
 check_settings
+case "${INCUS_PROJECT_MEMORY:-0}" in
+0) ;;
+1) [ "$MEMORY_TOTAL_MIB" -gt 0 ] 2>/dev/null ||
+	die "INCUS_PROJECT_MEMORY=1 needs BACKEND_SANDBOX_MEMORY_TOTAL_MIB above 0 (it is '$MEMORY_TOTAL_MIB'; 0 would set a 0 MiB project limit)" ;;
+*) die "INCUS_PROJECT_MEMORY must be 0 or 1" ;;
+esac
 manifest_settings
 ban_from_manifest
 preflight
@@ -136,10 +151,16 @@ fi
 # An existing policy of ours may be incomplete (a run interrupted while making it) but must hold no rule of
 # anyone else's: what is missing is added below.
 policy_exists() { firewall-cmd --permanent --get-policies | tr ' ' '\n' | grep -qx "$1"; }
-for p in "$POLICY_HOST" "$POLICY_DOCKER" "$POLICY_LAN"; do
+# own_stale POLICY RULE: a flow-sb-incus rule an earlier run made for another CONTAINER_ADDRESS or INCUS_LISTEN;
+# policy() replaces it.
+own_stale() {
+	[ "$1" = "$POLICY_INCUS" ] && printf '%s\n' "$2" |
+		grep -Eqx 'rule family="ipv4" source NOT address="[0-9.]+"( destination address="[0-9.]+")? port port="[0-9]+" protocol="tcp" reject'
+}
+for p in $POLICIES; do
 	policy_exists "$p" || continue
 	foreign="$(firewall-cmd --permanent --policy="$p" --list-rich-rules | while IFS= read -r r; do
-		[ -z "$r" ] || policy_rules "$p" | grep -qxF "$r" || printf '%s; ' "$r"
+		[ -z "$r" ] || policy_rules "$p" | grep -qxF "$r" || own_stale "$p" "$r" || printf '%s; ' "$r"
 	done)"
 	[ -z "$foreign" ] || die "firewalld policy $p holds rules that are not Flow's: $foreign remove them by hand"
 done
@@ -189,7 +210,7 @@ fi
 # before it is made and completed piece by piece, so an interrupted run leaves nothing the next run or the
 # teardown does not know: flow-sb-host (range -> host; IPv6 from zone docker), flow-sb-docker (range -> other
 # Docker bridges), flow-sb-lan (range -> private, link-local and shared networks behind the host, which the host
-# would forward; the internet stays reachable).
+# would forward; the internet stays reachable), flow-sb-incus (any container but Flow's -> the Incus API).
 reload=0
 policy() {
 	name="$1"
@@ -231,10 +252,20 @@ policy() {
 		done
 		reload=1
 	fi
+	stale="$(firewall-cmd --permanent --policy="$name" --list-rich-rules | while IFS= read -r rule; do
+		[ -z "$rule" ] || policy_rules "$name" | grep -qxF "$rule" || printf '%s\n' "$rule"
+	done)"
+	if [ -n "$stale" ]; then
+		log "removing firewalld policy $name's rules of earlier settings"
+		printf '%s\n' "$stale" | while IFS= read -r rule; do
+			run firewall-cmd -q --permanent --policy="$name" --remove-rich-rule="$rule"
+		done
+		reload=1
+	fi
 }
-policy "$POLICY_HOST"
-policy "$POLICY_DOCKER"
-policy "$POLICY_LAN"
+for p in $POLICIES; do
+	policy "$p"
+done
 if [ "$reload" = 1 ]; then
 	log "reloading firewalld (Docker re-applies its rules)"
 	run firewall-cmd -q --reload
@@ -307,6 +338,32 @@ else
 		grep -q '^https_address[= ]' "$MANIFEST" 2>/dev/null || record "https_address=$have"
 		run incus config set core.https_address "$INCUS_LISTEN" </dev/null
 	fi
+	# 5b. The listener once the address exists (see the header). Only for a specific address: a wildcard always binds.
+	# It leaves alone a listen address someone set since ("exit 0"); $$ is systemd's escape for a literal $.
+	lip="$(listen_ip)"
+	if [ -n "$lip" ]; then
+		lport="${INCUS_LISTEN##*:}"
+		listen_text="[Unit]
+Description=Flow: Incus API on $INCUS_LISTEN once Docker has made $BRIDGE
+After=docker.service incus.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'i=0; until ip -4 -o addr show to $lip/32 | grep -q .; do [ \$\$i -lt 120 ] || { echo \"$lip missing after 120s\" >&2; exit 1; }; i=\$\$((i+1)); sleep 1; done; [ \"\$\$(incus config get core.https_address </dev/null)\" = $INCUS_LISTEN ] || exit 0; ss -Hltn \"src $lip and sport = :$lport\" | grep -q . && exit 0; echo \"Incus does not listen on $INCUS_LISTEN: setting it again\"; incus config unset core.https_address </dev/null && incus config set core.https_address $INCUS_LISTEN </dev/null'
+
+[Install]
+WantedBy=docker.service"
+		if put_file "$LISTEN_UNIT_FILE" 0644 "$listen_text" "unit $LISTEN_UNIT"; then
+			run systemctl daemon-reload
+			run systemctl restart "$LISTEN_UNIT"
+		fi
+		if ! systemctl is-enabled --quiet "$LISTEN_UNIT" 2>/dev/null || ! systemctl is-active --quiet "$LISTEN_UNIT"; then
+			log "enabling $LISTEN_UNIT"
+			run systemctl enable --now --quiet "$LISTEN_UNIT"
+		fi
+	fi
 	if ! incus project show "$PROJECT" </dev/null >/dev/null 2>&1; then
 		log "creating project $PROJECT"
 		record "project $PROJECT"
@@ -366,7 +423,7 @@ wait_ban_first || true
 snapshot "$RUN_DIR/after"
 compare "$RUN_DIR/before" "$RUN_DIR/after" setup
 firewall-cmd -q --zone=docker --query-interface="$BRIDGE" || fail "$BRIDGE is not in firewalld zone docker"
-for p in "$POLICY_HOST" "$POLICY_DOCKER" "$POLICY_LAN"; do
+for p in $POLICIES; do
 	firewall-cmd --get-policies | tr ' ' '\n' | grep -qx "$p" || fail "policy $p is not active"
 	policy_rules "$p" | while IFS= read -r rule; do
 		firewall-cmd -q --policy="$p" --query-rich-rule="$rule" || echo "$p: $rule"
@@ -380,9 +437,13 @@ have_fp="$(trusted_fp)"
 iptables -C DOCKER-USER $RULE_SPEC 2>/dev/null || fail "the DOCKER-USER rule is missing"
 [ "$(iptables -S DOCKER-USER 2>/dev/null | grep -cF -- "-s $RANGE -i $BRIDGE")" = 1 ] || fail "the DOCKER-USER rule is not there exactly once"
 systemctl show -p After incus.service | grep -qw docker.service || fail "incus.service is not ordered after docker.service"
+if [ -n "$(listen_ip)" ]; then
+	systemctl is-active --quiet "$LISTEN_UNIT" || fail "$LISTEN_UNIT is not active"
+	ss -Hltn "src $(listen_ip) and sport = :${INCUS_LISTEN##*:}" | grep -q . || fail "Incus does not listen on $INCUS_LISTEN"
+fi
 user_first || fail "FORWARD jumps to DOCKER-FORWARD before DOCKER-USER: the DOCKER-USER rule never fires (restart Docker)"
 if [ "$FAILED" = 1 ]; then
 	log "verification failed; snapshots in $RUN_DIR"
 	exit 1
 fi
-log "done: Docker network $DOCKER_NETWORK ($BRIDGE), policies, DOCKER-USER rule, project $PROJECT, API $INCUS_LISTEN, certificates in $CERT_DIR; snapshots in $RUN_DIR"
+log "done: Docker network $DOCKER_NETWORK ($BRIDGE), policies, DOCKER-USER rule, project $PROJECT, API $INCUS_LISTEN (for $CONTAINER_ADDRESS only), certificates in $CERT_DIR; snapshots in $RUN_DIR"

@@ -102,9 +102,16 @@ if recorded "unit $RULE_UNIT"; then
 		[ "$DRY_RUN" = 1 ] && break
 	done
 fi
+# Stopping it changes nothing (no ExecStop): Incus keeps listening where it does.
+if recorded "unit $LISTEN_UNIT" && [ -f "$LISTEN_UNIT_FILE" ]; then
+	log "removing $LISTEN_UNIT"
+	run systemctl disable --now --quiet "$LISTEN_UNIT"
+	run rm -f "$LISTEN_UNIT_FILE"
+	run systemctl daemon-reload
+fi
 
 reload=0
-for p in "$POLICY_HOST" "$POLICY_DOCKER" "$POLICY_LAN"; do
+for p in $POLICIES; do
 	if recorded "policy $p" && firewall-cmd --permanent --get-policies | tr ' ' '\n' | grep -qx "$p"; then
 		log "deleting firewalld policy $p"
 		run firewall-cmd -q --permanent --delete-policy="$p"
@@ -114,7 +121,7 @@ done
 if [ "$reload" = 1 ]; then
 	run firewall-cmd -q --reload
 fi
-for p in "$POLICY_HOST" "$POLICY_DOCKER" "$POLICY_LAN"; do
+for p in $POLICIES; do
 	if recorded "policy $p" && [ -f "/etc/firewalld/policies/$p.xml.old" ]; then
 		run rm -f "/etc/firewalld/policies/$p.xml.old"
 	fi

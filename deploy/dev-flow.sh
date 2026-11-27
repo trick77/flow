@@ -17,10 +17,13 @@ SCRIPT=dev-flow
 . "$(dirname "$0")/host-lib.sh"
 DEST=/opt/flow-host
 ENV_FILE="${ENV_FILE:-/etc/flow-host/flow.env}"
-# Flow dials the listener; a wildcard listen address is reached on loopback.
-case "$INCUS_LISTEN" in
-0.0.0.0:* | "[::]:"* | :*) INCUS_URL="https://127.0.0.1:${INCUS_LISTEN##*:}" ;;
-*) INCUS_URL="https://$INCUS_LISTEN" ;;
+# Flow dials the listener Incus has now (a host-setup.sh re-run may have moved it), INCUS_LISTEN when Incus does not
+# say; a wildcard listen address is reached on loopback.
+LISTEN="$(incus config get core.https_address </dev/null 2>/dev/null || true)"
+LISTEN="${LISTEN:-$INCUS_LISTEN}"
+case "$LISTEN" in
+0.0.0.0:* | "[::]:"* | :*) INCUS_URL="https://127.0.0.1:${LISTEN##*:}" ;;
+*) INCUS_URL="https://$LISTEN" ;;
 esac
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -83,6 +86,16 @@ if [ ! -f "$ENV_FILE" ]; then
 			fi
 		done
 	} >"$ENV_FILE"
+fi
+# On every run, not only when the file is made: the env file wins over Environment=.
+if ! grep -qxF "BACKEND_INCUS_URL=$INCUS_URL" "$ENV_FILE"; then
+	echo "dev-flow: BACKEND_INCUS_URL=$INCUS_URL" >&2
+	{
+		grep -v '^BACKEND_INCUS_URL=' "$ENV_FILE" || true
+		echo "BACKEND_INCUS_URL=$INCUS_URL"
+	} >"$ENV_FILE.new"
+	chmod 0600 "$ENV_FILE.new"
+	mv -f "$ENV_FILE.new" "$ENV_FILE"
 fi
 
 # Flow on the host reaches the sandboxes through the bridge's route; the host-input policy only drops what

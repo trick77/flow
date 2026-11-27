@@ -29,8 +29,11 @@ services:
       - ./data:/data
       - ${INCUS_CERT_DIR:-/etc/flow-host/incus}:/etc/flow/incus:ro
     networks:
-      - sandbox
-      - proxy
+      sandbox:
+        # Static, outside Docker's and the sandboxes' ranges: host-setup.sh (its CONTAINER_ADDRESS, same name) lets
+        # only this address reach the Incus API.
+        ipv4_address: ${CONTAINER_ADDRESS:-172.30.1.2}
+      proxy: {}
     labels:
       traefik.enable: "true"
       # Flow is on two networks: the proxy must reach it on its own, never over the sandbox network.
