@@ -207,7 +207,7 @@ function harness(query: QueryFn, extra: { recordPath?: string } = {}) {
                 type: "stdio",
                 command: "/opt/flow/bin/flowd",
                 args: ["mcp"],
-                env: { FLOW_MCP_TOKEN: "t" },
+                env: { BACKEND_MCP_TOKEN: "t" },
               },
             },
             version: "0.1.0",
@@ -757,7 +757,7 @@ describe("stdio loop against a stand-in SDK", () => {
           type: "stdio",
           command: "/opt/flow/bin/flowd",
           args: ["mcp"],
-          env: { FLOW_MCP_TOKEN: "t" },
+          env: { BACKEND_MCP_TOKEN: "t" },
         },
       },
     });
