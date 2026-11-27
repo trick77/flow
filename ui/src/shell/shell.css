@@ -52,6 +52,12 @@
   display: none;
 }
 
+/* In place of the history while the session's sandbox does not run. */
+.confirm.sandbox-notice {
+  flex: 0 0 auto;
+  margin: 10px 16px 0;
+}
+
 /* The archive confirmation under the session header. */
 .confirm.hdr-confirm {
   flex: 0 0 auto;

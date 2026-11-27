@@ -81,6 +81,7 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
           <SessionView
             key={selected.id}
             session={selected}
+            sandbox={project?.sandbox}
             projectName={project?.name}
             EventSource={EventSource}
             onStatus={onStatus}

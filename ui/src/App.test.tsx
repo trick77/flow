@@ -78,6 +78,11 @@ function serve(server: Server) {
       if (url === "/api/projects") {
         return new Response(JSON.stringify({ items: server.projects }));
       }
+      if (init?.method === "POST" && url.endsWith("/sandbox/start")) {
+        return new Response(JSON.stringify({ state: "setup" }), {
+          status: 202,
+        });
+      }
       return new Response(JSON.stringify({ code: "not_found" }), {
         status: 404,
       });
@@ -234,6 +239,42 @@ describe("App", () => {
     expect(server.calls.filter((c) => c === "/api/sessions").length).toBe(
       before + 1,
     );
+  });
+
+  it("says the session's sandbox is stopped and starts it from there", async () => {
+    const server: Server = {
+      sessions: [summary({ status: "failed" })],
+      projects: [{ ...project, sandbox: { state: "stopped" } }],
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    expect(await screen.findByText(en.shell.sandboxStopped)).toBeVisible();
+    // A log that ends mid-turn (the stop wrote no turn.ended) shows no running
+    // turn: the row, where Flow ended it, wins while the sandbox is down.
+    emitDemo(FakeEventSource.forUrl("/api/sessions/s-done/events")[0], 16);
+    expect(screen.queryByRole("button", { name: en.composer.stop })).toBeNull();
+    expect(screen.queryByText(en.timeline.workingNow)).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: en.shell.startSandbox }),
+    );
+    expect(server.calls).toContain("/api/projects/p1/sandbox/start");
+    expect(screen.getByText(en.shell.sandboxStarting)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: en.shell.startSandbox }),
+    ).toBeNull();
+
+    const app = FakeEventSource.forUrl("/api/events")[0];
+    act(() => {
+      app.emit("app", {
+        kind: "sandbox.updated",
+        projectId: "p1",
+        sandbox: { state: "warm" },
+      });
+    });
+    expect(screen.queryByText(en.shell.sandboxStarting)).toBeNull();
+    expect(screen.queryByText(en.shell.sandboxStopped)).toBeNull();
   });
 
   it("opens Projects and Settings from the header, also without sessions", async () => {

@@ -21,4 +21,13 @@ export const shell = {
   confirmArchiveAction: "Archive",
   archiving: "Archiving…",
   cancel: "Cancel",
+  // In place of a session's history while its sandbox does not run.
+  sandboxStopped:
+    "This session's sandbox is stopped. Its history and agent come back when it runs.",
+  sandboxFailed:
+    "This session's sandbox failed. Start it again to see its history and continue.",
+  sandboxStopping: "This session's sandbox is stopping.",
+  sandboxDeleting: "This session's sandbox is being deleted.",
+  sandboxStarting: "Starting the sandbox…",
+  startSandbox: "Start sandbox",
 };
