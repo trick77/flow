@@ -374,17 +374,33 @@ func (s *Service) Update(ctx context.Context, id string, in apitypes.SessionUpda
 			return apitypes.Session{}, err
 		}
 	}
-	// Only the columns this request changes: the follower mirrors settings into the same row without the session's
-	// lock, and a whole-row write could put an older mode, model or provider session id back.
-	err = s.Store.Update(ctx, id, Patch{Title: title, Model: set.Model, Mode: string(set.Mode)})
+	// Only the title: model and mode reach the row through the session.settings the host logged for the command,
+	// which the follower mirrors, as it mirrors the agent's correction after it. Written here as well, a write landing
+	// after a mirrored correction would put the refused value back.
+	if title != "" {
+		err = s.Store.Update(ctx, id, Patch{Title: title})
+	}
 	if err == nil {
 		se, err = s.Store.Get(ctx, id)
 	}
 	if err != nil {
 		return apitypes.Session{}, err
 	}
-	s.Publish(ctx, id)
-	return s.Describe(ctx, se)
+	if title != "" {
+		s.Publish(ctx, id) // a settings change is announced by the follower's mirror, with the values in force
+	}
+	out, err := s.Describe(ctx, se)
+	if err != nil {
+		return apitypes.Session{}, err
+	}
+	// The answer names the change as sent; the follower's session.updated carries what the agent runs with.
+	if set.Model != "" {
+		out.Summary.Model = set.Model
+	}
+	if set.Mode != "" {
+		out.Summary.Mode = apitypes.PermissionMode(set.Mode)
+	}
+	return out, nil
 }
 
 // MarkSeen records that the owner has seen the session up to seq; unseen clears once that reaches its last seq.
@@ -449,13 +465,15 @@ func (s *Service) Spec(ctx context.Context, se Session) (flowdproto.SessionSpec,
 // session's Lock: an Archive waits for it, or it finds the session archived.
 func (s *Service) Host(ctx context.Context, id string) (flowdproto.API, error) {
 	defer s.Lock(id)()
-	api, _, err := s.ensureHost(ctx, id, "")
+	api, _, err := s.ensureHost(ctx, id, "", true)
 	return api, err
 }
 
 // ensureHost is Host without the lock (callers hold it): reason goes into a started host's session.resumed, and
-// sandbox_start has it leave its queue as it is. started: this call started the host.
-func (s *Service) ensureHost(ctx context.Context, id string, reason event.ResumeReason) (flowdproto.API, bool, error) {
+// sandbox_start has it leave its queue as it is. started: this call started the host. mayStart false never starts
+// a stopped sandbox (Warm instead of Ensure): its sandboxes.ErrNotWarm or sandboxes.ErrNotFound is returned as is,
+// any other failure of Warm as sandbox_unavailable.
+func (s *Service) ensureHost(ctx context.Context, id string, reason event.ResumeReason, mayStart bool) (flowdproto.API, bool, error) {
 	se, err := s.Store.Get(ctx, id)
 	if err != nil {
 		return nil, false, err
@@ -469,7 +487,15 @@ func (s *Service) ensureHost(ctx context.Context, id string, reason event.Resume
 	}
 	spec.ResumeReason = reason
 	for attempt := 0; ; attempt++ {
-		api, err := s.Sandboxes.Ensure(ctx, se.ProjectID)
+		var api flowdproto.API
+		if mayStart {
+			api, err = s.Sandboxes.Ensure(ctx, se.ProjectID)
+		} else {
+			api, err = s.Sandboxes.Warm(ctx, se.ProjectID)
+			if err != nil && !errors.Is(err, sandboxes.ErrNotWarm) && !errors.Is(err, sandboxes.ErrNotFound) {
+				return nil, false, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+			}
+		}
 		if err != nil {
 			return nil, false, err
 		}
@@ -495,28 +521,19 @@ func (s *Service) ensureHost(ctx context.Context, id string, reason event.Resume
 // So a host that is down is started as for a lost turn (it leaves the queue as it is), gets the command, and, with
 // stopAfter, is stopped again when this call started it: the next message's start then drains the queue in order.
 // Under the session's lock throughout. Like Command it starts a stopped sandbox; mayStart false sends nothing
-// there (ran false), as CommandIfRunning.
+// there (ran false), as CommandIfRunning: the sandbox is asked under the lock, so one stopped while this call
+// waited for it stays stopped.
 func (s *Service) CommandHeld(ctx context.Context, id, cmdID string, kind event.CommandKind, payload any,
 	mayStart, stopAfter bool) (flowdproto.CommandResult, bool, error) {
 	c, err := event.NewCommand(cmdID, id, kind, payload)
 	if err != nil {
 		return flowdproto.CommandResult{}, false, err
 	}
-	if !mayStart {
-		se, err := s.Store.Get(ctx, id)
-		if err != nil {
-			return flowdproto.CommandResult{}, false, err
-		}
-		_, err = s.Sandboxes.Warm(ctx, se.ProjectID)
-		if errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound) {
-			return flowdproto.CommandResult{}, false, nil
-		}
-		if err != nil {
-			return flowdproto.CommandResult{}, false, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
-		}
-	}
 	defer s.Lock(id)()
-	api, started, err := s.ensureHost(ctx, id, event.ResumeReasonSandboxStart)
+	api, started, err := s.ensureHost(ctx, id, event.ResumeReasonSandboxStart, mayStart)
+	if !mayStart && (errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound)) {
+		return flowdproto.CommandResult{}, false, nil
+	}
 	if err != nil {
 		return flowdproto.CommandResult{}, false, err
 	}
@@ -735,15 +752,7 @@ func (s *Service) CommandIfRunning(ctx context.Context, id, cmdID string, kind e
 	if se.ArchivedAt != nil {
 		return flowdproto.CommandResult{}, false, apitypes.Fail(apitypes.ErrorCodeSessionArchived, "")
 	}
-	_, err = s.Sandboxes.Warm(ctx, se.ProjectID)
-	if errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound) {
-		return flowdproto.CommandResult{}, false, nil
-	}
-	if err != nil {
-		return flowdproto.CommandResult{}, false, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
-	}
-	res, _, err := s.CommandHeld(ctx, id, cmdID, kind, payload, true, true)
-	return res, true, err
+	return s.CommandHeld(ctx, id, cmdID, kind, payload, false, true)
 }
 
 // Summary is the sidebar's view of a session.
@@ -836,6 +845,7 @@ func (s *Service) follow(ctx context.Context, id string, f *follower) {
 		}
 		s.mu.Unlock()
 	}()
+	unknown := map[string]bool{}
 	for ctx.Err() == nil {
 		se, err := s.Store.Get(ctx, id)
 		switch {
@@ -848,7 +858,7 @@ func (s *Service) follow(ctx context.Context, id string, f *follower) {
 			api, err := s.Sandboxes.Warm(ctx, se.ProjectID)
 			switch {
 			case err == nil:
-				s.mirror(ctx, api, se)
+				s.mirror(ctx, api, se, unknown)
 			case errors.Is(err, sandboxes.ErrNotWarm):
 				s.turnCutOff(ctx, se)
 			}
@@ -883,8 +893,27 @@ func (s *Service) turnCutOff(ctx context.Context, se Session) {
 	s.Publish(ctx, se.ID)
 }
 
-// mirror follows one stream from the row's last seq until it fails.
-func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session) {
+// dropUnknown blanks a status, mode or mode cap the contract does not list (a newer contract's value, a tampered
+// log line): the sessions table's CHECKs would refuse the whole mirror, and the follower would retry that event
+// for good. The event's seq still counts. unknown holds the values logged already for this session.
+func (s *Service) dropUnknown(id string, m *Mirror, unknown map[string]bool) {
+	drop := func(field string, v *string, ok bool) {
+		if *v == "" || ok {
+			return
+		}
+		if key := field + "=" + *v; !unknown[key] {
+			unknown[key] = true
+			s.Log.Warn("follow: value not in the contract, not mirrored", "session", id, "field", field, "value", *v)
+		}
+		*v = ""
+	}
+	drop("status", &m.Status, slices.Contains(event.SessionStatusValues, event.SessionStatus(m.Status)))
+	drop("mode", &m.Mode, modeRank(event.PermissionMode(m.Mode)) >= 0)
+	drop("modeCap", &m.ModeCap, modeRank(event.PermissionMode(m.ModeCap)) >= 0)
+}
+
+// mirror follows one stream from the row's last seq until it fails; unknown is dropUnknown's, kept by the follower.
+func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session, unknown map[string]bool) {
 	last := se.LastSeq
 	ms := metering.Session{ID: se.ID, ProjectID: se.ProjectID, ParentID: se.ParentID, Provider: se.Provider,
 		ClaudeAuth: se.ClaudeAuth, Model: se.Model}
@@ -899,7 +928,7 @@ func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session) {
 			continue
 		}
 		last = e.Seq
-		m := Mirror{LastSeq: e.Seq}
+		m := Mirror{LastSeq: e.Seq, At: e.TS}
 		publish := false
 		switch e.Kind {
 		case event.KindSessionStatus:
@@ -930,6 +959,7 @@ func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session) {
 				}
 			}
 		}
+		s.dropUnknown(se.ID, &m, unknown)
 		if s.Meter != nil {
 			if err := s.Meter.Observe(ctx, ms, e); err != nil {
 				if ctx.Err() == nil { // a shutdown cutting a write off is no error

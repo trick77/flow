@@ -6,6 +6,7 @@ package sessions
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // ErrNotFound means no such session.
@@ -25,7 +26,9 @@ type ListFilter struct {
 
 // Mirror is what following a log changes on a session row, applied in one statement.
 type Mirror struct {
-	LastSeq           int64
+	LastSeq int64
+	// At is the event's time: the turn's start and the session's last activity. Zero is now.
+	At                time.Time
 	Status            string
 	Unseen            bool
 	ProviderSessionID string

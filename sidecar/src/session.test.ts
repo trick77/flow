@@ -1180,6 +1180,49 @@ describe("stdio loop against a stand-in SDK", () => {
     });
   });
 
+  it("a refused model is undone on record and for the next query", async () => {
+    const sdk = fakeSDK([
+      async (ctx) => {
+        const u = await ctx.next();
+        ctx.emit(result(u));
+        await ctx.next();
+        throw new Error("exited");
+      },
+      async (ctx) => {
+        const u = await ctx.next();
+        ctx.emit(result(u));
+        await ctx.next();
+      },
+    ]);
+    const query: QueryFn = (params) =>
+      Object.assign(sdk.query(params), {
+        setModel: async () => {
+          throw new Error("model not available");
+        },
+      });
+    const h = harness(query);
+    h.start({ model: "claude-opus-5-5" });
+    h.send("message.send", { messageId: "m1", text: "a", origin: "user" });
+    await h.kind("turn.ended");
+    const cmd = h.send("settings.set", { model: "claude-nope" });
+    expect(await h.kind("notice")).toMatchObject({
+      cmd,
+      data: { code: "model_change_failed" },
+    });
+    expect(await h.kind("session.settings")).toMatchObject({
+      cmd,
+      data: { model: "claude-opus-5-5" },
+    });
+    // The first query exits with the next turn; the one after starts a new
+    // query on the model in force.
+    h.send("message.send", { messageId: "m2", text: "b", origin: "user" });
+    await h.kind("turn.ended");
+    h.send("message.send", { messageId: "m3", text: "c", origin: "user" });
+    await h.kind("turn.ended");
+    await h.close();
+    expect(sdk.calls[1].options.model).toBe("claude-opus-5-5");
+  });
+
   it("review 10: a request too large to show is denied, not left waiting", async () => {
     let answer: PermissionResult | undefined;
     const many = Array.from({ length: 200_000 }, (_, i) => `k${i}`);

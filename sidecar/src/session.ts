@@ -433,16 +433,25 @@ export class Session {
       }
     }
     if (model !== undefined) {
+      const before = this.model;
       this.model = model;
       if (this.q !== undefined) {
         try {
           await this.q.setModel(model);
         } catch (err) {
+          // As for the mode: the host logged the new model already.
           this.deps.log(`setModel failed: ${errorText(err)}`);
+          this.model = before;
           await this.emit(
             notice("model_change_failed", "error", { model }),
             cmd,
           );
+          if (before !== undefined) {
+            await this.emit(
+              { kind: "session.settings", data: { model: before } },
+              cmd,
+            );
+          }
         }
       }
     }

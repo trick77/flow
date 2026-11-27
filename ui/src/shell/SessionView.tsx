@@ -135,6 +135,7 @@ export function SessionView({
   const stream = useSessionStream(session.id, {
     EventSource,
     onStatus: down ? undefined : onStatus,
+    sinceSeq: session.lastSeq,
   });
   const folded = useMemo(() => foldEvents(stream), [stream]);
   const status = down ? session.status : (folded.status ?? session.status);
