@@ -612,7 +612,7 @@ export class Session {
 
   // cancelRequests answers every waiting request as denied: on interrupt,
   // shutdown, or a turn that ended without them. The host expires the one
-  // it shows when the turn ends.
+  // it shows on the interrupt or when the turn ends.
   private cancelRequests(message: string, interrupt = false): void {
     const all = [
       ...(this.active ? [this.active] : []),

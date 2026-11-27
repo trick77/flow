@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	kitauth "github.com/trick77/ship/kit/auth"
 
@@ -527,5 +528,17 @@ func TestNewOIDCUnreachableProvider(t *testing.T) {
 	if _, err := NewOIDC(ctx, config.OIDC{PublicURL: publicURL, Issuer: srv.URL, ClientID: "flow",
 		ClientSecret: "x", Subject: "s", SessionSecret: secret, SessionTTL: time.Hour}); err == nil {
 		t.Fatal("NewOIDC without a provider succeeded")
+	}
+}
+
+// A capped log text never ends in half a rune, also when one straddles the cap.
+func TestCapText(t *testing.T) {
+	s := strings.Repeat("x", maxLogText-1) + "é" + "tail" // é is two bytes: bytes maxLogText-1 and maxLogText
+	got := capText(s)
+	if !utf8.ValidString(got) || len(got) > maxLogText+len("…") || got != strings.Repeat("x", maxLogText-1)+"…" {
+		t.Errorf("capText = %q", got)
+	}
+	if short := "ünïcode"; capText(short) != short {
+		t.Errorf("short text changed: %q", capText(short))
 	}
 }

@@ -36,6 +36,7 @@ type fakeSandboxes struct {
 	warmErr error
 	forgets int
 	ensures atomic.Int32
+	warms   atomic.Int32
 	// ensuring, when set, is told on every Ensure, which then waits for proceed (a bring-up in progress).
 	ensuring chan struct{}
 	proceed  chan struct{}
@@ -51,6 +52,7 @@ func (f *fakeSandboxes) Ensure(context.Context, string) (flowdproto.API, error) 
 }
 
 func (f *fakeSandboxes) Warm(context.Context, string) (flowdproto.API, error) {
+	f.warms.Add(1)
 	if f.warmErr != nil {
 		return nil, f.warmErr
 	}
@@ -221,6 +223,48 @@ func TestFollow_survivesTransientStoreErrors(t *testing.T) {
 			t.Fatal("the ended follower kept its entry")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A follower whose sandbox does not run asks ever more rarely (each look takes the project's lock and asks Incus),
+// and at once when the project's sandbox changes; another project's change does not wake it.
+func TestFollow_backsOffWhileTheSandboxIsDown(t *testing.T) {
+	r := newRig(t)
+	r.svc.MaxRetry = time.Hour
+	if err := r.svc.Store.Create(t.Context(), Session{ID: "s1", ProjectID: "p1", Name: "s1", Provider: "claude",
+		Model: "m", Mode: "ask", Branch: "b"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	r.sb.warmErr = sandboxes.ErrNotWarm
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	start := time.Now()
+	if err := r.svc.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Waits of 10, 20, 40, 80, 160, 320 ms: the seventh look comes after about 630 ms (a fixed 10 ms: about 63).
+	for r.sb.warms.Load() < 7 {
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("%d looks", r.sb.warms.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if el := time.Since(start); el < 400*time.Millisecond {
+		t.Errorf("seven looks within %s: no backoff", el)
+	}
+	n := r.sb.warms.Load() // the next wait is 640 ms
+	r.hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: "p2"})
+	time.Sleep(100 * time.Millisecond)
+	if got := r.sb.warms.Load(); got != n {
+		t.Errorf("another project's change woke the follower: %d looks, want %d", got, n)
+	}
+	r.hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: "p1"})
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for r.sb.warms.Load() == n {
+		if time.Now().After(deadline) {
+			t.Fatal("the project's sandbox change did not wake the follower")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -640,6 +684,29 @@ func TestSQL(t *testing.T) {
 	se, _ := s.Get(ctx, "c")
 	if se.Title != "new" || se.LastSeq != 9 || se.Unseen || se.SeenSeq != 9 || se.TurnStartedAt != nil {
 		t.Errorf("row %+v", se)
+	}
+	// A turn's end the owner saw already (the session stream's mark ahead of the mirror) stays seen; a later one and a
+	// turn cut off by a stop (no seq) do not.
+	if err := s.ApplyMirror(ctx, "c", Mirror{LastSeq: 9, TurnEnded: true, Unseen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if se, _ := s.Get(ctx, "c"); se.Unseen {
+		t.Error("a turn's end seen already marked unseen")
+	}
+	if err := s.ApplyMirror(ctx, "c", Mirror{LastSeq: 10, TurnEnded: true, Unseen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if se, _ := s.Get(ctx, "c"); !se.Unseen {
+		t.Error("a turn's end after the seen seq not marked unseen")
+	}
+	if err := s.MarkSeen(ctx, "c", 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyMirror(ctx, "c", Mirror{Status: "failed", Unseen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if se, _ := s.Get(ctx, "c"); !se.Unseen {
+		t.Error("a turn cut off by a stop not marked unseen")
 	}
 	if err := s.AddWorktree(ctx, Worktree{ID: "w", SessionID: "c", RepoID: "r1", Branch: "b", Path: "/p", BaseRef: "origin/master"}); err != nil {
 		t.Fatal(err)

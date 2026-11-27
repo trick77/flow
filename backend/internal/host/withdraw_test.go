@@ -65,3 +65,60 @@ func TestDraft_withdrawnRequestFreesTheSlot(t *testing.T) {
 	}
 	gapless(t, r.events())
 }
+
+// An interrupt expires the open request at once: the adapter answers it as the interrupt it is, so a reply that
+// comes before turn.ended reaches no one. It is refused (not pending), the log holds one expired resolution and the
+// session's mode stays.
+func TestInterrupt_expiresTheOpenRequest(t *testing.T) {
+	f := newFake()
+	r := start(t, filepath.Join(t.TempDir(), "events.jsonl"), f)
+	if _, err := r.h.Command(send(t, "m1", "go")); err != nil {
+		t.Fatal(err)
+	}
+	<-f.got
+	f.out <- draft(event.KindPlanProposed, event.PlanProposed{RequestID: "pl1", Plan: "do it"})
+	r.waitKind(event.KindPlanProposed, 1)
+	r.h.mu.Lock()
+	mode := r.h.mode
+	r.h.mu.Unlock()
+	if _, err := r.h.Command(cmd(t, "i1", event.CmdTurnInterrupt, event.TurnInterrupt{})); err != nil {
+		t.Fatal(err)
+	}
+	if c := <-f.got; c.Kind != event.CmdTurnInterrupt {
+		t.Fatalf("adapter got %s", c.Kind)
+	}
+	r.waitKind(event.KindPlanResolved, 1)
+	if s := r.h.Hello(0).Status; s != event.SessionStatusWorking {
+		t.Errorf("status after the interrupt %s, want working until the turn ends", s)
+	}
+	var ce *CommandError
+	_, err := r.h.Command(cmd(t, "r1", event.CmdPlanReply, event.PlanReply{RequestID: "pl1",
+		Decision: event.PlanReplyDecisionApproved, Mode: event.PermissionModeAcceptEdits}))
+	if !errors.As(err, &ce) || ce.Code != hostproto.CodeNotPending {
+		t.Errorf("reply after the interrupt: %v", err)
+	}
+	r.h.mu.Lock()
+	if r.h.mode != mode {
+		t.Errorf("mode %s after a refused reply, want %s", r.h.mode, mode)
+	}
+	r.h.mu.Unlock()
+	f.out <- draft(event.KindTurnEnded, event.TurnEnded{Outcome: event.TurnOutcomeInterrupted})
+	evs := r.waitKind(event.KindTurnEnded, 1)
+	if n := count(evs, event.KindPlanResolved); n != 1 {
+		t.Errorf("%d plan resolutions, want the one expired", n)
+	}
+	for _, e := range evs {
+		if e.Kind == event.KindPlanResolved {
+			p, _ := e.Payload()
+			if d := p.(*event.PlanResolved).Decision; d != event.PlanDecisionExpired {
+				t.Errorf("plan resolved %s, want expired", d)
+			}
+		}
+	}
+	select {
+	case c := <-f.got:
+		t.Errorf("adapter got %s after the interrupt", c.Kind)
+	default:
+	}
+	gapless(t, r.events())
+}

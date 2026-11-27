@@ -27,8 +27,9 @@ type Sandboxes interface {
 	// Describe is the project's sandbox as the API shows it.
 	Describe(ctx context.Context, projectID string) apitypes.Sandbox
 	// Delete stops and deletes the project's sandbox instance and keeps anything from bringing it up again; an
-	// *apitypes.Error (sandbox_busy, sandbox_unavailable) when it cannot.
-	Delete(ctx context.Context, projectID string) error
+	// *apitypes.Error (sandbox_busy, sandbox_unavailable) when it cannot. Then rows removes the project's rows with
+	// no bring-up in between; its error is returned as is, the project left usable without an instance.
+	Delete(ctx context.Context, projectID string, rows func(context.Context) error) error
 }
 
 // API implements httpapi.Projects (list, create, get, delete; the rest answer not_implemented).
@@ -241,12 +242,13 @@ func (a *API) DeleteProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := a.Sandboxes.Delete(r.Context(), id); err != nil {
-		httpapi.WriteError(w, err)
-		return
+	rows := func(ctx context.Context) error {
+		if err := a.Store.Delete(ctx, id); err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		return nil
 	}
-	// The instance is gone whatever the caller does now: the rows must follow it.
-	if err := a.Store.Delete(context.WithoutCancel(r.Context()), id); err != nil && !errors.Is(err, ErrNotFound) {
+	if err := a.Sandboxes.Delete(r.Context(), id, rows); err != nil {
 		if errors.Is(err, ErrHasSessions) {
 			err = apitypes.Fail(apitypes.ErrorCodeProjectHasSessions, "")
 		}

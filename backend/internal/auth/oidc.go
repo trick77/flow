@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	kitauth "github.com/trick77/ship/kit/auth"
 
@@ -172,12 +173,16 @@ func (o *OIDC) AuthCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, SignInFailed, http.StatusFound)
 }
 
-// capText keeps the first maxLogText bytes of s.
+// capText keeps at most the first maxLogText bytes of s, cut on a rune boundary: the log line stays valid UTF-8.
 func capText(s string) string {
-	if len(s) > maxLogText {
-		return s[:maxLogText] + "…"
+	if len(s) <= maxLogText {
+		return s
 	}
-	return s
+	n := maxLogText
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 // AuthLogout implements httpapi.Auth: the session lives in the cookie alone, so clearing it is the sign-out. It
