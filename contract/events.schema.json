@@ -42,7 +42,8 @@
         { "kind": "gate.started", "payload": "GateStarted" },
         { "kind": "gate.finished", "payload": "GateFinished" },
         { "kind": "notice", "payload": "Notice" },
-        { "kind": "live.snapshot", "payload": "LiveSnapshot", "ephemeral": true }
+        { "kind": "live.snapshot", "payload": "LiveSnapshot", "ephemeral": true },
+        { "kind": "provider.passthrough", "payload": "ProviderPassthrough" }
       ]
     },
     "Command": {
@@ -202,7 +203,11 @@
     "TurnStarted": {
       "type": "object",
       "required": ["messageId"],
-      "properties": { "messageId": { "type": "string" } }
+      "properties": {
+        "messageId": { "type": "string" },
+        "provider": { "$ref": "#/$defs/Provider", "description": "The session's provider, written by the host." },
+        "model": { "type": "string", "description": "The model the session is set to as the turn starts, written by the host. A session can change model between turns." }
+      }
     },
     "TurnOutcome": {
       "type": "string",
@@ -226,8 +231,21 @@
         "outcome": { "$ref": "#/$defs/TurnOutcome" },
         "durationMs": { "type": "integer", "format": "int64" },
         "usage": { "$ref": "#/$defs/Usage" },
-        "costUsd": { "type": "number" },
-        "errorCode": { "type": "string", "description": "A code, never a sentence: max_turns, budget, provider_error, ..." }
+        "costUsd": { "type": "number", "description": "The turn's cost as the provider reports it; absent when it reports none (not the same as 0)." },
+        "errorCode": { "type": "string", "description": "A code, never a sentence: max_turns, budget, provider_error, ..." },
+        "provider": { "$ref": "#/$defs/Provider" },
+        "model": { "type": "string", "description": "The model the provider reports for this turn: the one that carried most of its cost when it used several (subagents). Absent when the adapter cannot tell; readers fall back to turn.started.model." }
+      }
+    },
+    "ProviderPassthrough": {
+      "type": "object",
+      "description": "A provider message the adapter does not know, passed through instead of dropped. Readers show it as a plain row: name plus collapsible raw content.",
+      "required": ["provider", "name", "raw"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/Provider" },
+        "name": { "type": "string", "description": "The provider's own name for the message (Claude: type, or type/subtype; OpenCode: the event type)." },
+        "raw": { "description": "The provider message as received. Over 16 KiB of encoded JSON: the first 16 KiB of that JSON as a string, and rawTruncated set." },
+        "rawTruncated": { "type": "boolean" }
       }
     },
     "AssistantText": {
@@ -272,7 +290,8 @@
         "pattern": { "type": "string" },
         "url": { "type": "string" },
         "description": { "type": "string", "description": "The agent's own short description (subagent title, Bash description)." },
-        "input": { "description": "The raw tool input, for detail views." }
+        "input": { "description": "The raw tool input, for detail views; for a tool the adapter does not know (kind other), all Flow shows of the call besides its name." },
+        "inputTruncated": { "type": "boolean", "description": "The writer shortened input to keep the event under the line limit: input is then the first part of its JSON, as a string." }
       }
     },
     "ToolProgress": {
@@ -317,7 +336,9 @@
         "result": { "$ref": "#/$defs/ToolResult" },
         "output": { "type": "string", "description": "Tool output, at most 16 KiB: head and tail when longer." },
         "outputTruncated": { "type": "boolean" },
-        "durationMs": { "type": "integer", "format": "int64" }
+        "durationMs": { "type": "integer", "format": "int64" },
+        "rawResult": { "description": "The tool's result as the provider returned it when it is structured (not plain text): an unknown tool's or an MCP tool's result object. Over 16 KiB of encoded JSON: the first 16 KiB of that JSON as a string, and rawResultTruncated set." },
+        "rawResultTruncated": { "type": "boolean" }
       }
     },
     "PermissionKind": { "type": "string", "enum": ["command", "edit", "write", "read", "web", "mcp", "other"] },

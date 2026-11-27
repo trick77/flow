@@ -131,6 +131,10 @@ func (d *Doc) goType(s *Schema, required bool, imports map[string]bool) (string,
 	case s.Type == "integer":
 		return "int", nil
 	case s.Type == "number":
+		// An optional number is a pointer: absent and zero mean different things (a cost not reported is not free).
+		if !required {
+			return "*float64", nil
+		}
 		return "float64", nil
 	case s.Type == "boolean":
 		return "bool", nil

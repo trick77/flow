@@ -43,6 +43,8 @@ type Response struct {
 	Error     string `json:"error,omitempty"`
 	Hello     *Hello `json:"hello,omitempty"`
 	Duplicate bool   `json:"duplicate,omitempty"`
+	// Queued: the command was a message.send that waits in the queue behind the running turn.
+	Queued bool `json:"queued,omitempty"`
 }
 
 // Error codes.

@@ -38,6 +38,36 @@ Flow's provider-neutral contract between agent adapters, flowd, Flow and the UI.
 - Writers add kinds and optional fields only; renaming, retyping or making a field required is a new major version.
 - Enum values are part of the contract: a new value is a minor change readers must tolerate (show a neutral row).
 
+## Pass-through: nothing an agent emits is swallowed
+
+- An adapter passes every provider message it does not map through as `provider.passthrough`: `provider`, `name`
+  (the provider's own name: Claude `type` or `type/subtype`, OpenCode the event `type`) and `raw`, the message as
+  received. Never dropped, never folded into a notice.
+- A tool the adapter does not know is a plain `tool.started` with kind `other`, the provider's `name` and the whole
+  `input`, and a `tool.finished` with `output` (its text) and `rawResult` (its structured result, when it has one).
+  No per-tool schema is needed.
+- Size cap as for tool output: `raw` and `rawResult` over 16 KiB of encoded JSON become the first 16 KiB of that
+  JSON as a string, with `rawTruncated` / `rawResultTruncated` set. `input` keeps its existing bound (the writer
+  shortens it so the event stays under `MaxLine`); when it does, `input` is the first part of its JSON as a string
+  and `inputTruncated` is set.
+- The UI renders `provider.passthrough` as a plain generic row (name, collapsible raw content) and an unknown tool
+  as a tool row with its name, input and result. Proper rendering follows when the kind is mapped.
+- Every pass-through is counted in Flow's metering ledger (`internal/metering`, counter `passthrough`, class = name),
+  so a new provider capability shows up in the numbers before anyone maps it.
+
+## Model per turn
+
+A session can change model between turns (`settings.set` → `session.settings`), so the model is per turn:
+`turn.started` carries `provider` and `model` as the session is set when the turn starts (written by the host);
+`turn.ended` carries the `provider` and `model` the provider reports (Claude: the `modelUsage` key whose `costUSD`
+grew most since the previous `result`, so subagents on a cheaper model do not take the turn; OpenCode: the steps'
+model, **provisional**). Claude's `total_cost_usd` and `modelUsage` are cumulative over the SDK process, not per
+turn: the sidecar emits the difference to the previous `result` (a total that drops, `/clear`, counts from zero).
+After a resume it needs the session's earlier cost as `priorCostUsd` in its start spec; without it (the host does
+not send one yet) the first turn after the resume reports no `costUsd`. Readers take `turn.ended.model`, else `turn.started.model`, else the last `session.settings` /
+`session.started` model. `usage`, `costUsd` and `durationMs` stay as they are; an absent `costUsd` means the
+provider reported none, not a free turn (the generator binds optional numbers as Go pointers for this).
+
 ## Status
 
 The host derives `session.status` and writes it on change; Flow mirrors it into `sessions.status`:
@@ -79,6 +109,7 @@ member. The spec's "waiting" is `question`/`plan`; "needs approval" is `approval
 | per-repo diffs | API `getSessionDiff` |
 | statuses and sidebar sections | `session.status`, API `SessionSummary.status`/`unseen` |
 | sandbox chip, setup log, Claude signed in, config sync line | API `Sandbox.state`, `getSetupLog`, `Connections.claude`, `Profile.configSync` |
+| generic row for anything not mapped yet | `provider.passthrough`; `tool.started` kind `other` + `tool.finished.rawResult` |
 
 **Provisional:** the PR set's free-text `note` ("Opens once v0.9.0 is tagged") has no source yet; it needs an agent
 tool the spec does not list.
@@ -98,7 +129,7 @@ Sources: [typescript](https://code.claude.com/docs/en/agent-sdk/typescript),
 | `assistant` content `text` | `assistant.text` |
 | `assistant` content `thinking` | `assistant.thinking` |
 | `assistant` content `tool_use` | `tool.started` (`kind` from the tool name: Read→read, Edit/MultiEdit→edit, Write→write, Grep/Glob→search, Bash→bash, WebFetch/WebSearch→web, TodoWrite/Task*→todo, Agent/Task→subagent, AskUserQuestion→question, ExitPlanMode→plan, `mcp__*`→mcp) |
-| `user` content `tool_result` (`is_error`) | `tool.finished` (`ok`/`error`; `result` from the tool's structured output where present) |
+| `user` content `tool_result` (`is_error`) | `tool.finished` (`ok`/`error`; `result` from the tool's structured output where present; a Bash result carries no exit code, so `result.exitCode` stays unset) |
 | any message with `parent_tool_use_id` | same mapping, `parentTool` set |
 | `tool_progress` | `tool.progress` |
 | `TodoWrite` input `todos[{content,status,activeForm}]`; `TaskCreate`/`TaskUpdate` | `todo.updated` (the sidecar keeps the list) |
@@ -106,11 +137,42 @@ Sources: [typescript](https://code.claude.com/docs/en/agent-sdk/typescript),
 | `canUseTool("AskUserQuestion", {questions})` | `question.asked`; reply = allow with `updatedInput.answers` keyed by question text |
 | `canUseTool("ExitPlanMode", {plan?})` | `plan.proposed` (**provisional**: approval path not documented; allow = approve, deny + message = keep planning) |
 | `permission.reply` allow_once / allow_always / deny | `{behavior:"allow"}` / allow + `updatedPermissions` = suggestions / `{behavior:"deny", message}` |
-| `result` `success` | `turn.ended {completed}` with `usage`, `total_cost_usd`, `duration_ms` |
+| `result` `success` | `turn.ended {completed}` with `usage`, `duration_ms`, `costUsd` = this turn's share of the cumulative `total_cost_usd`; `model` from `modelUsage` (largest `costUSD` growth), `provider` claude |
+| `assistant` content `tool_use` of a tool not in the list above | `tool.started` kind `other`, `name` and `input` as given |
+| `user` message `tool_use_result` (structured result) | `tool.finished.rawResult` |
+| any other message type or subtype | `provider.passthrough` (`name` = `type` or `type/subtype`) |
 | `result` `error_during_execution` after `interrupt()` | `turn.ended {interrupted}` |
 | `result` other `error_*` | `turn.ended {error, errorCode}` (max_turns, budget, …) |
 | `system`/`compact_boundary` | `notice {context_compacted}` |
-| `rate_limit_event`, `system`/`api_retry`, `auth_status` errors | `notice` (`rate_limited`, `api_retry`, `auth_required`) |
+| `system`/`status` with `compact_result: failed` | `notice {context_compaction_failed}` |
+| `rate_limit_event` rejected / allowed_warning, `system`/`api_retry`, `auth_status` errors | `notice` (`rate_limited`, `rate_limit_warning`, `api_retry`, `auth_required`) |
+| `assistant` message `error` | `notice` (`rate_limited`, `auth_required`, else `provider_error`) |
+
+## Notice codes
+
+`notice.code` is a free-form string, not an enum: a reader shows a known code's sentence and a neutral row with the
+code for any other (the UI's `timeline` namespace, `notices.<code>`). `params` are strings, for logs and detail;
+no sentence depends on them. Codes in use:
+
+| Code | Level | From | When (params) |
+|---|---|---|---|
+| `context_compacted` | info | sidecar | the CLI compacted the conversation (`trigger`, `preTokens`, `postTokens`) |
+| `context_compaction_failed` | warning | sidecar | a compaction failed (`error`) |
+| `rate_limited` | error / warning | sidecar | a rate limit refused a request or an assistant message failed on one (`rateLimitType`, `resetsAt`, `utilization` or `error`) |
+| `rate_limit_warning` | warning | sidecar | close to a rate limit (`rateLimitType`, `resetsAt`, `utilization`) |
+| `api_retry` | warning | sidecar | the CLI retries a failed API call (`attempt`, `maxRetries`, `retryDelayMs`, `errorStatus`, `error`) |
+| `auth_required` | error | sidecar | Claude Code is not signed in or its credential was refused (`error`) |
+| `provider_error` | error | sidecar | any other assistant message error (`error`) |
+| `mode_change_failed`, `model_change_failed` | error | sidecar | `setPermissionMode` / `setModel` failed; a `session.settings` with the mode in force follows a failed mode change (`mode` / `model`) |
+| `draft_too_large` | warning | sidecar | a draft stayed over the line limit even shortened and was replaced by this notice (`kind`) |
+| `request_too_large` | error | sidecar | a permission, question or plan request too large to show; the agent was answered no (`requestId`, `tool`) |
+| `sidecar_translate_failed` | warning | sidecar | the mapping failed on a message; it follows as `provider.passthrough` (`name`) |
+| `sidecar_bad_command` | error | sidecar | an unreadable command line, a second start or a command before the start (`reason`, `id`) |
+| `sidecar_command_skipped` | warning | sidecar | a command of a kind the sidecar does not handle (`reason`, `kind`) |
+| `sidecar_shutting_down` | warning | sidecar | a command arrived while the sidecar stops (`kind`) |
+| `sidecar_busy` | error | sidecar | a `message.send` while a turn runs: the host's queue should have held it (`messageId`) |
+| `sidecar_reply_not_pending` | warning | sidecar | a reply to a request the sidecar no longer holds (`requestId`, `reason`: `answered`, `unknown`, or `withdrawn` for one the SDK withdrew while it was shown) |
+| `github_token_expired` | not built yet | flowd | git or gh ran with an expired token (docs/architecture.md, credentials) |
 
 ## OpenCode (V2 API) → Flow
 
@@ -133,6 +195,7 @@ to the session's `sessionID`; envelope `{id, type, location, data}`.
 | `session.execution.succeeded` / `.interrupted` / `.failed` | `turn.ended` completed / interrupted / error |
 | `session.step.ended` (`cost`, `tokens`) | summed into `turn.ended.usage`, `costUsd` |
 | `session.retry.scheduled`, `session.compaction.ended` | `notice` |
+| any other event type | `provider.passthrough` (`name` = `type`, `raw` = the whole envelope) |
 | reconnect | `GET /api/session/{id}/message` paged by cursor; drafts for parts after the last logged ones |
 
 Plan mode: agent `plan`; OpenCode has no plan-approval request, so `plan.proposed` is not produced for OpenCode

@@ -13,28 +13,30 @@ type ErrorCode string
 
 // ErrorCode values.
 const (
-	ErrorCodeNotImplemented      ErrorCode = "not_implemented"
-	ErrorCodeUnauthenticated     ErrorCode = "unauthenticated"
-	ErrorCodeForbidden           ErrorCode = "forbidden"
-	ErrorCodePreviewOrigin       ErrorCode = "preview_origin"
-	ErrorCodeNotFound            ErrorCode = "not_found"
-	ErrorCodeInvalidRequest      ErrorCode = "invalid_request"
-	ErrorCodeConflict            ErrorCode = "conflict"
-	ErrorCodeInternal            ErrorCode = "internal"
-	ErrorCodeUpstream            ErrorCode = "upstream"
-	ErrorCodeGithubNotConnected  ErrorCode = "github_not_connected"
-	ErrorCodeSandboxUnavailable  ErrorCode = "sandbox_unavailable"
-	ErrorCodeSandboxBusy         ErrorCode = "sandbox_busy"
-	ErrorCodeSessionArchived     ErrorCode = "session_archived"
-	ErrorCodeRequestNotPending   ErrorCode = "request_not_pending"
-	ErrorCodeModeAboveCap        ErrorCode = "mode_above_cap"
-	ErrorCodeProviderUnavailable ErrorCode = "provider_unavailable"
-	ErrorCodeRepoInUse           ErrorCode = "repo_in_use"
-	ErrorCodeTooManySessions     ErrorCode = "too_many_sessions"
+	ErrorCodeNotImplemented        ErrorCode = "not_implemented"
+	ErrorCodeUnauthenticated       ErrorCode = "unauthenticated"
+	ErrorCodeForbidden             ErrorCode = "forbidden"
+	ErrorCodePreviewOrigin         ErrorCode = "preview_origin"
+	ErrorCodeNotFound              ErrorCode = "not_found"
+	ErrorCodeInvalidRequest        ErrorCode = "invalid_request"
+	ErrorCodeConflict              ErrorCode = "conflict"
+	ErrorCodeInternal              ErrorCode = "internal"
+	ErrorCodeUpstream              ErrorCode = "upstream"
+	ErrorCodeGithubNotConnected    ErrorCode = "github_not_connected"
+	ErrorCodeSandboxUnavailable    ErrorCode = "sandbox_unavailable"
+	ErrorCodeSandboxBusy           ErrorCode = "sandbox_busy"
+	ErrorCodeSessionArchived       ErrorCode = "session_archived"
+	ErrorCodeRequestNotPending     ErrorCode = "request_not_pending"
+	ErrorCodeModeAboveCap          ErrorCode = "mode_above_cap"
+	ErrorCodeProviderUnavailable   ErrorCode = "provider_unavailable"
+	ErrorCodeRepoInUse             ErrorCode = "repo_in_use"
+	ErrorCodeTooManySessions       ErrorCode = "too_many_sessions"
+	ErrorCodeSandboxNetworkMissing ErrorCode = "sandbox_network_missing"
+	ErrorCodeSandboxMemoryFull     ErrorCode = "sandbox_memory_full"
 )
 
 // ErrorCodeValues lists every ErrorCode.
-var ErrorCodeValues = []ErrorCode{ErrorCodeNotImplemented, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodePreviewOrigin, ErrorCodeNotFound, ErrorCodeInvalidRequest, ErrorCodeConflict, ErrorCodeInternal, ErrorCodeUpstream, ErrorCodeGithubNotConnected, ErrorCodeSandboxUnavailable, ErrorCodeSandboxBusy, ErrorCodeSessionArchived, ErrorCodeRequestNotPending, ErrorCodeModeAboveCap, ErrorCodeProviderUnavailable, ErrorCodeRepoInUse, ErrorCodeTooManySessions}
+var ErrorCodeValues = []ErrorCode{ErrorCodeNotImplemented, ErrorCodeUnauthenticated, ErrorCodeForbidden, ErrorCodePreviewOrigin, ErrorCodeNotFound, ErrorCodeInvalidRequest, ErrorCodeConflict, ErrorCodeInternal, ErrorCodeUpstream, ErrorCodeGithubNotConnected, ErrorCodeSandboxUnavailable, ErrorCodeSandboxBusy, ErrorCodeSessionArchived, ErrorCodeRequestNotPending, ErrorCodeModeAboveCap, ErrorCodeProviderUnavailable, ErrorCodeRepoInUse, ErrorCodeTooManySessions, ErrorCodeSandboxNetworkMissing, ErrorCodeSandboxMemoryFull}
 
 // Error is part of the contract.
 type Error struct {

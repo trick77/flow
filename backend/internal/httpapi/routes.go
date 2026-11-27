@@ -19,7 +19,7 @@ var Routes = []Route{
 	{"GET", "/api/auth/session", "getAuthSession", "auth", true, func(a *Areas) http.HandlerFunc { return a.Auth.GetAuthSession }},
 	{"GET", "/api/auth/login", "authLogin", "auth", true, func(a *Areas) http.HandlerFunc { return a.Auth.AuthLogin }},
 	{"GET", "/api/auth/callback", "authCallback", "auth", true, func(a *Areas) http.HandlerFunc { return a.Auth.AuthCallback }},
-	{"POST", "/api/auth/logout", "authLogout", "auth", false, func(a *Areas) http.HandlerFunc { return a.Auth.AuthLogout }},
+	{"POST", "/api/auth/logout", "authLogout", "auth", true, func(a *Areas) http.HandlerFunc { return a.Auth.AuthLogout }},
 
 	{"GET", "/api/profile", "getProfile", "profile", false, func(a *Areas) http.HandlerFunc { return a.Profile.GetProfile }},
 	{"PATCH", "/api/profile", "updateProfile", "profile", false, func(a *Areas) http.HandlerFunc { return a.Profile.UpdateProfile }},

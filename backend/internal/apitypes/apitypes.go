@@ -30,7 +30,7 @@ func (c ErrorCode) Status() int {
 		return http.StatusBadRequest
 	case ErrorCodeUpstream:
 		return http.StatusBadGateway
-	case ErrorCodeSandboxUnavailable:
+	case ErrorCodeSandboxUnavailable, ErrorCodeSandboxNetworkMissing, ErrorCodeSandboxMemoryFull:
 		return http.StatusServiceUnavailable
 	case ErrorCodeInternal:
 		return http.StatusInternalServerError
