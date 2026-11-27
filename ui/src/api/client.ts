@@ -8,16 +8,19 @@ import {
   type ErrorCode,
   type MessageAccepted,
   type MessageCreate,
+  type PlanAnswer,
   type Profile,
   type ProfileUpdate,
   type Project,
   type ProjectCreate,
   type ProjectList,
+  type QuestionAnswer,
   type ReplyDecision,
   type Sandbox,
   type Session,
   type SessionCreate,
   type SessionList,
+  type SessionUpdate,
 } from "./types.gen";
 
 // ApiError is a non-2xx answer (or no answer at all). code is one of the API's
@@ -45,6 +48,14 @@ function isErrorCode(value: unknown): value is ErrorCode {
 // namespace has a sentence for exactly the API's codes.
 export function errorCode(err: unknown): ErrorCode {
   return err instanceof ApiError ? err.code : "internal";
+}
+
+// answerLost: the request may have been carried out although no answer says
+// so (no answer at all, or a server or proxy failure); a 501 is a refusal.
+export function answerLost(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return true;
+  if (err.code === "not_implemented") return false;
+  return err.status === 0 || err.status >= 500;
 }
 
 async function failure(res: Response): Promise<ApiError> {
@@ -166,6 +177,72 @@ export function replyPermission(
     "POST",
     `/api/sessions/${seg(sessionId)}/permissions/${seg(requestId)}`,
     { decision },
+  );
+}
+
+// replyQuestion answers a question: the chosen options per question, or the
+// text typed in the composer instead.
+export function replyQuestion(
+  sessionId: string,
+  requestId: string,
+  answer: QuestionAnswer,
+): Promise<void> {
+  return request<void>(
+    "POST",
+    `/api/sessions/${seg(sessionId)}/questions/${seg(requestId)}`,
+    answer,
+  );
+}
+
+// replyPlan approves a plan (optionally in another mode) or keeps planning
+// with feedback.
+export function replyPlan(
+  sessionId: string,
+  requestId: string,
+  answer: PlanAnswer,
+): Promise<void> {
+  return request<void>(
+    "POST",
+    `/api/sessions/${seg(sessionId)}/plans/${seg(requestId)}`,
+    answer,
+  );
+}
+
+// updateSession changes the title, model or permission mode; absent fields
+// stay as they are.
+export function updateSession(
+  sessionId: string,
+  update: SessionUpdate,
+): Promise<Session> {
+  return request<Session>("PATCH", `/api/sessions/${seg(sessionId)}`, update);
+}
+
+// markSessionSeen: the owner has seen the session up to seq.
+export function markSessionSeen(sessionId: string, seq: number): Promise<void> {
+  return request<void>("POST", `/api/sessions/${seg(sessionId)}/seen`, {
+    seq,
+  });
+}
+
+// sendQueuedNow interrupts the running turn and sends the queued message.
+export function sendQueuedNow(
+  sessionId: string,
+  messageId: string,
+): Promise<void> {
+  return request<void>(
+    "POST",
+    `/api/sessions/${seg(sessionId)}/queue/${seg(messageId)}/send-now`,
+  );
+}
+
+// removeQueued drops a message from the session's queue.
+export function removeQueued(
+  sessionId: string,
+  messageId: string,
+): Promise<void> {
+  return request<void>(
+    "DELETE",
+    `/api/sessions/${seg(sessionId)}/queue/${seg(messageId)}`,
   );
 }
 

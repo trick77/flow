@@ -2,6 +2,7 @@
 // namespace, EventSource streams by seq. Owner: API client area
 // (docs/ownership.md).
 export {
+  answerLost,
   ApiError,
   archiveSession,
   createApiKey,
@@ -20,12 +21,18 @@ export {
   listSessions,
   LOGIN_PATH,
   logout,
+  markSessionSeen,
   onUnauthenticated,
+  removeQueued,
   replyPermission,
+  replyPlan,
+  replyQuestion,
   request,
   sandboxAction,
   sendMessage,
+  sendQueuedNow,
   updateProfile,
+  updateSession,
   type SandboxAction,
 } from "./client";
 export {

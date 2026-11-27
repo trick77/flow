@@ -234,7 +234,7 @@
       },
       "post": {
         "tags": ["sessions"], "operationId": "createSession", "x-flow-area": "sessions",
-        "summary": "Start a session", "description": "Creates worktrees on fresh origin/<default branch> and starts the agent; message, when given, is the first turn.",
+        "summary": "Start a session", "description": "Creates worktrees on fresh origin/<default branch> and starts the agent; message, when given, is the first turn. With a message the call is idempotent by message.clientId: a repeat (a retry after a lost response, or an identical request at the same moment, which waits for the first) answers the session the first call made, 201 again, and its message runs once. A first call that failed made nothing, so its repeat creates the session anew.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionCreate" } } } },
         "responses": { "201": { "$ref": "#/components/responses/Session" }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
@@ -248,9 +248,9 @@
       },
       "patch": {
         "tags": ["sessions"], "operationId": "updateSession", "x-flow-area": "sessions",
-        "summary": "Change a session", "description": "Title, model or permission mode; a mode above the cap is mode_above_cap.",
+        "summary": "Change a session", "description": "Title, model or permission mode; absent or empty fields stay as they are. A mode above the cap is mode_above_cap; an empty title after trimming, a control character, or a model id with white space is invalid_request. A model or mode change reaches the agent as a settings change (logged as session.settings, applied to a running agent at once, else at its next start); like sending a message it starts a stopped sandbox, since the log is what a restarted agent takes its settings from. A title change touches only the session. session.updated follows on the app stream.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionUpdate" } } } },
-        "responses": { "200": { "$ref": "#/components/responses/Session" }, "400": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "responses": { "200": { "$ref": "#/components/responses/Session" }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       },
       "delete": {
         "tags": ["sessions"], "operationId": "archiveSession", "x-flow-area": "sessions",
@@ -262,9 +262,9 @@
       "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
       "post": {
         "tags": ["sessions"], "operationId": "markSessionSeen", "x-flow-area": "sessions",
-        "summary": "Mark seen", "description": "The owner has seen the session up to seq.",
+        "summary": "Mark seen", "description": "The owner has seen the session up to seq; unseen clears once seq reaches the session's last seq (a lower seq than marked before changes nothing). session.updated follows.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SeenMark" } } } },
-        "responses": { "204": { "description": "Marked." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "responses": { "204": { "description": "Marked." }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/sessions/{sessionId}/repos": {
@@ -299,13 +299,13 @@
       "parameters": [{ "$ref": "#/components/parameters/SessionID" }],
       "get": {
         "tags": ["timeline"], "operationId": "readSessionLog", "x-flow-area": "timeline",
-        "summary": "Read the log", "description": "A page of durable events, backwards from before or forwards from after, for long histories.",
+        "summary": "Read the log", "description": "A page of durable events, backwards from before or forwards from after (default after=0), for long histories; not both. A page holds at most limit events and about 8 MiB: one cut by size is shorter, the newest kept when reading backwards, and the reader pages on from its edge. The log lives in the sandbox: one that is not running answers sandbox_unavailable and is never started for it.",
         "parameters": [
           { "name": "after", "in": "query", "required": false, "description": "Read forwards from this seq.", "schema": { "type": "integer", "format": "int64" } },
           { "name": "before", "in": "query", "required": false, "description": "Read backwards from this seq.", "schema": { "type": "integer", "format": "int64" } },
-          { "name": "limit", "in": "query", "required": false, "description": "At most this many, default 500.", "schema": { "type": "integer" } }
+          { "name": "limit", "in": "query", "required": false, "description": "At most this many, default 500, 1 to 1000.", "schema": { "type": "integer" } }
         ],
-        "responses": { "200": { "description": "The page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventPage" } } } }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "responses": { "200": { "description": "The page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventPage" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/sessions/{sessionId}/messages": {
@@ -321,16 +321,16 @@
       "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/MessageID" }],
       "post": {
         "tags": ["timeline"], "operationId": "sendQueuedNow", "x-flow-area": "timeline",
-        "summary": "Send a queued message now", "description": "Interrupts the running turn, then sends it.",
-        "responses": { "204": { "description": "Done." }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "summary": "Send a queued message now", "description": "Moves it to the head of the queue and interrupts the running turn, so it is sent next (between turns: at once). Like sending a message it starts a stopped sandbox. A message no longer queued (sent or removed) is not_found; a repeat is harmless.",
+        "responses": { "204": { "description": "Done." }, "404": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/sessions/{sessionId}/queue/{messageId}": {
       "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/MessageID" }],
       "delete": {
         "tags": ["timeline"], "operationId": "removeQueued", "x-flow-area": "timeline",
-        "summary": "Remove a queued message", "description": "Drops it from the queue.",
-        "responses": { "204": { "description": "Removed." }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "summary": "Remove a queued message", "description": "Drops it from the queue. A message no longer queued is not_found. Never starts a stopped sandbox: there the answer is sandbox_unavailable. A session whose agent is down (after a sandbox restart) is brought up without sending its queue, so the message removed is never the one sent.",
+        "responses": { "204": { "description": "Removed." }, "404": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/sessions/{sessionId}/interrupt": {
@@ -354,26 +354,26 @@
       "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/RequestID" }],
       "post": {
         "tags": ["timeline"], "operationId": "replyQuestion", "x-flow-area": "timeline",
-        "summary": "Answer a question", "description": "Chosen options, or text typed in the composer.",
+        "summary": "Answer a question", "description": "Chosen options and/or free text per question (ids from question.asked), or one text typed in the composer for every question. A reply that answers nothing, an answer without questionId, or text past 64 KiB is invalid_request. One reply per request: a repeat changes nothing; a request no longer open (or a stopped sandbox, never started for it) is request_not_pending.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuestionAnswer" } } } },
-        "responses": { "204": { "description": "Delivered." }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "responses": { "204": { "description": "Delivered." }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/sessions/{sessionId}/plans/{requestId}": {
       "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/RequestID" }],
       "post": {
         "tags": ["timeline"], "operationId": "replyPlan", "x-flow-area": "timeline",
-        "summary": "Approve or reject a plan", "description": "Approve (optionally switching mode) or keep planning with feedback.",
+        "summary": "Approve or reject a plan", "description": "Approve (optionally with the mode to continue in, which becomes the session's mode) or reject with feedback, which the agent reads as the reason to keep planning. A mode with a rejection, or feedback past 64 KiB, is invalid_request; a mode above the cap is mode_above_cap. One reply per request; a request no longer open (or a stopped sandbox) is request_not_pending.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlanAnswer" } } } },
-        "responses": { "204": { "description": "Delivered." }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "responses": { "204": { "description": "Delivered." }, "400": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/sessions/{sessionId}/repos/{repoId}/diff": {
       "parameters": [{ "$ref": "#/components/parameters/SessionID" }, { "$ref": "#/components/parameters/RepoID" }],
       "get": {
         "tags": ["review"], "operationId": "getSessionDiff", "x-flow-area": "review",
-        "summary": "Diff of one worktree", "description": "Working tree against the base the worktree was cut from, untracked files included.",
-        "responses": { "200": { "description": "The diff.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Diff" } } } }, "404": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "summary": "Diff of one worktree", "description": "Working tree against the base commit the worktree was cut from (baseSha): commits on the branch, uncommitted changes and untracked files (.gitignore respected); computed by flowd in the sandbox without touching the worktree's index. Bounded: binary files are summarized (binary, no hunks), a file past 5000 diff lines or the 4 MiB patch budget keeps its counts and is truncated, files past 2000 are left out (Diff.truncated). A sandbox that does not run is sandbox_unavailable and never started for it.",
+        "responses": { "200": { "description": "The diff.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Diff" } } } }, "404": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/sessions/{sessionId}/pull-requests": {
@@ -871,7 +871,8 @@
           "repo": { "type": "string" },
           "baseRef": { "type": "string" },
           "baseSha": { "type": "string" },
-          "files": { "type": "array", "items": { "$ref": "#/components/schemas/DiffFile" } }
+          "files": { "type": "array", "items": { "$ref": "#/components/schemas/DiffFile" } },
+          "truncated": { "type": "boolean", "description": "Files left out past the file-count or size limit." }
         }
       },
       "PullRequestEntry": {

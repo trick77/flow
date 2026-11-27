@@ -422,6 +422,8 @@ export interface Diff {
   baseRef: string;
   baseSha: string;
   files: DiffFile[];
+  /** Files left out past the file-count or size limit. */
+  truncated?: boolean;
 }
 
 export interface PullRequestEntry {

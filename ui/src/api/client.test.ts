@@ -1,5 +1,12 @@
 import {
+  answerLost,
   ApiError,
+  markSessionSeen,
+  removeQueued,
+  replyPlan,
+  replyQuestion,
+  sendQueuedNow,
+  updateSession,
   createApiKey,
   createProject,
   createSession,
@@ -226,5 +233,51 @@ describe("API client", () => {
     off();
     await listSessions().catch(() => {});
     expect(heard).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls the conversation-loop operations", async () => {
+    for (let i = 0; i < 5; i++) fetchMock.mockResolvedValueOnce(respond(204));
+    fetchMock.mockResolvedValueOnce(
+      respond(200, { summary: { id: "s/1", title: "New" } }),
+    );
+    await replyQuestion("s/1", "q 1", {
+      answers: [{ questionId: "q", optionIds: ["a"] }],
+    });
+    await replyPlan("s/1", "p1", { decision: "approved", mode: "auto" });
+    await markSessionSeen("s/1", 7);
+    await sendQueuedNow("s/1", "m/1");
+    await removeQueued("s/1", "m/1");
+    await expect(updateSession("s/1", { title: "New" })).resolves.toMatchObject(
+      { summary: { title: "New" } },
+    );
+    const calls = fetchMock.mock.calls.map((c) => [
+      c[0],
+      c[1]?.method,
+      c[1]?.body === undefined ? undefined : JSON.parse(String(c[1].body)),
+    ]);
+    expect(calls).toEqual([
+      [
+        "/api/sessions/s%2F1/questions/q%201",
+        "POST",
+        { answers: [{ questionId: "q", optionIds: ["a"] }] },
+      ],
+      [
+        "/api/sessions/s%2F1/plans/p1",
+        "POST",
+        { decision: "approved", mode: "auto" },
+      ],
+      ["/api/sessions/s%2F1/seen", "POST", { seq: 7 }],
+      ["/api/sessions/s%2F1/queue/m%2F1/send-now", "POST", undefined],
+      ["/api/sessions/s%2F1/queue/m%2F1", "DELETE", undefined],
+      ["/api/sessions/s%2F1", "PATCH", { title: "New" }],
+    ]);
+  });
+
+  it("tells a lost answer from a refusal", () => {
+    expect(answerLost(new ApiError("internal", 0))).toBe(true);
+    expect(answerLost(new ApiError("internal", 502))).toBe(true);
+    expect(answerLost(new TypeError("x"))).toBe(true);
+    expect(answerLost(new ApiError("not_implemented", 501))).toBe(false);
+    expect(answerLost(new ApiError("conflict", 409))).toBe(false);
   });
 });

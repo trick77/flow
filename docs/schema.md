@@ -528,6 +528,7 @@ Go types:
 | `created_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
 | `updated_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
 | `cleanup_pending` | INTEGER | no | `0` |  |
+| `client_id` | TEXT | yes |  |  |
 
 Foreign keys:
 
@@ -536,6 +537,7 @@ Foreign keys:
 
 Indexes:
 
+- `sessions_client_id` (`client_id`) unique where `client_id IS NOT NULL`
 - `sessions_parent` (`parent_id`)
 - `sessions_sidebar` (`archived_at`, `last_activity_at`)
 - `sqlite_autoindex_sessions_2` (`project_id`, `name`) unique
@@ -827,6 +829,7 @@ erDiagram
         TEXT created_at
         TEXT updated_at
         INTEGER cleanup_pending
+        TEXT client_id
     }
     project_repos }o--|| projects : "project_id"
     sandboxes |o--|| projects : "project_id"
