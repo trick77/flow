@@ -24,7 +24,7 @@ Self-hosted: runs Claude Code and OpenCode sessions in sandboxes on a Linux serv
 ## Working conventions
 - Commit subjects + PR titles: Go style `area: what` (`server: …`, `flowd: …`, `ui: …`, `sidecar: …`), gated by ship; release notes list them by area.
 - Fresh clone: `ship hooks` before the first push (check, conform and init install it too); without the pre-push hook a push skips the gate.
-- Env vars: `BACKEND_*`, never the project name.
+- Env vars: `BACKEND_*`, never the project name (a rename then touches no config). Host-only names Flow never reads (`PROXY_NETWORK`, `DOCKER_NETWORK`, `INCUS_CERT_DIR`, `CONTAINER_ADDRESS`, host-setup's) stay unprefixed.
 - UI strings only through i18next, one namespace per UI area (`ui/src/i18n/locales/en/<area>.ts`), English only.
   Locale `en-CH`: numbers, dates, times via `ui/src/i18n/format.ts` (1'234.5, 26.11.2026, 14:05).
 - No README on purpose.
