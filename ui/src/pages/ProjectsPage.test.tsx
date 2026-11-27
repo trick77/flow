@@ -211,12 +211,22 @@ describe("ProjectsPage", () => {
     );
   });
 
+  it("formats the repository count", () => {
+    const repos = Array.from({ length: 1000 }, (_, i) => ({
+      id: `r${i}`,
+      fullName: `o/r${i}`,
+      defaultBranch: "main",
+    }));
+    renderPage([project({ repos })]);
+    expect(screen.getByText("1'000 repositories")).toBeInTheDocument();
+  });
+
   it("names how many sessions are still open when a delete is refused", async () => {
     serve([json(409, { code: "project_has_sessions" })]);
     render(
       <ProjectsPage
         projects={[project()]}
-        openSessions={{ p1: 2, p2: 1 }}
+        openSessions={{ p1: 1234, p2: 1 }}
         loaded
         error={null}
         onEvent={() => {}}
@@ -230,7 +240,7 @@ describe("ProjectsPage", () => {
       );
     });
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "2 sessions of this project are still open. Archive them first",
+      "1'234 sessions of this project are still open. Archive them first",
     );
   });
 

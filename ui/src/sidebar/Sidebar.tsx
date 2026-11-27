@@ -24,13 +24,12 @@ import {
   groupSessions,
   orderSessions,
   SECTION_ORDER,
-  sectionOf,
   type SectionId,
 } from "./group";
 import { RelativeTime } from "./RelativeTime";
 import { SearchPalette } from "./SearchPalette";
 import { isSearchShortcut, shortcutKey } from "./shortcut";
-import { statusClass, statusKey } from "./status";
+import { showsTime, statusClass, statusKey } from "./status";
 import "./sidebar.css";
 
 const sectionKeys = {
@@ -40,11 +39,11 @@ const sectionKeys = {
   idle: "sectionIdle",
 } as const satisfies Record<SectionId, string>;
 
-// RowStatus is the row's top right: the status word, or for a row in Idle
-// how long ago its last activity was.
+// RowStatus is the row's top right: the status word, or for an idle or a
+// seen done row how long ago its last activity was (showsTime).
 function RowStatus({ session }: { session: SessionSummary }) {
   const { t } = useTranslation("sidebar");
-  if (sectionOf(session) === "idle") {
+  if (showsTime(session)) {
     return <RelativeTime className="s-time" at={session.lastActivityAt} />;
   }
   return (
@@ -153,7 +152,7 @@ function GroupingSwitch({
 }
 
 // RailList is the collapsed sidebar's sessions: the project badge with a dot
-// for any status but idle, in the status order.
+// for any row that shows its status word (not showsTime), in the status order.
 function RailList({
   sessions,
   projects,
@@ -170,7 +169,7 @@ function RailList({
     <nav className="rail-col rail-list" aria-label={t("railLabel")}>
       {orderSessions(sessions).map((s) => {
         const name = projects.get(s.projectId)?.name ?? "";
-        const idle = sectionOf(s) === "idle";
+        const idle = showsTime(s);
         return (
           <button
             key={s.id}
@@ -208,7 +207,7 @@ function RailList({
 const FOCUSABLE =
   'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-// Sidebar: the wordmark with the collapse button, the search, New session,
+// Sidebar: the wordmark with the search and collapse buttons, New session,
 // the grouping and the sessions in their sections; the account at the foot.
 // Collapsed (rail) it is a column of icons. On narrow screens it is a drawer
 // (drawerOpen), a modal dialog while open. Cmd+K or Ctrl+K opens the search
@@ -398,7 +397,24 @@ export function Sidebar({
         <h1 className={compact ? "sr" : "wordmark"}>
           {t("appName", { ns: "common" })}
         </h1>
-        {collapse}
+        {compact ? (
+          collapse
+        ) : (
+          <span className="sb-top-btns">
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={t("search")}
+              aria-haspopup="dialog"
+              aria-keyshortcuts="Meta+K Control+K"
+              title={searchTitle}
+              onClick={() => setSearching(true)}
+            >
+              <Icon name="search" />
+            </button>
+            {collapse}
+          </span>
+        )}
       </div>
       {compact ? (
         <>
@@ -441,25 +457,10 @@ export function Sidebar({
       ) : (
         <>
           <div className="sb-tools">
-            <button
-              type="button"
-              className="search"
-              aria-label={t("search")}
-              aria-haspopup="dialog"
-              aria-keyshortcuts="Meta+K Control+K"
-              title={searchTitle}
-              onClick={() => setSearching(true)}
-            >
-              <Icon name="search" />
-              <span className="search-ph" aria-hidden="true">
-                {t("search")}
-              </span>
-              <kbd aria-hidden="true">{t(shortcutKey())}</kbd>
-            </button>
             {startNew && (
               <button
                 type="button"
-                className="nav-row new-row"
+                className="nav-row"
                 aria-current={newSessionOpen ? "page" : undefined}
                 onClick={startNew}
               >

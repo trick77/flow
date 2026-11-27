@@ -101,6 +101,29 @@ describe("Sidebar", () => {
     );
   });
 
+  it("keeps a seen failed session's status word and colour; only the bold title goes", () => {
+    const failed = (unseen: boolean) =>
+      s({
+        id: `f${unseen}`,
+        title: `Broke ${unseen}`,
+        status: "failed",
+        unseen,
+      });
+    const { container } = renderSidebar({
+      sessions: [failed(true), failed(false)],
+    });
+    for (const unseen of [true, false]) {
+      const row = screen.getByRole("button", {
+        name: new RegExp(`Broke ${unseen}`),
+      });
+      expect(row.classList.contains("unseen")).toBe(unseen);
+      const word = within(row).getByText(en.statusFailed);
+      expect(word).toHaveClass("status", "st-failed");
+      expect(row.querySelector(".s-time")).toBeNull();
+    }
+    expect(container.querySelectorAll(".srow.unseen")).toHaveLength(1);
+  });
+
   it("switches the grouping with clicks and arrow keys", () => {
     const { props, rerender } = renderSidebar();
     const group = screen.getByRole("radiogroup", { name: en.groupLabel });
@@ -197,15 +220,16 @@ describe("Sidebar", () => {
     const dialog = screen.getByRole("dialog", { name: en.label });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     const close = screen.getByRole("button", { name: en.closeSidebar });
-    expect(close).toHaveFocus();
+    const search = screen.getByRole("button", { name: en.search });
+    expect(search).toHaveFocus();
     expect(close).not.toHaveAttribute("aria-pressed");
 
     // Tab from the last control wraps to the first, Shift+Tab back.
     const account = screen.getByRole("button", { name: "Account: owner" });
     account.focus();
     fireEvent.keyDown(account, { key: "Tab" });
-    expect(close).toHaveFocus();
-    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(search).toHaveFocus();
+    fireEvent.keyDown(search, { key: "Tab", shiftKey: true });
     expect(account).toHaveFocus();
     fireEvent.keyDown(account, { key: "a" });
 
@@ -224,6 +248,28 @@ describe("Sidebar", () => {
     );
     expect(props.onOpenSettings).toHaveBeenCalled();
     expect(props.onCloseDrawer).toHaveBeenCalledTimes(5);
+  });
+
+  // Owner decision: no search field; a magnifier icon beside the wordmark and
+  // the collapse button, and Cmd/Ctrl+K.
+  it("opens the search from an icon button at the top and from Cmd+K", () => {
+    const { container } = renderSidebar();
+    const search = screen.getByRole("button", { name: en.search });
+    expect(search).toHaveClass("icon-btn");
+    expect(search).toHaveTextContent("");
+    expect(search.closest(".sb-top")).not.toBeNull();
+    expect(screen.getAllByRole("button", { name: en.search })).toHaveLength(1);
+    expect(container.querySelector(".sb-tools kbd")).toBeNull();
+    fireEvent.click(search);
+    expect(
+      screen.getByPlaceholderText(en.searchPlaceholder),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
+    expect(screen.queryByPlaceholderText(en.searchPlaceholder)).toBeNull();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    expect(
+      screen.getByPlaceholderText(en.searchPlaceholder),
+    ).toBeInTheDocument();
   });
 
   it("leaves keys from the search palette to the palette", () => {

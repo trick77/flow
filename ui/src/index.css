@@ -474,7 +474,9 @@ svg.i {
 }
 /* The title renames on a click: a button that looks like the title. */
 .ttl-btn {
-  max-width: 100%;
+  /* The heading's width plus the negative margins: the whole title fits
+     whenever the heading has its room. */
+  max-width: calc(100% + 8px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

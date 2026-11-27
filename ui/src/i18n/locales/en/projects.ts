@@ -23,8 +23,8 @@ export const projects = {
   invalidRepos:
     "Name at least one repository as owner/name or a github.com URL, each once.",
   // Cards.
-  repoCount_one: "{{count}} repository",
-  repoCount_other: "{{count}} repositories",
+  repoCount_one: "{{n}} repository",
+  repoCount_other: "{{n}} repositories",
   reposIn: "Repositories in {{name}}",
   created: "Created",
   lastUsed: "Last used",
@@ -46,6 +46,11 @@ export const projects = {
   setupLogLoading: "Reading the setup log…",
   setupLogFailed: "The setup log could not be read.",
   setupLogEmpty: "The setup log is empty.",
+  // The log is read from its end; earlier lines on demand.
+  setupLogTruncated_one: "Truncated — showing the last {{n}} line.",
+  setupLogTruncated_other: "Truncated — showing the last {{n}} lines.",
+  setupLogEarlier: "Load earlier lines",
+  setupLogEarlierLoading: "Loading earlier lines…",
   delete: "Delete",
   // Confirmations: what goes, in plain words.
   confirmRebuild:
@@ -59,5 +64,5 @@ export const projects = {
   openSessions_one:
     "1 session of this project is still open. Archive it first (in its header).",
   openSessions_other:
-    "{{count}} sessions of this project are still open. Archive them first (in their headers).",
+    "{{n}} sessions of this project are still open. Archive them first (in their headers).",
 };

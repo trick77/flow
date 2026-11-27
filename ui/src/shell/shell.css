@@ -161,6 +161,36 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Who gives way on a short header (owner decision): the project name and
+   the title keep their room; first the sandbox chip's word shrinks away (its
+   dot stays), then the branch chip truncates (and hides on narrow screens),
+   then the repos chip goes. The shrink factors set that order: each tier
+   gives up its room before the next one starts. They are a million apart:
+   a closer ratio hands the next tier a fraction of a pixel, enough for an
+   ellipsis on text that fits (measured, Chromium). */
+.hdr .crumb .proj {
+  flex: 0 0 auto;
+  max-width: min(16rem, 40vw);
+}
+.hdr .sbx-chip {
+  flex-shrink: 1000000000000;
+  /* Padding, border, the dot and its gap. */
+  min-width: 30px;
+}
+.hdr .sbx-chip .txt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hdr .branch-chip {
+  flex-shrink: 1000000;
+  min-width: 6.5rem;
+}
+.hdr .branch-chip .mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* Narrow: the title needs the room more than the branch chip. */
 @media (max-width: 900px) {
   .hdr .branch-chip {
