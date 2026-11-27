@@ -214,7 +214,8 @@
       "get": {
         "tags": ["sandboxes"], "operationId": "getSetupLog", "x-flow-area": "sandboxes",
         "summary": "Setup log", "description": "Lines of the last setup run after a line number; poll while state is setup. The repositories' .flow/setup.sh logs in project order, each after a header line, numbered from 1 across all of them; at most 1000 lines per answer, ask again after the last one. Each log keeps its first 4 MiB. Answered for a sandbox in setup, warm or failed (empty lines while flowd does not answer yet during setup); sandbox_unavailable for one that is stopped, never created or being deleted, or whose flowd does not answer.",
-        "parameters": [{ "name": "after", "in": "query", "required": false, "description": "Last line number seen.", "schema": { "type": "integer" } }],
+        "parameters": [{ "name": "after", "in": "query", "required": false, "description": "Last line number seen.", "schema": { "type": "integer" } },
+          { "name": "tail", "in": "query", "required": false, "description": "Instead of after: the last this many lines (at most 1000), numbered as in the whole log, so a first line above 1 means earlier lines exist (read them with after). invalid_request together with after or below 1.", "schema": { "type": "integer" } }],
         "responses": { "200": { "description": "The lines.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SetupLog" } } } }, "400": { "$ref": "#/components/responses/Error" }, "404": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
