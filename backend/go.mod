@@ -3,6 +3,7 @@ module github.com/trick77/flow
 go 1.27.4
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/ncruces/go-sqlite3 v0.38.1
 	github.com/trick77/ship/kit v0.23.1
 	github.com/trick77/ship/kit/auth v0.4.4
