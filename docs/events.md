@@ -71,7 +71,9 @@ provider reported none, not a free turn (the generator binds optional numbers as
 
 ## Status
 
-The host derives `session.status` and writes it on change; Flow mirrors it into `sessions.status`:
+The host derives `session.status` and writes it on change; Flow mirrors it into `sessions.status`. A sandbox stop
+ends the host without a `turn.ended`: Flow, finding the sandbox stopped, sets an open turn's row to `failed` (the
+host logs the turn `lost` on its next start):
 
 | Status | When |
 |---|---|
@@ -208,8 +210,8 @@ sessions (the plan arrives as text).
 
 | Command | From | Effect |
 |---|---|---|
-| `message.send` | Flow (browser message, parent session) | idle: `message.user`, `turn.started`, deliver; busy: `message.queued` (or interrupt) |
-| `message.send_now`, `message.remove` | Flow | interrupt + deliver a queued one / drop it |
+| `message.send` | Flow (browser message, parent session) | idle: `message.user`, `turn.started`, deliver; busy: `message.queued` (or with interrupt `message.queued {front}`, then interrupt) |
+| `message.send_now`, `message.remove` | Flow | send now: `message.queued {front}` again under the message's id (it moves to the head; the queue holds each id once, where its last `message.queued` put it), interrupt + deliver; remove: drop it |
 | `turn.interrupt` | Flow | `interrupt()` / OpenCode interrupt |
 | `permission.reply`, `question.reply`, `plan.reply` | Flow (owner only) | resolve the open request |
 | `settings.set` | Flow | `setModel`/`setPermissionMode`, `session.settings` |

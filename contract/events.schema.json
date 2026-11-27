@@ -188,7 +188,8 @@
         "messageId": { "type": "string" },
         "text": { "type": "string" },
         "origin": { "$ref": "#/$defs/MessageOrigin" },
-        "fromSession": { "type": "string" }
+        "fromSession": { "type": "string" },
+        "front": { "type": "boolean", "description": "Queued at the head, not the tail: a message that interrupts the turn, or a queued one sent now (logged again under its id, which moves it to the head)." }
       }
     },
     "DequeueReason": { "type": "string", "enum": ["sent", "removed"] },
