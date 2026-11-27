@@ -1,5 +1,6 @@
 import {
   LOCALE,
+  formatAgo,
   formatDate,
   formatDateTime,
   formatNumber,
@@ -47,5 +48,18 @@ describe("format", () => {
 
   it("writes date and time together", () => {
     expect(formatDateTime(afternoon)).toBe("26.11.2026, 14:05");
+  });
+
+  it("says how long ago in the largest whole narrow unit", () => {
+    const min = 60_000;
+    expect(formatAgo(59_999)).toBeNull();
+    expect(formatAgo(-5 * min)).toBeNull();
+    expect(formatAgo(Number.NaN)).toBeNull();
+    expect(formatAgo(min)).toBe("1m");
+    expect(formatAgo(59 * min)).toBe("59m");
+    expect(formatAgo(2 * 60 * min + 5 * min)).toBe("2h");
+    expect(formatAgo(3 * 24 * 60 * min)).toBe("3d");
+    expect(formatAgo(15 * 24 * 60 * min)).toBe("2w");
+    expect(formatAgo(800 * 24 * 60 * min)).toBe("2y");
   });
 });

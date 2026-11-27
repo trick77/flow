@@ -20,6 +20,7 @@ import type {
 } from "../api/types.gen";
 import { AgentPill, useAgentName } from "../shell/AgentPill";
 import { projectBadge } from "../shell/badge";
+import { MenuButton } from "../shell/drawer";
 import { Icon } from "../shell/Icon";
 import {
   choiceKey,
@@ -379,6 +380,7 @@ export function NewSession({
   return (
     <section className="view" aria-label={t("newTitle")} hidden={hidden}>
       <header className="hdr">
+        <MenuButton />
         <div className="crumb">
           {project && projects.length > 0 && (
             <>

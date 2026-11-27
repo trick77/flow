@@ -157,15 +157,30 @@ describe("AuthGate", () => {
     expect(account).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("menu")).toBeNull();
 
-    // Escape and a click elsewhere close the menu.
+    // Escape and a click elsewhere close the menu; opening it focuses the
+    // first item, Up and Down move.
     fireEvent.click(account);
     expect(screen.getByRole("menu")).toBeInTheDocument();
-    fireEvent.keyDown(document, { key: "Enter" });
+    const settingsItem = screen.getByRole("menuitem", {
+      name: en.shell.settings,
+    });
+    const signOutItem = screen.getByRole("menuitem", {
+      name: en.shell.signOut,
+    });
+    expect(settingsItem).toHaveFocus();
+    fireEvent.keyDown(settingsItem, { key: "ArrowDown" });
+    expect(signOutItem).toHaveFocus();
+    fireEvent.keyDown(signOutItem, { key: "ArrowUp" });
+    expect(settingsItem).toHaveFocus();
+    fireEvent.keyDown(settingsItem, { key: "Enter" });
     expect(screen.getByRole("menu")).toBeInTheDocument();
-    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(settingsItem, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
+    expect(account).toHaveFocus();
     fireEvent.click(account);
-    fireEvent.mouseDown(screen.getByRole("menuitem"));
+    fireEvent.mouseDown(
+      screen.getByRole("menuitem", { name: en.shell.signOut }),
+    );
     expect(screen.getByRole("menu")).toBeInTheDocument();
     fireEvent.mouseDown(document.body);
     expect(screen.queryByRole("menu")).toBeNull();

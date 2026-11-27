@@ -43,6 +43,219 @@
   stroke-width: 2.2;
 }
 
+/* The search field opening the search palette (mock: .search). */
+.search {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-muted);
+  transition: border-color 0.12s;
+}
+.search:hover {
+  border-color: var(--color-border-strong);
+}
+.search svg.i {
+  width: 15px;
+  height: 15px;
+  margin-left: 9px;
+}
+.search-ph {
+  flex: 1;
+  min-width: 0;
+  padding: 0 8px;
+  overflow: hidden;
+  color: var(--color-muted-2);
+  font-size: 0.8125rem;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search kbd {
+  margin-right: 7px;
+  padding: 0 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-faint);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  line-height: 1.1rem;
+}
+.new-row {
+  margin-top: 8px;
+}
+
+/* The grouping switch, and the review panel's repository picker. */
+.seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  margin: 10px 0 0;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+}
+.seg button {
+  height: 26px;
+  border-radius: 6px;
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  text-align: center;
+  transition:
+    background-color 0.12s,
+    color 0.12s;
+}
+.seg button:hover {
+  color: var(--color-ink-bright);
+}
+.seg button[aria-checked="true"] {
+  background: var(--color-active);
+  color: var(--color-ink-bright);
+}
+
+/* An idle row's last activity. */
+.s-time {
+  color: var(--color-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The rail: the collapsed sidebar's column of icons (mock: .rail-*). */
+.app.rail .sb-top {
+  justify-content: center;
+  padding: 0;
+}
+.rail-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+}
+.rail-list {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border-side);
+}
+.rail-grow {
+  flex: 1 1 auto;
+}
+.rail-sess {
+  position: relative;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  transition: background-color 0.12s;
+}
+.rail-sess:hover {
+  background: var(--color-raised);
+}
+.rail-sess[aria-current="true"] {
+  background: var(--color-sel);
+}
+.rail-sess .mono-badge {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  font-size: 0.6875rem;
+}
+.rail-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--color-panel);
+  border-radius: 50%;
+  background: currentColor;
+}
+.rail-foot {
+  padding: 8px 0 10px;
+  border-top: 1px solid var(--color-border-side);
+}
+
+/* The account at the sidebar's foot (mock: .sb-foot, .user-btn). */
+.sb-foot {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--color-border-side);
+}
+.user-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px;
+  border-radius: 8px;
+  transition: background-color 0.12s;
+}
+.user-btn:hover,
+.user-btn[aria-expanded="true"] {
+  background: var(--color-raised);
+}
+.user-btn > svg.i {
+  color: var(--color-muted-2);
+}
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--color-ink-dim);
+  color: var(--color-bg);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.user-meta {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.user-meta > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-meta .nm {
+  color: var(--color-ink-bright);
+}
+.user-meta .sub {
+  color: var(--color-muted-2);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+.pop.user-pop {
+  bottom: calc(100% + 6px);
+  left: 10px;
+  right: 10px;
+  width: auto;
+  min-width: 220px;
+}
+.user-pop .opt {
+  align-items: center;
+}
+
+/* The drawer's scrim on narrow screens. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: rgba(0, 0, 0, 0.5);
+}
+
 /* "· 4 repos" after the branch of a multi-repository session. */
 .s-branch .s-repos {
   flex: 0 0 auto;

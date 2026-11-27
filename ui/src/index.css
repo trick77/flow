@@ -186,11 +186,23 @@ svg.i {
 }
 
 .app {
+  --sidebar-w: 362px;
+  --rail-w: 56px;
+  position: relative;
   display: grid;
-  grid-template-columns: 362px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  transition: grid-template-columns 0.2s ease-out;
+}
+.app.rail {
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+}
+@media (max-width: 1180px) {
+  .app {
+    --sidebar-w: 320px;
+  }
 }
 
 /* sidebar */
@@ -1431,15 +1443,35 @@ svg.i {
   text-align: center;
 }
 
-@media (max-width: 760px) {
-  .app {
+/* Narrow (the NARROW query in shell/useMediaQuery.ts): the sidebar is an
+   off-canvas drawer over the session, opened by the header's menu button. */
+@media (max-width: 900px) {
+  .app,
+  .app.rail {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
   }
   .sidebar {
-    max-height: 40vh;
-    border-right: 0;
-    border-bottom: 1px solid var(--color-border-side);
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    width: 300px;
+    max-width: 85vw;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition:
+      transform 0.2s ease-out,
+      visibility 0s linear 0.2s;
+  }
+  .app.nav-open .sidebar {
+    transform: none;
+    visibility: visible;
+    box-shadow: 0 18px 32px rgba(0, 0, 0, 0.38);
+    transition: transform 0.2s ease-out;
+  }
+  .main {
+    grid-column: 1;
   }
 }
 

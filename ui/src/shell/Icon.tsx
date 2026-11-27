@@ -124,6 +124,25 @@ const paths = {
   trash: (
     <path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 12.5h9l1-12.5M10.5 10.5v6M13.5 10.5v6" />
   ),
+  sidebar: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="3" />
+      <path d="M9.5 4v16" />
+    </>
+  ),
+  panelRight: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="3" />
+      <path d="M14.5 4v16" />
+    </>
+  ),
+  menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  stack: (
+    <>
+      <path d="M12 4l8 4-8 4-8-4z" />
+      <path d="M4 12l8 4 8-4M4 16l8 4 8-4" />
+    </>
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof paths;

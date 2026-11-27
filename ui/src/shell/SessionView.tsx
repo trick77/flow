@@ -1,9 +1,17 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import {
   archiveSession,
   errorCode,
+  getSession,
   sandboxAction,
   updateSession,
   type EventSourceCtor,
@@ -15,8 +23,10 @@ import type {
   SandboxState,
   SessionStatus,
   SessionSummary,
+  Worktree,
 } from "../api/types.gen";
 import { Composer } from "../composer";
+import { PANEL_ID, ReviewPanel } from "../panel";
 import type { SessionPatch } from "../sidebar";
 import {
   TerminalDrawer,
@@ -25,9 +35,10 @@ import {
   type WebSocketCtor,
 } from "../terminal";
 import { foldEvents, Timeline, useSessionStream } from "../timeline";
-import { Header } from "./Header";
+import { Header, type RepoEntry } from "./Header";
 import { Icon } from "./Icon";
 import { useMarkSeen } from "./useMarkSeen";
+import { NARROW, useMediaQuery } from "./useMediaQuery";
 
 // SandboxNotice stands in for a session's history while its sandbox does not
 // run: the log lives in the sandbox, so the timeline stays empty until it
@@ -196,126 +207,242 @@ export function SessionView({
     }),
     [session.id, session.projectId],
   );
+
+  // The review panel and the session's worktrees it needs (repoIds). rev
+  // asks for both again: the refresh button, a turn's end, the sandbox
+  // coming up. The panel reads nothing while closed.
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [diffRepo, setDiffRepo] = useState<string | undefined>();
+  const [rev, setRev] = useState(0);
+  const refresh = useCallback(() => setRev((r) => r + 1), []);
+  const turnOpen = folded.turnOpen;
+  const wasOpen = useRef(turnOpen);
+  useEffect(() => {
+    if (wasOpen.current && !turnOpen) refresh();
+    wasOpen.current = turnOpen;
+  }, [turnOpen, refresh]);
+  const warm = sandbox?.state === "warm";
+  const wasWarm = useRef(warm);
+  useEffect(() => {
+    if (warm && !wasWarm.current) refresh();
+    wasWarm.current = warm;
+  }, [warm, refresh]);
+  const detail = useSessionDetail(session.id, rev);
+  const overlay = useMediaQuery(OVERLAY);
+  const narrow = useMediaQuery(NARROW);
+  const panelToggle = useRef<HTMLButtonElement>(null);
+  const openRepo = (repoId: string) => {
+    setDiffRepo(repoId);
+    if (!panelOpen) refresh();
+    setPanelOpen(true);
+  };
+  const closePanel = () => {
+    setPanelOpen(false);
+    panelToggle.current?.focus();
+  };
+  const repos: RepoEntry[] = detail.worktrees
+    ? detail.worktrees.map((w) => ({
+        repoId: w.repoId,
+        name: w.repo,
+        added: w.added,
+        removed: w.removed,
+        path: w.path,
+      }))
+    : session.repos.map((name) => ({ name }));
+
   return (
-    <section className="view" aria-label={t("session")} hidden={hidden}>
-      <Header
-        project={projectName}
-        title={renaming ?? session.title}
-        onRename={renaming === null ? rename : undefined}
-        branch={session.branch}
-        actions={
-          <>
-            <TerminalToggle
-              pressed={terminalOpen}
-              onToggle={() => setTerminalOpen((o) => !o)}
-            />
-            <button
-              type="button"
-              className="icon-btn"
-              aria-label={t("archive")}
-              title={t("archive")}
-              aria-expanded={asking}
-              onClick={() => {
-                setAsking((a) => !a);
-                setFailed(null);
-              }}
-            >
-              <Icon name="archive" />
-            </button>
-            {nav}
-          </>
-        }
-      />
-      {renameError && (
-        <div className="confirm hdr-confirm" role="alert">
-          {t("renameFailed")} {t(renameError, { ns: "errors" })}
-          <div className="row-inline">
-            <button
-              type="button"
-              className="btn sm ghost"
-              onClick={() => setRenameError(null)}
-            >
-              {t("dismiss")}
-            </button>
-          </div>
-        </div>
-      )}
-      {asking && (
-        <div
-          className="confirm hdr-confirm"
-          role="alertdialog"
-          aria-label={t("archive")}
-        >
-          {t("confirmArchive", { title: session.title })}
-          {failed && (
-            <p className="hdr-confirm-err" role="alert">
-              {t(failed, { ns: "errors" })}
-            </p>
-          )}
-          <div className="row-inline">
-            <button
-              type="button"
-              className="btn sm danger"
-              disabled={archiving}
-              onClick={archive}
-            >
-              {archiving ? t("archiving") : t("confirmArchiveAction")}
-            </button>
-            <button
-              type="button"
-              className="btn sm ghost"
-              disabled={archiving}
-              onClick={() => setAsking(false)}
-            >
-              {t("cancel")}
-            </button>
-          </div>
-        </div>
-      )}
-      <div className="center-body">
-        {downState && (
-          <SandboxNotice
-            key={downState}
-            projectId={session.projectId}
-            state={downState}
-          />
-        )}
-        <Timeline
-          sessionId={session.id}
-          folded={folded}
-          working={status === "working"}
-          provider={session.provider}
-          modes={catalog?.modes}
-          modeCap={session.modeCap}
-          mode={session.mode}
-          onAnswerInComposer={() => composerInput.current?.focus()}
-        />
-        <Composer
-          sessionId={session.id}
-          provider={session.provider}
-          model={session.model}
-          mode={session.mode}
-          modeCap={session.modeCap}
-          catalog={catalog}
-          projectName={projectName}
-          queue={folded.queue}
-          questionId={folded.pendingQuestion?.request.requestId}
-          inputRef={composerInput}
-          onUpdated={onUpdated}
-          running={
-            down
-              ? status === "working"
-              : folded.turnOpen || status === "working"
+    <section
+      className={
+        panelOpen ? "view session-view panel-open" : "view session-view"
+      }
+      aria-label={t("session")}
+      hidden={hidden}
+    >
+      <div className="view-col">
+        <Header
+          project={projectName}
+          title={renaming ?? session.title}
+          onRename={renaming === null ? rename : undefined}
+          branch={session.branch}
+          sandbox={sandbox?.state}
+          repos={repos}
+          onOpenRepo={openRepo}
+          actions={
+            <>
+              <TerminalToggle
+                pressed={terminalOpen}
+                onToggle={() => setTerminalOpen((o) => !o)}
+              />
+              <button
+                ref={panelToggle}
+                type="button"
+                className="icon-btn"
+                aria-label={t("togglePanel")}
+                title={t("togglePanel")}
+                aria-pressed={panelOpen}
+                aria-controls={panelOpen ? PANEL_ID : undefined}
+                onClick={() => {
+                  if (!panelOpen) refresh();
+                  setPanelOpen((o) => !o);
+                }}
+              >
+                <Icon name="panelRight" />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label={t("archive")}
+                title={t("archive")}
+                aria-expanded={asking}
+                onClick={() => {
+                  setAsking((a) => !a);
+                  setFailed(null);
+                }}
+              >
+                <Icon name="archive" />
+              </button>
+              {nav}
+            </>
           }
         />
-        <TerminalDrawer
-          tab={tab}
-          open={terminalOpen}
-          onClose={() => setTerminalOpen(false)}
-          WebSocket={WebSocket}
-          createEmulator={createEmulator}
-        />
+        {renameError && (
+          <div className="confirm hdr-confirm" role="alert">
+            {t("renameFailed")} {t(renameError, { ns: "errors" })}
+            <div className="row-inline">
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={() => setRenameError(null)}
+              >
+                {t("dismiss")}
+              </button>
+            </div>
+          </div>
+        )}
+        {asking && (
+          <div
+            className="confirm hdr-confirm"
+            role="alertdialog"
+            aria-label={t("archive")}
+          >
+            {t("confirmArchive", { title: session.title })}
+            {failed && (
+              <p className="hdr-confirm-err" role="alert">
+                {t(failed, { ns: "errors" })}
+              </p>
+            )}
+            <div className="row-inline">
+              <button
+                type="button"
+                className="btn sm danger"
+                disabled={archiving}
+                onClick={archive}
+              >
+                {archiving ? t("archiving") : t("confirmArchiveAction")}
+              </button>
+              <button
+                type="button"
+                className="btn sm ghost"
+                disabled={archiving}
+                onClick={() => setAsking(false)}
+              >
+                {t("cancel")}
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="center-body">
+          {downState && (
+            <SandboxNotice
+              key={downState}
+              projectId={session.projectId}
+              state={downState}
+            />
+          )}
+          <Timeline
+            sessionId={session.id}
+            folded={folded}
+            working={status === "working"}
+            provider={session.provider}
+            modes={catalog?.modes}
+            modeCap={session.modeCap}
+            mode={session.mode}
+            onAnswerInComposer={() => composerInput.current?.focus()}
+          />
+          <Composer
+            sessionId={session.id}
+            provider={session.provider}
+            model={session.model}
+            mode={session.mode}
+            modeCap={session.modeCap}
+            catalog={catalog}
+            projectName={projectName}
+            queue={folded.queue}
+            questionId={folded.pendingQuestion?.request.requestId}
+            inputRef={composerInput}
+            onUpdated={onUpdated}
+            running={
+              down
+                ? status === "working"
+                : folded.turnOpen || status === "working"
+            }
+          />
+          <TerminalDrawer
+            tab={tab}
+            open={terminalOpen}
+            onClose={() => setTerminalOpen(false)}
+            WebSocket={WebSocket}
+            createEmulator={createEmulator}
+          />
+        </div>
       </div>
+      {panelOpen && (
+        <ReviewPanel
+          sessionId={session.id}
+          projectId={session.projectId}
+          branch={session.branch}
+          worktrees={detail.worktrees}
+          worktreesError={detail.worktrees ? undefined : detail.error}
+          repoId={diffRepo}
+          onRepo={setDiffRepo}
+          rev={rev}
+          onRefresh={refresh}
+          onClose={closePanel}
+          sandboxState={sandbox?.state}
+          overlay={overlay}
+          narrow={narrow}
+        />
+      )}
     </section>
   );
+}
+
+// OVERLAY: up to this width the review panel lies over the session.
+const OVERLAY = "(max-width: 1180px)";
+
+// useSessionDetail reads the session's worktrees (getSession), again when
+// rev changes; a failure leaves the last ones (or none) and its code.
+function useSessionDetail(
+  sessionId: string,
+  rev: number,
+): { worktrees?: Worktree[]; error?: ErrorCode } {
+  const [state, setState] = useState<{
+    worktrees?: Worktree[];
+    error?: ErrorCode;
+  }>({});
+  useEffect(() => {
+    let live = true;
+    getSession(sessionId).then(
+      (s) => {
+        if (live) setState({ worktrees: s.worktrees ?? [] });
+      },
+      (err: unknown) => {
+        if (live) setState((p) => ({ ...p, error: errorCode(err) }));
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [sessionId, rev]);
+  return state;
 }

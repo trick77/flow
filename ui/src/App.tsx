@@ -5,10 +5,22 @@ import type { EventSourceCtor } from "./api";
 import type { Session, SessionStatus } from "./api/types.gen";
 import { NewSession, useKnownCatalog } from "./composer";
 import { ProjectsPage, SettingsPage } from "./pages";
-import { Nav, SessionView, type View } from "./shell";
+import {
+  DrawerContext,
+  MenuButton,
+  NARROW,
+  Nav,
+  readStored,
+  SessionView,
+  STORAGE_KEYS,
+  useMediaQuery,
+  writeStored,
+  type View,
+} from "./shell";
 import {
   orderSessions,
   Sidebar,
+  useGrouping,
   useSessions,
   type SessionPatch,
 } from "./sidebar";
@@ -24,6 +36,7 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     loaded,
     error,
     projectsError,
+    profileRev,
     setStatus,
     setSeen,
     patch,
@@ -69,6 +82,47 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     },
     [selectedId, patch],
   );
+  const [grouping, setGrouping] = useGrouping(profileRev);
+  // The rail (collapsed sidebar) is this browser's choice, wide screens only.
+  const [rail, setRailState] = useState(
+    () => readStored(STORAGE_KEYS.rail) === "1",
+  );
+  const setRail = useCallback((on: boolean) => {
+    setRailState(on);
+    writeStored(STORAGE_KEYS.rail, on ? "1" : "0");
+  }, []);
+  // Narrow: the sidebar is a drawer, opened by a header's menu button.
+  const narrow = useMediaQuery(NARROW);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const opener = useRef<HTMLElement | null>(null);
+  if (!narrow && drawerOpen) setDrawerOpen(false);
+  const drawer = useMemo(
+    () => ({
+      narrow,
+      open: drawerOpen,
+      openDrawer: (el?: HTMLElement) => {
+        opener.current = el ?? null;
+        setDrawerOpen(true);
+      },
+    }),
+    [narrow, drawerOpen],
+  );
+  // Closing gives focus back to the button that opened it; when that one is
+  // gone (a new session or page shows) to the menu button of the view shown.
+  const closeDrawer = useCallback(() => {
+    setDrawerOpen(false);
+    requestAnimationFrame(() => {
+      const el = opener.current;
+      if (el?.isConnected && el.offsetParent !== null) {
+        el.focus();
+        return;
+      }
+      document
+        .querySelector<HTMLElement>(".view:not([hidden]) .menu-btn")
+        ?.focus();
+    });
+  }, []);
+
   // Picking a session in the sidebar shows it, from any page.
   const onSelect = useCallback((id: string) => {
     setPicked(id);
@@ -108,85 +162,106 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     setNewOpened(true);
     setView("new");
   };
+  const appClass = [
+    "app",
+    rail && !narrow ? "rail" : "",
+    narrow && drawerOpen ? "nav-open" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div className="app">
-      <Sidebar
-        sessions={sessions}
-        projects={projects}
-        selectedId={view === "session" ? selectedId : undefined}
-        onSelect={onSelect}
-        onNewSession={startNew}
-        newSessionOpen={view === "new"}
-        loaded={loaded}
-        error={error}
-      />
-      <main className="main">
-        {newOpened && (
-          <NewSession
-            key={newKey}
-            hidden={view !== "new"}
-            projects={projects}
-            projectsLoaded={loaded}
-            projectsError={projectsError ?? error}
-            currentProjectId={selected?.projectId}
-            nav={nav}
-            onCreated={onCreated}
-            onAnswerLost={reload}
-            onOpenSettings={() => setView("settings")}
-            onOpenProjects={() => setView("projects")}
-          />
+    <DrawerContext.Provider value={drawer}>
+      <div className={appClass}>
+        <Sidebar
+          sessions={sessions}
+          projects={projects}
+          selectedId={view === "session" ? selectedId : undefined}
+          onSelect={onSelect}
+          onNewSession={startNew}
+          newSessionOpen={view === "new"}
+          loaded={loaded}
+          error={error}
+          grouping={grouping}
+          onGrouping={setGrouping}
+          rail={rail}
+          onRail={setRail}
+          narrow={narrow}
+          drawerOpen={drawerOpen}
+          onCloseDrawer={closeDrawer}
+          onOpenSettings={() => setView("settings")}
+        />
+        {narrow && drawerOpen && (
+          <div className="scrim" aria-hidden="true" onClick={closeDrawer} />
         )}
-        {view === "projects" && (
-          <ProjectsPage
-            projects={projects}
-            openSessions={openSessions}
-            loaded={loaded}
-            error={projectsError ?? error}
-            onEvent={apply}
-            nav={nav}
-            onBack={back}
-          />
-        )}
-        {view === "settings" && <SettingsPage nav={nav} onBack={back} />}
-        {/* The session stays mounted under a page: its draft, terminal and
+        <main className="main">
+          {newOpened && (
+            <NewSession
+              key={newKey}
+              hidden={view !== "new"}
+              projects={projects}
+              projectsLoaded={loaded}
+              projectsError={projectsError ?? error}
+              currentProjectId={selected?.projectId}
+              nav={nav}
+              onCreated={onCreated}
+              onAnswerLost={reload}
+              onOpenSettings={() => setView("settings")}
+              onOpenProjects={() => setView("projects")}
+            />
+          )}
+          {view === "projects" && (
+            <ProjectsPage
+              projects={projects}
+              openSessions={openSessions}
+              loaded={loaded}
+              error={projectsError ?? error}
+              onEvent={apply}
+              nav={nav}
+              onBack={back}
+            />
+          )}
+          {view === "settings" && <SettingsPage nav={nav} onBack={back} />}
+          {/* The session stays mounted under a page: its draft, terminal and
             stream survive a look at Projects or Settings. */}
-        {selected ? (
-          <SessionView
-            key={selected.id}
-            session={selected}
-            sandbox={project?.sandbox}
-            projectName={project?.name}
-            catalog={catalog}
-            EventSource={EventSource}
-            onStatus={onStatus}
-            onSeen={onSeen}
-            onUpdated={onUpdated}
-            onArchived={onArchived}
-            nav={nav}
-            hidden={view !== "session"}
-          />
-        ) : view !== "session" ? null : (
-          <section className="view" aria-label={t("session")}>
-            <header className="hdr">
-              <span className="hdr-spacer" />
-              {nav}
-            </header>
-            {loaded && !error && (
-              <div className="empty-start">
-                <p className="big">{t("empty")}</p>
-                <p>{t("emptyHint")}</p>
-                <button
-                  type="button"
-                  className="btn primary empty-new"
-                  onClick={startNew}
-                >
-                  {t("newSession")}
-                </button>
-              </div>
-            )}
-          </section>
-        )}
-      </main>
-    </div>
+          {selected ? (
+            <SessionView
+              key={selected.id}
+              session={selected}
+              sandbox={project?.sandbox}
+              projectName={project?.name}
+              catalog={catalog}
+              EventSource={EventSource}
+              onStatus={onStatus}
+              onSeen={onSeen}
+              onUpdated={onUpdated}
+              onArchived={onArchived}
+              nav={nav}
+              hidden={view !== "session"}
+            />
+          ) : view !== "session" ? null : (
+            <section className="view" aria-label={t("session")}>
+              <header className="hdr">
+                <MenuButton />
+                <span className="hdr-spacer" />
+                {nav}
+              </header>
+              {loaded && !error && (
+                <div className="empty-start">
+                  <p className="big">{t("empty")}</p>
+                  <p>{t("emptyHint")}</p>
+                  <button
+                    type="button"
+                    className="btn primary empty-new"
+                    onClick={startNew}
+                  >
+                    {t("newSession")}
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
+        </main>
+      </div>
+    </DrawerContext.Provider>
   );
 }

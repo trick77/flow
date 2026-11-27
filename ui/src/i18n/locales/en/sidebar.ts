@@ -19,8 +19,20 @@ export const sidebar = {
   searchMatchesLabel: "Matching sessions",
   searchNone: "No session matches.",
   searchNoSessions: "No sessions yet.",
+  groupLabel: "Group sessions",
   groupByStatus: "By status",
   groupByProject: "By project",
+  // The section, grouped by project, of sessions whose project is not known.
+  otherProjects: "Other",
+  // Collapsing the sidebar to its icon rail, and the drawer on narrow screens.
+  collapse: "Collapse sidebar",
+  expand: "Expand sidebar",
+  closeSidebar: "Close sidebar",
+  railLabel: "Sessions (compact)",
+  railSession: "{{project}}: {{title}}",
+  railSessionStatus: "{{project}}: {{title}} ({{status}})",
+  // An idle row's last activity less than a minute ago.
+  timeNow: "now",
   sectionNeeds: "Needs you",
   sectionWorking: "Working",
   sectionDone: "Done",
