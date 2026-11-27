@@ -226,6 +226,11 @@ type MessageDequeued struct {
 // TurnStarted is part of the contract.
 type TurnStarted struct {
 	MessageID string `json:"messageId"`
+	// The session's provider, written by the host.
+	Provider Provider `json:"provider,omitempty"`
+	// The model the session is set to as the turn starts, written by the host. A session can change model between
+	// turns.
+	Model string `json:"model,omitempty"`
 }
 
 // TurnOutcome: lost: the agent process ended mid-turn (crash, sandbox stop); the host writes it on its next
@@ -256,9 +261,26 @@ type TurnEnded struct {
 	Outcome    TurnOutcome `json:"outcome"`
 	DurationMs int64       `json:"durationMs"`
 	Usage      *Usage      `json:"usage,omitempty"`
-	CostUSD    float64     `json:"costUsd,omitempty"`
+	// The turn's cost as the provider reports it; absent when it reports none (not the same as 0).
+	CostUSD *float64 `json:"costUsd,omitempty"`
 	// A code, never a sentence: max_turns, budget, provider_error, ...
-	ErrorCode string `json:"errorCode,omitempty"`
+	ErrorCode string   `json:"errorCode,omitempty"`
+	Provider  Provider `json:"provider,omitempty"`
+	// The model the provider reports for this turn: the one that carried most of its cost when it used several
+	// (subagents). Absent when the adapter cannot tell; readers fall back to turn.started.model.
+	Model string `json:"model,omitempty"`
+}
+
+// ProviderPassthrough: A provider message the adapter does not know, passed through instead of dropped. Readers
+// show it as a plain row: name plus collapsible raw content.
+type ProviderPassthrough struct {
+	Provider Provider `json:"provider"`
+	// The provider's own name for the message (Claude: type, or type/subtype; OpenCode: the event type).
+	Name string `json:"name"`
+	// The provider message as received. Over 16 KiB of encoded JSON: the first 16 KiB of that JSON as a string, and
+	// rawTruncated set.
+	Raw          json.RawMessage `json:"raw"`
+	RawTruncated bool            `json:"rawTruncated,omitempty"`
 }
 
 // AssistantText: A complete assistant text block, Markdown.
@@ -315,8 +337,12 @@ type ToolStarted struct {
 	URL     string `json:"url,omitempty"`
 	// The agent's own short description (subagent title, Bash description).
 	Description string `json:"description,omitempty"`
-	// The raw tool input, for detail views.
+	// The raw tool input, for detail views; for a tool the adapter does not know (kind other), all Flow shows of the
+	// call besides its name.
 	Input json.RawMessage `json:"input,omitempty"`
+	// The writer shortened input to keep the event under the line limit: input is then the first part of its JSON,
+	// as a string.
+	InputTruncated bool `json:"inputTruncated,omitempty"`
 }
 
 // ToolProgress is part of the contract.
@@ -369,6 +395,11 @@ type ToolFinished struct {
 	Output          string `json:"output,omitempty"`
 	OutputTruncated bool   `json:"outputTruncated,omitempty"`
 	DurationMs      int64  `json:"durationMs,omitempty"`
+	// The tool's result as the provider returned it when it is structured (not plain text): an unknown tool's or an
+	// MCP tool's result object. Over 16 KiB of encoded JSON: the first 16 KiB of that JSON as a string, and
+	// rawResultTruncated set.
+	RawResult          json.RawMessage `json:"rawResult,omitempty"`
+	RawResultTruncated bool            `json:"rawResultTruncated,omitempty"`
 }
 
 // PermissionKind is part of the contract.
@@ -936,6 +967,7 @@ const (
 	KindGateFinished        EventKind = "gate.finished"
 	KindNotice              EventKind = "notice"
 	KindLiveSnapshot        EventKind = "live.snapshot"
+	KindProviderPassthrough EventKind = "provider.passthrough"
 )
 
 // EventKindInfo describes one EventKind: its payload type and how it travels.
@@ -984,4 +1016,5 @@ var EventKindInfos = []EventKindInfo{
 	{Kind: KindGateFinished, Ephemeral: false, Sidecar: false, New: func() any { return new(GateFinished) }},
 	{Kind: KindNotice, Ephemeral: false, Sidecar: false, New: func() any { return new(Notice) }},
 	{Kind: KindLiveSnapshot, Ephemeral: true, Sidecar: false, New: func() any { return new(LiveSnapshot) }},
+	{Kind: KindProviderPassthrough, Ephemeral: false, Sidecar: false, New: func() any { return new(ProviderPassthrough) }},
 }

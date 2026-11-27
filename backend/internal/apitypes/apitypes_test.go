@@ -16,8 +16,12 @@ func TestErrorCodeStatus(t *testing.T) {
 		ErrorCodeModeAboveCap:       http.StatusBadRequest,
 		ErrorCodeUpstream:           http.StatusBadGateway,
 		ErrorCodeSandboxUnavailable: http.StatusServiceUnavailable,
-		ErrorCodeInternal:           http.StatusInternalServerError,
-		ErrorCodeTooManySessions:    http.StatusTooManyRequests,
+		// The host's bridge is gone, or all running sandboxes hold the memory ceiling: the service, not the
+		// request.
+		ErrorCodeSandboxNetworkMissing: http.StatusServiceUnavailable,
+		ErrorCodeSandboxMemoryFull:     http.StatusServiceUnavailable,
+		ErrorCodeInternal:              http.StatusInternalServerError,
+		ErrorCodeTooManySessions:       http.StatusTooManyRequests,
 	}
 	for _, c := range ErrorCodeValues {
 		status := c.Status()

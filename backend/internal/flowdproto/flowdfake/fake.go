@@ -320,7 +320,7 @@ func (f *Fake) Command(_ context.Context, c event.Command) (flowdproto.CommandRe
 		return flowdproto.CommandResult{}, fmt.Errorf("%w: session %s", flowdproto.ErrNotFound, c.Session)
 	}
 	if h.cmds[c.ID] {
-		return flowdproto.CommandResult{ID: c.ID, Duplicate: true}, nil
+		return flowdproto.CommandResult{ID: c.ID, Duplicate: true, Queued: queued(h, c)}, nil
 	}
 	p, err := c.Payload()
 	if err != nil {
@@ -329,7 +329,16 @@ func (f *Fake) Command(_ context.Context, c event.Command) (flowdproto.CommandRe
 	h.cmds[c.ID] = true
 	f.apply(h, c.ID, p)
 	f.notify()
-	return flowdproto.CommandResult{ID: c.ID}, nil
+	return flowdproto.CommandResult{ID: c.ID, Queued: queued(h, c)}, nil
+}
+
+// queued reports, as the real host does, whether a message.send waits in the queue.
+func queued(h *host, c event.Command) bool {
+	var m event.MessageSend
+	if c.Kind != event.CmdMessageSend || json.Unmarshal(c.Data, &m) != nil {
+		return false
+	}
+	return slices.ContainsFunc(h.queue, func(q event.MessageSend) bool { return q.MessageID == m.MessageID })
 }
 
 func (f *Fake) apply(h *host, cmd string, p any) {
@@ -390,6 +399,9 @@ func (f *Fake) apply(h *host, cmd string, p any) {
 	case *event.SettingsSet:
 		f.append(h, event.KindSessionSettings, cmd, event.SessionSettings{Model: p.Model, Mode: p.Mode,
 			ModeCap: p.ModeCap})
+		if p.Model != "" {
+			h.spec.Model = p.Model // the next turn's, as the host stamps it
+		}
 	case *event.GateUpdate:
 		switch p.State {
 		case event.GateStateQueued:
@@ -426,7 +438,8 @@ func (f *Fake) startTurn(h *host, cmd string, m event.MessageSend) {
 	h.started = f.Now()
 	f.append(h, event.KindMessageUser, cmd, event.UserMessage{MessageID: m.MessageID, Text: m.Text,
 		Origin: m.Origin, FromSession: m.FromSession})
-	f.append(h, event.KindTurnStarted, cmd, event.TurnStarted{MessageID: m.MessageID})
+	f.append(h, event.KindTurnStarted, cmd, event.TurnStarted{MessageID: m.MessageID, Provider: h.spec.Provider,
+		Model: h.spec.Model})
 	f.setStatus(h, event.SessionStatusWorking)
 	h.pending = f.Script(m.Text)
 	f.resume(h)

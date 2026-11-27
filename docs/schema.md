@@ -2,7 +2,7 @@
 
 # Database schema
 
-7 tables; the diagram is at the end. Go types are the `model.go` structs whose rows they hold.
+19 tables; the diagram is at the end. Go types are the `model.go` structs whose rows they hold.
 
 ## credentials
 
@@ -31,6 +31,325 @@ Indexes:
 Checks:
 
 - `CHECK (kind IN ('github', 'claude_token', 'anthropic', 'opencode_provider'))`
+
+## metering_check_runs
+
+Go types:
+
+- `metering.CheckRun` (internal/metering): CheckRun is one run of the gate for a session's repository.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `repo` | TEXT | no |  |  |
+| `started_at` | TEXT | no |  |  |
+| `duration_ms` | INTEGER | no |  |  |
+| `queue_wait_ms` | INTEGER | no | `0` |  |
+| `result` | TEXT | no |  |  |
+| `exit_code` | INTEGER | yes |  |  |
+| `failing_step` | TEXT | no | `''` |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Checks:
+
+- `CHECK (result IN ('passed', 'failed', 'error', 'cancelled'))`
+
+## metering_counters
+
+Go types:
+
+- `metering.Counter` (internal/metering): Counter is one occurrence of a reliability event (Count > 1 only for a batch).
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `counter` | TEXT | no |  |  |
+| `class` | TEXT | no | `''` |  |
+| `session_id` | TEXT | yes |  |  |
+| `project_id` | TEXT | no | `''` |  |
+| `seq` | INTEGER | yes |  |  |
+| `at` | TEXT | no |  |  |
+| `count` | INTEGER | no | `1` |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `metering_counters_time` (`counter`, `at`)
+- `sqlite_autoindex_metering_counters_2` (`session_id`, `seq`, `counter`) unique
+
+Checks:
+
+- `CHECK (counter IN ('turn_error', 'turn_lost', 'provider_error', 'passthrough', 'unknown_kind', 'flowd_restart', 'flow_restart', 'reconnect', 'credential_renewal_failure'))`
+
+## metering_file_changes
+
+Go types:
+
+- `metering.FileChange` (internal/metering): FileChange is what a turn changed in one repository, as counts.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `seq` | INTEGER | no |  |  |
+| `turn` | TEXT | no | `''` |  |
+| `repo` | TEXT | no |  |  |
+| `files` | INTEGER | no |  |  |
+| `lines_added` | INTEGER | no |  |  |
+| `lines_removed` | INTEGER | no |  |  |
+| `at` | TEXT | no |  |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `sqlite_autoindex_metering_file_changes_2` (`session_id`, `seq`) unique
+
+## metering_helper_calls
+
+Go types:
+
+- `metering.HelperCall` (internal/metering): HelperCall is one of the backend's own model calls (titles, branch names, summaries, commit and PR text).
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `task` | TEXT | no |  |  |
+| `session_id` | TEXT | yes |  |  |
+| `project_id` | TEXT | no | `''` |  |
+| `provider` | TEXT | no |  |  |
+| `model` | TEXT | no |  |  |
+| `started_at` | TEXT | no |  |  |
+| `duration_ms` | INTEGER | no |  |  |
+| `input_tokens` | INTEGER | no | `0` |  |
+| `output_tokens` | INTEGER | no | `0` |  |
+| `cost_usd` | REAL | yes |  |  |
+| `outcome` | TEXT | no |  |  |
+| `error_class` | TEXT | no | `''` |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Checks:
+
+- `CHECK (outcome IN ('ok', 'error'))`
+
+## metering_permission_decisions
+
+Go types:
+
+- `metering.PermissionDecision` (internal/metering): PermissionDecision is the decision on a permission request, with the request's facts copied in.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `seq` | INTEGER | no |  |  |
+| `request_id` | TEXT | no |  |  |
+| `tool` | TEXT | no | `''` |  |
+| `kind` | TEXT | no | `''` |  |
+| `decision` | TEXT | no |  |  |
+| `requested_at` | TEXT | yes |  |  |
+| `decided_at` | TEXT | no |  |  |
+| `wait_ms` | INTEGER | yes |  |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `sqlite_autoindex_metering_permission_decisions_2` (`session_id`, `seq`) unique
+
+## metering_permission_requests
+
+Go types:
+
+- `metering.PermissionRequest` (internal/metering): PermissionRequest is a permission request as asked: the tool and its permission class, never what it would run.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `seq` | INTEGER | no |  |  |
+| `request_id` | TEXT | no |  |  |
+| `tool` | TEXT | no |  |  |
+| `kind` | TEXT | no |  |  |
+| `mode` | TEXT | no | `''` |  |
+| `requested_at` | TEXT | no |  |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `metering_permission_requests_request` (`session_id`, `request_id`)
+- `sqlite_autoindex_metering_permission_requests_2` (`session_id`, `seq`) unique
+
+## metering_pull_requests
+
+Go types:
+
+- `metering.PullRequest` (internal/metering): PullRequest is one state change of a session's pull request: every open, close, reopen and merge is a row.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `repo` | TEXT | no |  |  |
+| `number` | INTEGER | no |  |  |
+| `action` | TEXT | no |  |  |
+| `seq` | INTEGER | yes |  |  |
+| `at` | TEXT | no |  |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `sqlite_autoindex_metering_pull_requests_2` (`session_id`, `seq`, `repo`, `number`) unique
+
+Checks:
+
+- `CHECK (action IN ('opened', 'reopened', 'merged', 'closed'))`
+
+## metering_sandbox_samples
+
+Go types:
+
+- `metering.SandboxSample` (internal/metering): SandboxSample is a coarse sample of a sandbox, or of one session's unit in it. The counters (CPU, pressure-stall totals, OOM kills) are cumulative since the unit started, as the kernel reports them.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `sandbox_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `session_id` | TEXT | yes |  |  |
+| `at` | TEXT | no |  |  |
+| `state` | TEXT | no |  |  |
+| `memory_bytes` | INTEGER | no | `0` |  |
+| `swap_bytes` | INTEGER | no | `0` |  |
+| `disk_bytes` | INTEGER | no | `0` |  |
+| `cpu_usec` | INTEGER | no | `0` |  |
+| `psi_cpu_some_us` | INTEGER | no | `0` |  |
+| `psi_mem_some_us` | INTEGER | no | `0` |  |
+| `psi_mem_full_us` | INTEGER | no | `0` |  |
+| `psi_io_some_us` | INTEGER | no | `0` |  |
+| `psi_io_full_us` | INTEGER | no | `0` |  |
+| `oom_kills` | INTEGER | no | `0` |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `metering_sandbox_samples_time` (`sandbox_id`, `at`)
+
+## metering_status_changes
+
+Go types:
+
+- `metering.StatusChange` (internal/metering): StatusChange is one session status transition: FromStatus held from FromAt until At.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `seq` | INTEGER | no |  |  |
+| `from_status` | TEXT | no | `''` |  |
+| `from_at` | TEXT | yes |  |  |
+| `to_status` | TEXT | no |  |  |
+| `at` | TEXT | no |  |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `sqlite_autoindex_metering_status_changes_2` (`session_id`, `seq`) unique
+
+## metering_turn_starts
+
+Go types:
+
+- `metering.TurnStart` (internal/metering): TurnStart is a turn as it started: the provider and model it runs on, fixed then so a model change during the turn does not move it.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `seq` | INTEGER | no |  |  |
+| `turn` | TEXT | no |  |  |
+| `provider` | TEXT | no | `''` |  |
+| `model` | TEXT | no | `''` |  |
+| `at` | TEXT | no |  |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `metering_turn_starts_turn` (`session_id`, `turn`)
+- `sqlite_autoindex_metering_turn_starts_2` (`session_id`, `seq`) unique
+
+## metering_turns
+
+Go types:
+
+- `metering.Turn` (internal/metering): Turn is one ended turn of a session: who ran it on what, how long, and what it used.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | no |  |  |
+| `project_id` | TEXT | no |  |  |
+| `parent_session_id` | TEXT | yes |  |  |
+| `seq` | INTEGER | no |  |  |
+| `turn` | TEXT | no | `''` |  |
+| `repos` | TEXT | no | `'[]'` |  |
+| `provider` | TEXT | no |  |  |
+| `model` | TEXT | no | `''` |  |
+| `credential_mode` | TEXT | no | `''` |  |
+| `started_at` | TEXT | no |  |  |
+| `ended_at` | TEXT | no |  |  |
+| `duration_ms` | INTEGER | no |  |  |
+| `outcome` | TEXT | no |  |  |
+| `error_code` | TEXT | no | `''` |  |
+| `input_tokens` | INTEGER | no | `0` |  |
+| `output_tokens` | INTEGER | no | `0` |  |
+| `cache_read_tokens` | INTEGER | no | `0` |  |
+| `cache_write_tokens` | INTEGER | no | `0` |  |
+| `cost_usd` | REAL | yes |  |  |
+| `api_equivalent_usd` | REAL | yes |  |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `metering_turns_time` (`started_at`)
+- `sqlite_autoindex_metering_turns_2` (`session_id`, `seq`) unique
+
+## metering_waits
+
+Go types:
+
+- `metering.Wait` (internal/metering): Wait is a bottleneck: something waited for a resource from StartedAt to EndedAt.
+
+| Column | Type | Null | Default | PK |
+| --- | --- | --- | --- | --- |
+| `id` | TEXT | no |  | 1 |
+| `session_id` | TEXT | yes |  |  |
+| `project_id` | TEXT | no | `''` |  |
+| `reason` | TEXT | no |  |  |
+| `started_at` | TEXT | no |  |  |
+| `ended_at` | TEXT | no |  |  |
+| `duration_ms` | INTEGER | no |  |  |
+| `resource` | TEXT | no | `''` |  |
+| `position` | INTEGER | yes |  |  |
+| `holder_session_id` | TEXT | yes |  |  |
+| `holder_repo` | TEXT | no | `''` |  |
+| `seq` | INTEGER | yes |  |  |
+| `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+
+Indexes:
+
+- `metering_waits_time` (`reason`, `started_at`)
+- `sqlite_autoindex_metering_waits_2` (`session_id`, `seq`, `reason`) unique
+
+Checks:
+
+- `CHECK (reason IN ('check_queue', 'sandbox_start', 'sandbox_resume', 'owner_approval', 'owner_question', 'owner_plan', 'rate_limit', 'provider_retry', 'started_sessions', 'credential_renewal'))`
 
 ## owner_profile
 
@@ -123,6 +442,7 @@ Go types:
 | `started_at` | TEXT | yes |  |  |
 | `created_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
 | `updated_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+| `ipv4` | TEXT | yes |  |  |
 
 Foreign keys:
 
@@ -130,6 +450,7 @@ Foreign keys:
 
 Indexes:
 
+- `sandboxes_ipv4` (`ipv4`) unique
 - `sqlite_autoindex_sandboxes_2` (`project_id`) unique
 - `sqlite_autoindex_sandboxes_3` (`instance`) unique
 
@@ -245,6 +566,176 @@ erDiagram
         TEXT created_at
         TEXT updated_at
     }
+    metering_check_runs {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        TEXT repo
+        TEXT started_at
+        INTEGER duration_ms
+        INTEGER queue_wait_ms
+        TEXT result
+        INTEGER exit_code
+        TEXT failing_step
+        TEXT recorded_at
+    }
+    metering_counters {
+        TEXT id PK
+        TEXT counter
+        TEXT class
+        TEXT session_id
+        TEXT project_id
+        INTEGER seq
+        TEXT at
+        INTEGER count
+        TEXT recorded_at
+    }
+    metering_file_changes {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        INTEGER seq
+        TEXT turn
+        TEXT repo
+        INTEGER files
+        INTEGER lines_added
+        INTEGER lines_removed
+        TEXT at
+        TEXT recorded_at
+    }
+    metering_helper_calls {
+        TEXT id PK
+        TEXT task
+        TEXT session_id
+        TEXT project_id
+        TEXT provider
+        TEXT model
+        TEXT started_at
+        INTEGER duration_ms
+        INTEGER input_tokens
+        INTEGER output_tokens
+        REAL cost_usd
+        TEXT outcome
+        TEXT error_class
+        TEXT recorded_at
+    }
+    metering_permission_decisions {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        INTEGER seq
+        TEXT request_id
+        TEXT tool
+        TEXT kind
+        TEXT decision
+        TEXT requested_at
+        TEXT decided_at
+        INTEGER wait_ms
+        TEXT recorded_at
+    }
+    metering_permission_requests {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        INTEGER seq
+        TEXT request_id
+        TEXT tool
+        TEXT kind
+        TEXT mode
+        TEXT requested_at
+        TEXT recorded_at
+    }
+    metering_pull_requests {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        TEXT repo
+        INTEGER number
+        TEXT action
+        INTEGER seq
+        TEXT at
+        TEXT recorded_at
+    }
+    metering_sandbox_samples {
+        TEXT id PK
+        TEXT sandbox_id
+        TEXT project_id
+        TEXT session_id
+        TEXT at
+        TEXT state
+        INTEGER memory_bytes
+        INTEGER swap_bytes
+        INTEGER disk_bytes
+        INTEGER cpu_usec
+        INTEGER psi_cpu_some_us
+        INTEGER psi_mem_some_us
+        INTEGER psi_mem_full_us
+        INTEGER psi_io_some_us
+        INTEGER psi_io_full_us
+        INTEGER oom_kills
+        TEXT recorded_at
+    }
+    metering_status_changes {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        INTEGER seq
+        TEXT from_status
+        TEXT from_at
+        TEXT to_status
+        TEXT at
+        TEXT recorded_at
+    }
+    metering_turn_starts {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        INTEGER seq
+        TEXT turn
+        TEXT provider
+        TEXT model
+        TEXT at
+        TEXT recorded_at
+    }
+    metering_turns {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        TEXT parent_session_id
+        INTEGER seq
+        TEXT turn
+        TEXT repos
+        TEXT provider
+        TEXT model
+        TEXT credential_mode
+        TEXT started_at
+        TEXT ended_at
+        INTEGER duration_ms
+        TEXT outcome
+        TEXT error_code
+        INTEGER input_tokens
+        INTEGER output_tokens
+        INTEGER cache_read_tokens
+        INTEGER cache_write_tokens
+        REAL cost_usd
+        REAL api_equivalent_usd
+        TEXT recorded_at
+    }
+    metering_waits {
+        TEXT id PK
+        TEXT session_id
+        TEXT project_id
+        TEXT reason
+        TEXT started_at
+        TEXT ended_at
+        INTEGER duration_ms
+        TEXT resource
+        INTEGER position
+        TEXT holder_session_id
+        TEXT holder_repo
+        INTEGER seq
+        TEXT recorded_at
+    }
     owner_profile {
         INTEGER id PK
         TEXT git_name
@@ -290,6 +781,7 @@ erDiagram
         TEXT started_at
         TEXT created_at
         TEXT updated_at
+        TEXT ipv4
     }
     session_worktrees {
         TEXT id PK

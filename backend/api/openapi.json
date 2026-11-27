@@ -45,15 +45,15 @@
     "/api/auth/callback": {
       "get": {
         "tags": ["auth"], "operationId": "authCallback", "x-flow-area": "auth", "security": [],
-        "summary": "OIDC callback", "description": "Completes the code flow; admits only the configured subject or group.",
-        "responses": { "302": { "description": "Back to the app, signed in." }, "403": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "summary": "OIDC callback", "description": "Completes the code flow; admits only the configured subject or group. A top-level navigation: every refusal (bad state, provider error, an identity that is not the owner) redirects too, never an error body; the reason is logged only.",
+        "responses": { "302": { "description": "Back to the app: to / signed in, or to /?signin=failed without a session." }, "500": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/auth/logout": {
       "post": {
-        "tags": ["auth"], "operationId": "authLogout", "x-flow-area": "auth",
-        "summary": "Sign out", "description": "Clears the session cookie.",
-        "responses": { "204": { "description": "Signed out." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "tags": ["auth"], "operationId": "authLogout", "x-flow-area": "auth", "security": [],
+        "summary": "Sign out", "description": "Clears the session cookie, valid or not: a stale or shadowed cookie must stay clearable. Needs no session, only a request from the public origin (forbidden otherwise).",
+        "responses": { "204": { "description": "Signed out." }, "403": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/profile": {
@@ -442,7 +442,7 @@
   },
   "components": {
     "securitySchemes": {
-      "ownerSession": { "type": "apiKey", "in": "cookie", "name": "flow_session", "description": "kit/auth's signed, host-only session cookie." }
+      "ownerSession": { "type": "apiKey", "in": "cookie", "name": "__Host-flow_session", "description": "kit/auth's signed session cookie; __Host- makes it Secure, Path=/ and host-only (docs/auth.md)." }
     },
     "parameters": {
       "ProjectID": { "name": "projectId", "in": "path", "required": true, "description": "Project id.", "schema": { "type": "string" } },
@@ -473,7 +473,7 @@
           "not_implemented", "unauthenticated", "forbidden", "preview_origin", "not_found", "invalid_request",
           "conflict", "internal", "upstream", "github_not_connected", "sandbox_unavailable", "sandbox_busy",
           "session_archived", "request_not_pending", "mode_above_cap", "provider_unavailable", "repo_in_use",
-          "too_many_sessions"
+          "too_many_sessions", "sandbox_network_missing", "sandbox_memory_full"
         ]
       },
       "Error": {

@@ -230,6 +230,8 @@ type CommandResult struct {
 	ID string `json:"id"`
 	// Duplicate: the host had this command id already; nothing was applied again.
 	Duplicate bool `json:"duplicate,omitempty"`
+	// Queued: a message.send the host queued behind the running turn (also on a duplicate, while it waits).
+	Queued bool `json:"queued,omitempty"`
 }
 
 // ControlKind is a request flowd raises for Flow to decide: the child-session tools and the gate queue.

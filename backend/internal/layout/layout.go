@@ -34,6 +34,9 @@ const (
 	Config   = "/etc/flow/flowd.json" // flowd's config and token, pushed by Flow, root 0600
 	Unit     = "/etc/systemd/system/flowd.service"
 	Settings = "/etc/flow/claude-settings.json" // the Flow settings layer for Claude Code (--settings)
+	// NetworkConfig is eth0's systemd-networkd unit, written by Flow through the file API before every start
+	// (sandbox.NIC.GuestFiles): the static address Flow assigned. Named to sort before the image's own units.
+	NetworkConfig = "/etc/systemd/network/00-flow-eth0.network"
 )
 
 // Home volume, mounted at HomeVolume in every sandbox.

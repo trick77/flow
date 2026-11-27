@@ -105,7 +105,8 @@ func TestGo_rendersTypesEnumsAndUnions(t *testing.T) {
 		"Colors []Color `json:\"colors\"`",
 		"N int64 `json:\"n\"`",
 		"Small int `json:\"small,omitempty\"`",
-		"Ratio float64 `json:\"ratio,omitempty\"`",
+		// An optional number is a pointer: an absent value is not a zero one (a cost not reported is not free).
+		"Ratio *float64 `json:\"ratio,omitempty\"`",
 		"Tags map[string]string `json:\"tags,omitempty\"`",
 		"Nested *Empty `json:\"nested,omitempty\"`",
 		"Color Color `json:\"color,omitempty\"`",

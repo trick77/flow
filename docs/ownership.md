@@ -30,17 +30,18 @@ is added before code imports it.
 
 | Area | Owns | Implements | Uses |
 |---|---|---|---|
-| auth | `internal/auth` | `httpapi.Auth`, `httpapi.Guard` | kit/auth |
+| auth | `internal/auth`, `docs/auth.md` | `httpapi.Auth`, `httpapi.Guard` | kit/auth |
 | profile and settings (backend) | `internal/profile` | `httpapi.Profile`, `profile.Store` | flowdproto (config sync) |
 | GitHub App and credentials | `internal/github`, `internal/credentials` | `httpapi.Connections`, `credentials.Store`, `Sealer`, `Source` | profile |
 | projects | `internal/projects` | `httpapi.Projects`, `projects.Store` | sandboxes |
-| sandboxes and Incus | `internal/sandboxes`, `internal/sandbox/incus`, `deploy/` (host setup, base image, dev run) | `httpapi.Sandboxes`, `sandboxes.Store`, `sandbox.Runtime` | flowdproto, credentials.Source |
+| sandboxes and Incus | `internal/sandboxes`, `internal/sandbox/incus`, `deploy/` (host setup and teardown, base image, dev run), the sandbox network (`config/network.go`) | `httpapi.Sandboxes`, `sandboxes.Store`, `sandboxes.Addresses`, `sandbox.Runtime` | flowdproto, credentials.Source |
 | sessions | `internal/sessions`, `internal/gate` | `httpapi.Sessions`, `sessions.Store`, control requests (child tools, gate) | flowdproto, projects, sandboxes, helper |
 | timeline API | `internal/timeline` | `httpapi.Timeline` (SSE by seq, log pages, commands) | flowdproto, sessions.Store |
 | review | `internal/review` | `httpapi.Review` | flowdproto, github |
 | terminal backend | `internal/terminals` | `httpapi.Terminals` | flowdproto |
 | preview | `internal/preview` | `httpapi.Previews`, `Options.Preview`, `Options.IsPreviewHost` | flowdproto |
-| helper-model tasks | `internal/helper` | titles, branch names, summaries, PR text | toolkit/llmwire |
+| helper-model tasks | `internal/helper` | titles, branch names, summaries, PR text | toolkit/llmwire, metering |
+| metering | `internal/metering` | the usage ledger: `sessions.Meter` (fed by the follower), `metering.Store`, the `Record*` API | imports no area (every area may call it); reads `session_worktrees` + `project_repos` for a turn's repos |
 | flowd runtime | `cmd/flowd`, `internal/supervisor`, `internal/flowdclient`, `internal/eventlog`, `internal/mcp` | flowdproto server and client, units, credentials delivery, MCP, gate shim, terminals (`flowd term`) | layout, hostproto |
 | flowd Claude adapter host | `internal/host` | `flowd host`: log writer, queue, status, sidecar child | eventlog, hostproto, event |
 | flowd OpenCode adapter | `internal/opencode` | OpenCode bridge inside the host | event |
@@ -52,6 +53,26 @@ is added before code imports it.
 | UI terminal | `ui/src/terminal`, `locales/en/terminal.ts` | drawer over the WebSocket | API client |
 | UI pages | `ui/src/pages`, `locales/en/projects.ts`, `settings.ts` | Projects and Settings | API client |
 | UI API client | `ui/src/api` (not `*.gen.ts`), `locales/en/errors.ts` | typed fetch, error codes, EventSource by seq | `ui/src/api/types.gen.ts` |
+
+Metering call sites (spec "Metering from day one"). The follower already feeds turn starts and turns, status
+transitions, owner waits, permission requests and decisions, file-change counts and the counters `passthrough`
+(class = the provider's message name), `unknown_kind` (class = the kind), `turn_error` (every error turn, class =
+`errorCode` or `unknown`), `provider_error` (the same minus the owner's limits `max_turns`, `budget`,
+`max_budget_usd`, `max_structured_output_retries` and the host's `adapter`, `adapter_exited`) and `turn_lost`.
+Everything else is recorded by the area that sees it, through the `*metering.Recorder` that `cmd/flow` wires into
+the sessions service (one per server):
+
+| Record | Owner | When |
+|---|---|---|
+| `RecordCheckRun`, `RecordWait` reason `check_queue` (position, holder session and repo) | sessions (`internal/gate`) | a gate run ends; a queued run gets its slot |
+| `RecordWait` `sandbox_start` / `sandbox_resume` | sandboxes and Incus | a session waited for its sandbox to start or resume |
+| `RecordWait` `rate_limit` / `provider_retry` | flowd Claude adapter host, OpenCode adapter (via an event Flow can follow, or `notice` params) | a rate limit or retry ends |
+| `RecordWait` `started_sessions` | sessions | a parent waited for its started sessions |
+| `RecordWait` `credential_renewal`, `RecordCounter` `credential_renewal_failure` | GitHub App and credentials | a renewal held a session up / failed |
+| `RecordHelperCall` | helper-model tasks | every llmwire call |
+| `RecordPullRequest` opened / reopened / merged / closed, `Seq` set when read from `pull_requests.updated` | sessions or github | every state change (one row each; a repeat of the same id, or of the same event and PR, is a no-op) |
+| `RecordSandboxSample` (memory, swap, disk, CPU, PSI totals, OOM kills) | sandboxes and Incus, flowd runtime (per unit) | every sampling interval |
+| `RecordCounter` `flowd_restart`, `flow_restart`, `reconnect` | sandboxes / `cmd/flow` / flowdclient | on each occurrence |
 
 Rules: an area that needs a new endpoint, event kind, column or dependency asks the coordinator; it never edits the
 shared file itself. An API area writes its handlers in its own package and is wired in `cmd/flow`. Tests live next to
