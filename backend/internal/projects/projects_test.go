@@ -114,11 +114,206 @@ func TestRemoteDefaultBranch(t *testing.T) {
 	}
 }
 
-type fakeSandboxes struct{ setups []string }
+type fakeSandboxes struct {
+	setups, deletes []string
+	deleteErr       error
+}
 
 func (f *fakeSandboxes) Setup(id string) { f.setups = append(f.setups, id) }
 func (f *fakeSandboxes) Describe(context.Context, string) apitypes.Sandbox {
 	return apitypes.Sandbox{State: apitypes.SandboxStateSetup}
+}
+func (f *fakeSandboxes) Delete(_ context.Context, id string) error {
+	f.deletes = append(f.deletes, id)
+	return f.deleteErr
+}
+
+// addSession puts a session with a worktree of repo into the project, archived or not, as the sessions area does.
+func addSession(t *testing.T, s SQL, id, projectID, repoID string, archived bool) {
+	t.Helper()
+	var at any
+	if archived {
+		at = "2026-11-27T10:00:00.000Z"
+	}
+	if _, err := s.DB.ExecContext(t.Context(), `INSERT INTO sessions (id, project_id, name, provider, model, mode, branch,
+		archived_at) VALUES (?, ?, ?, 'claude', 'm', 'ask', 'b', ?)`, id, projectID, id, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(t.Context(), `INSERT INTO session_worktrees (id, session_id, repo_id, branch, path,
+		base_ref) VALUES (?, ?, ?, 'b', '/w', 'origin/main')`, id+"-wt", id, repoID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A project whose sessions have worktrees goes with them; other projects keep theirs.
+func TestSQL_DeleteWithSessions(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	if err := s.Create(ctx, Project{ID: "p1", Name: "demo"}, []Repo{{ID: "r1", FullName: "a/b", DefaultBranch: "main"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(ctx, Project{ID: "p2", Name: "other"}, []Repo{{ID: "r2", FullName: "a/c", DefaultBranch: "main"}}); err != nil {
+		t.Fatal(err)
+	}
+	addSession(t, s, "s1", "p1", "r1", true)
+	addSession(t, s, "s2", "p2", "r2", false)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO sandboxes (id, project_id, instance) VALUES ('sb1', 'p1', 'flow-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, "p1"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	for q, want := range map[string]int{
+		`SELECT count(*) FROM sessions`:          1,
+		`SELECT count(*) FROM session_worktrees`: 1,
+		`SELECT count(*) FROM project_repos`:     1,
+		`SELECT count(*) FROM sandboxes`:         0,
+	} {
+		if err := s.DB.QueryRowContext(ctx, q).Scan(&n); err != nil || n != want {
+			t.Errorf("%s = %d, %v; want %d", q, n, err, want)
+		}
+	}
+	_ = s.DB.Close()
+	if err := s.Delete(ctx, "p2"); err == nil {
+		t.Error("closed database: no error")
+	}
+}
+
+func TestAPI_DeleteProject(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	if err := s.Create(ctx, Project{ID: "p1", Name: "demo"}, []Repo{{ID: "r1", FullName: "a/b", DefaultBranch: "main"}}); err != nil {
+		t.Fatal(err)
+	}
+	addSession(t, s, "s1", "p1", "r1", true)
+	sb := &fakeSandboxes{}
+	active := 1
+	var events []apitypes.AppEvent
+	a := &API{Store: s, Sandboxes: sb,
+		ActiveSessions: func(_ context.Context, id string) (int, error) {
+			if id == "broken" {
+				return 0, errors.New("down")
+			}
+			return active, nil
+		},
+		Publish: func(e apitypes.AppEvent) { events = append(events, e) }}
+	path := map[string]string{"projectId": "p1"}
+	del := func() *httptest.ResponseRecorder { return call(t, a.DeleteProject, "DELETE", "/", "", path) }
+	if w := call(t, a.DeleteProject, "DELETE", "/", "", map[string]string{"projectId": "nope"}); w.Code != 404 {
+		t.Errorf("missing project: %d", w.Code)
+	}
+	if w := del(); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "project_has_sessions") ||
+		len(sb.deletes) != 0 {
+		t.Errorf("with a session in use: %d %s, deletes %v", w.Code, w.Body, sb.deletes)
+	}
+	active = 0
+	sb.deleteErr = apitypes.Fail(apitypes.ErrorCodeSandboxBusy, "")
+	if w := del(); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "sandbox_busy") {
+		t.Errorf("busy sandbox: %d %s", w.Code, w.Body)
+	}
+	if _, err := s.Get(ctx, "p1"); err != nil {
+		t.Errorf("a refused delete removed the project: %v", err)
+	}
+	sb.deleteErr = nil
+	if w := del(); w.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", w.Code, w.Body)
+	}
+	if _, err := s.Get(ctx, "p1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleted project: %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != apitypes.AppEventKindProjectRemoved || events[0].ProjectID != "p1" {
+		t.Errorf("events %+v", events)
+	}
+	if err := s.Create(ctx, Project{ID: "broken", Name: "b"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if w := call(t, a.DeleteProject, "DELETE", "/", "", map[string]string{"projectId": "broken"}); w.Code != 500 {
+		t.Errorf("counting sessions failed: %d", w.Code)
+	}
+	_ = s.DB.Close()
+	if w := del(); w.Code != 500 {
+		t.Errorf("closed database: %d", w.Code)
+	}
+}
+
+// A session made after the API counted (its row there, not archived) keeps the project and every row: nothing is
+// removed without its session.removed.
+func TestAPI_DeleteProject_sessionMadeMeanwhile(t *testing.T) {
+	s := open(t)
+	ctx := t.Context()
+	if err := s.Create(ctx, Project{ID: "p1", Name: "demo"}, []Repo{{ID: "r1", FullName: "a/b", DefaultBranch: "main"}}); err != nil {
+		t.Fatal(err)
+	}
+	addSession(t, s, "s1", "p1", "r1", true)
+	addSession(t, s, "s2", "p1", "r1", false)
+	if err := s.Delete(ctx, "p1"); !errors.Is(err, ErrHasSessions) {
+		t.Errorf("Delete with an open session: %v", err)
+	}
+	// The count said none (it ran before the session was made).
+	a := &API{Store: s, Sandboxes: &fakeSandboxes{},
+		ActiveSessions: func(context.Context, string) (int, error) { return 0, nil }}
+	w := call(t, a.DeleteProject, "DELETE", "/", "", map[string]string{"projectId": "p1"})
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "project_has_sessions") {
+		t.Errorf("delete: %d %s", w.Code, w.Body)
+	}
+	var n int
+	if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM sessions`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("sessions left %d, %v; want both", n, err)
+	}
+	if _, err := s.Get(ctx, "p1"); err != nil {
+		t.Errorf("project: %v", err)
+	}
+}
+
+// orderedSandboxes records Setup in the same log as the published events, and its bring-up fails at once.
+type orderedSandboxes struct {
+	fakeSandboxes
+	log   *[]string
+	state apitypes.SandboxState
+}
+
+func (o *orderedSandboxes) Setup(string) {
+	*o.log = append(*o.log, "setup")
+	o.state = apitypes.SandboxStateFailed
+}
+
+func (o *orderedSandboxes) Describe(context.Context, string) apitypes.Sandbox {
+	return apitypes.Sandbox{State: o.state}
+}
+
+// A new project's event goes out before its setup starts, so a bring-up that fails at once is not followed by the
+// project's older state; the answer carries the state after the start.
+func TestAPI_CreateProject_publishesBeforeSetup(t *testing.T) {
+	var log []string
+	sb := &orderedSandboxes{log: &log, state: apitypes.SandboxStateNone}
+	a := &API{Store: open(t), Sandboxes: sb,
+		DefaultBranch: func(context.Context, string) (string, error) { return "main", nil },
+		Publish:       func(e apitypes.AppEvent) { log = append(log, string(e.Kind)) }}
+	w := call(t, a.CreateProject, "POST", "/api/projects", `{"name":"demo","repos":["a/b"]}`, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body)
+	}
+	if strings.Join(log, ",") != "project.updated,setup" {
+		t.Errorf("order %v", log)
+	}
+	var p apitypes.Project
+	_ = json.Unmarshal(w.Body.Bytes(), &p)
+	if p.Sandbox.State != apitypes.SandboxStateFailed {
+		t.Errorf("answer's sandbox %+v", p.Sandbox)
+	}
+}
+
+// The name's limit counts characters, as the form does: 64 umlauts (128 bytes) pass, 65 do not.
+func TestAPI_CreateProject_nameInCharacters(t *testing.T) {
+	a := &API{Store: open(t), Sandboxes: &fakeSandboxes{},
+		DefaultBranch: func(context.Context, string) (string, error) { return "main", nil }}
+	for n, code := range map[int]int{64: http.StatusCreated, 65: http.StatusBadRequest} {
+		body := `{"name":"` + strings.Repeat("ä", n) + `","repos":["a/b"]}`
+		if w := call(t, a.CreateProject, "POST", "/api/projects", body, nil); w.Code != code {
+			t.Errorf("%d characters: %d %s, want %d", n, w.Code, w.Body, code)
+		}
+	}
 }
 
 func call(t *testing.T, h http.HandlerFunc, method, target, body string, path map[string]string) *httptest.ResponseRecorder {
@@ -150,6 +345,12 @@ func TestAPI(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &p)
 	if len(p.Repos) != 2 || p.Repos[0].FullName != "trick77/toolkit" || p.Sandbox.State != "setup" || len(sb.setups) != 1 {
 		t.Errorf("project %+v, setups %v", p, sb.setups)
+	}
+	var published []apitypes.AppEvent
+	a.Publish = func(e apitypes.AppEvent) { published = append(published, e) }
+	if w := call(t, a.CreateProject, "POST", "/api/projects", `{"name":"second","repos":["a/b"]}`, nil); w.Code != 201 ||
+		len(published) != 1 || published[0].Kind != apitypes.AppEventKindProjectUpdated || published[0].Project == nil {
+		t.Errorf("create with an event stream: %d, events %+v", w.Code, published)
 	}
 	for body, code := range map[string]int{
 		`{"name":"demo","repos":["a/b"]}`:           http.StatusConflict,

@@ -163,13 +163,26 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 	manager.Warmed = func(projectID string, api flowdproto.API) {
 		svc.Sweep(context.WithoutCancel(ctx), projectID, api)
 	}
+	// A project's sandbox and rows go only when no session of it is in use (archived ones go with them).
+	active := func(ctx context.Context, projectID string) (int, error) {
+		list, err := svc.Store.List(ctx, sessions.ListFilter{ProjectID: projectID})
+		return len(list), err
+	}
+	manager.ActiveSessions = active
+	// Before the followers start: nothing runs yet, so a setup, stop or delete still recorded was cut off.
+	if err := manager.Reconcile(ctx); err != nil {
+		return err
+	}
 	if err := svc.Start(ctx); err != nil {
 		return err
 	}
+	publish := func(e apitypes.AppEvent) { hub.Publish(e) }
+	areas.Profile = &profile.API{Store: profile.SQL{DB: db}, Changed: creds.Changed, Publish: publish}
 	areas.Connections = &credentials.API{Service: creds}
 	areas.Projects = &projects.API{Store: projectStore, Sandboxes: manager,
-		DefaultBranch: projects.RemoteDefaultBranch("https://github.com/", &http.Client{Timeout: 30 * time.Second})}
-	areas.Sandboxes = &sandboxes.API{Manager: manager}
+		DefaultBranch:  projects.RemoteDefaultBranch("https://github.com/", &http.Client{Timeout: 30 * time.Second}),
+		ActiveSessions: active, Publish: publish}
+	areas.Sandboxes = &sandboxes.API{Manager: manager, ActiveSessions: active}
 	areas.Sessions = &sessions.API{Service: svc}
 	areas.Timeline = &timeline.API{Sessions: svc, Hub: hub}
 	areas.Terminals = &terminals.API{Sessions: svc.Store, Projects: projectStore, Sandboxes: manager, Lock: svc.Lock}
@@ -201,18 +214,32 @@ func sandboxManager(cfg config.Config, db *sql.DB, projectStore projects.SQL, ru
 		}
 		return b, nil
 	})
-	return &sandboxes.Manager{Store: sandboxes.SQL{DB: db}, Projects: projectStore, Runtime: runtime,
+	m := &sandboxes.Manager{Store: sandboxes.SQL{DB: db}, Projects: projectStore, Runtime: runtime,
 		Dialer: flowdclient.NewDialer(), Sealer: sealer, Image: cfg.SandboxImage, Network: cfg.SandboxNetwork,
 		Memory: cfg.SandboxMemory, CPUs: cfg.SandboxCPUs, MemoryTotal: cfg.SandboxMemoryTotal,
 		HomeVolume: cfg.HomeVolume, Sidecar: bundle,
 		Addresses: sandboxes.SQLAddresses{DB: db, Network: cfg.SandboxNetwork},
 		Version:   version.String(), Log: slog.Default(), Wait: time.Minute, Poll: 200 * time.Millisecond,
+		LockWait: 2 * time.Second,
 		Flowd: func(arch string) ([]byte, error) {
 			return os.ReadFile(filepath.Join(cfg.FlowdDir, fmt.Sprintf("flowd-linux-%s", arch)))
-		},
-		Changed: func(projectID string) {
-			hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: projectID})
 		}}
+	m.Changed = sandboxChanged(m, hub)
+	return m
+}
+
+// sandboxChanged publishes a sandbox's change. The event carries the state, so the UI shows a setup turning warm
+// without asking again; a row that cannot be read publishes nothing (a made-up none would show a warm sandbox as not
+// set up), the next change or a reload brings the truth.
+func sandboxChanged(m *sandboxes.Manager, hub *sse.Hub[apitypes.AppEvent]) func(projectID string) {
+	return func(projectID string) {
+		sb, err := m.Lookup(context.Background(), projectID)
+		if err != nil {
+			slog.Warn("sandbox change not published: its row could not be read", "project", projectID, logging.Err(err))
+			return
+		}
+		hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: projectID, Sandbox: &sb})
+	}
 }
 
 // sessionService is the sessions area, its follower feeding the metering ledger on the same database.

@@ -64,7 +64,7 @@
       },
       "patch": {
         "tags": ["profile"], "operationId": "updateProfile", "x-flow-area": "profile",
-        "summary": "Change the profile", "description": "Absent fields stay as they are.",
+        "summary": "Change the profile", "description": "Absent fields stay as they are; an empty gitName, gitEmail or configRepo clears it. Text with a control character, a gitEmail that is no address, or a value past its bound is invalid_request with the field. A changed git identity reaches warm sandboxes at once and applies to session hosts started afterwards; sessions get it only when both name and email are set.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProfileUpdate" } } } },
         "responses": { "200": { "$ref": "#/components/responses/Profile" }, "400": { "$ref": "#/components/responses/Error" }, "401": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
@@ -156,8 +156,8 @@
       },
       "delete": {
         "tags": ["projects"], "operationId": "deleteProject", "x-flow-area": "projects",
-        "summary": "Delete a project", "description": "Deletes its sessions and its sandbox.",
-        "responses": { "204": { "description": "Deleted." }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "summary": "Delete a project", "description": "Refused with project_has_sessions while a session of it is not archived, and with sandbox_busy while its sandbox is being brought up. Otherwise stops and deletes its sandbox instance (archived sessions' logs and kept worktrees go with it), then the project, its repositories and its archived sessions.",
+        "responses": { "204": { "description": "Deleted." }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/projects/{projectId}/repos": {
@@ -205,8 +205,8 @@
       "parameters": [{ "$ref": "#/components/parameters/ProjectID" }],
       "post": {
         "tags": ["sandboxes"], "operationId": "rebuildSandbox", "x-flow-area": "sandboxes",
-        "summary": "Re-run setup", "description": "Runs the repositories' .flow/setup.sh again.",
-        "responses": { "202": { "$ref": "#/components/responses/Sandbox" }, "409": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
+        "summary": "Rebuild the sandbox", "description": "Deletes the instance and sets the sandbox up again from the base image in the background: fresh checkouts of every repository, flowd delivered again, the same address. Refused with project_has_sessions while a session of the project is not archived, and with sandbox_busy while a bring-up runs. Archived sessions' logs and kept worktrees go with the old instance.",
+        "responses": { "202": { "$ref": "#/components/responses/Sandbox" }, "404": { "$ref": "#/components/responses/Error" }, "409": { "$ref": "#/components/responses/Error" }, "503": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
     "/api/projects/{projectId}/sandbox/setup-log": {
@@ -477,7 +477,7 @@
           "not_implemented", "unauthenticated", "forbidden", "preview_origin", "not_found", "invalid_request",
           "conflict", "internal", "upstream", "github_not_connected", "sandbox_unavailable", "sandbox_busy",
           "session_archived", "request_not_pending", "mode_above_cap", "provider_unavailable", "repo_in_use",
-          "too_many_sessions", "sandbox_network_missing", "sandbox_memory_full"
+          "too_many_sessions", "sandbox_network_missing", "sandbox_memory_full", "project_has_sessions"
         ]
       },
       "Error": {

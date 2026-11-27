@@ -78,9 +78,34 @@ func (s SQL) Rename(ctx context.Context, id, name string) error {
 		store.Format(nowFunc()), id)
 }
 
-// Delete implements Store.
+// Delete implements Store: the project's archived sessions first, then the project with its repositories and sandbox
+// row, in one transaction. Sessions go first, so a session worktree's ON DELETE RESTRICT on its repository never
+// depends on the order in which the cascade visits the child tables. A session not archived left over (made after
+// the caller counted) rolls everything back: it would otherwise vanish without its session.removed.
 func (s SQL) Delete(ctx context.Context, id string) error {
-	return s.exec(ctx, "project "+id, `DELETE FROM projects WHERE id = ?`, id)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE project_id = ? AND archived_at IS NOT NULL`, id); err != nil {
+		return err
+	}
+	var open int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sessions WHERE project_id = ?`, id).Scan(&open); err != nil {
+		return err
+	}
+	if open > 0 {
+		return fmt.Errorf("%w: project %s has %d", ErrHasSessions, id, open)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: project %s", ErrNotFound, id)
+	}
+	return tx.Commit()
 }
 
 func (s SQL) exec(ctx context.Context, what, q string, args ...any) error {
