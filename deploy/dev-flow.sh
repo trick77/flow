@@ -7,9 +7,17 @@
 set -eu
 
 STAGE="${1:?usage: dev-flow.sh <dir with flow and flowd-linux-*>}"
+SCRIPT=dev-flow
+# INCUS_LISTEN, PROJECT and CERT_DIR as host-setup.sh used them.
+# shellcheck source=deploy/host-lib.sh
+. "$(dirname "$0")/host-lib.sh"
 DEST=/opt/flow-host
-CERT_DIR="${CERT_DIR:-/etc/flow-host/incus}"
-ENV_FILE=/etc/flow-host/flow.env
+ENV_FILE="${ENV_FILE:-/etc/flow-host/flow.env}"
+# Flow dials the listener; a wildcard listen address is reached on loopback.
+case "$INCUS_LISTEN" in
+0.0.0.0:* | "[::]:"* | :*) INCUS_URL="https://127.0.0.1:${INCUS_LISTEN##*:}" ;;
+*) INCUS_URL="https://$INCUS_LISTEN" ;;
+esac
 
 if [ "$(id -u)" -ne 0 ]; then
 	echo "dev-flow: run as root" >&2
@@ -31,20 +39,29 @@ if [ ! -f "$ENV_FILE" ]; then
 		echo "BACKEND_AUTH_MODE=dev"
 		echo "BACKEND_DB_PATH=/var/lib/flow-host/flow.db"
 		echo "BACKEND_SEAL_KEY=$(openssl rand -base64 32)"
-		echo "BACKEND_INCUS_URL=https://127.0.0.1:8443"
-		echo "BACKEND_INCUS_PROJECT=flow"
+		echo "BACKEND_INCUS_URL=$INCUS_URL"
+		echo "BACKEND_INCUS_PROJECT=$PROJECT"
 		echo "BACKEND_INCUS_CERT=$CERT_DIR/client.crt"
 		echo "BACKEND_INCUS_KEY=$CERT_DIR/client.key"
 		echo "BACKEND_INCUS_SERVER_CERT=$CERT_DIR/server.crt"
 		echo "BACKEND_FLOWD_DIR=$DEST/flowd"
 		echo "BACKEND_LOG_LEVEL=info"
+		# The sandbox network as host-setup.sh made it; Flow's defaults are the same, so only overrides.
+		for v in BRIDGE SUBNET RANGE GATEWAY RESOLVERS MEMORY_TOTAL_MIB; do
+			eval "val=\${BACKEND_SANDBOX_$v:-}"
+			if [ -n "$val" ]; then
+				echo "BACKEND_SANDBOX_$v=$val"
+			fi
+		done
 	} >"$ENV_FILE"
 fi
 
+# Flow on the host reaches the sandboxes through the bridge's route; the host-input policy only drops what
+# sandboxes open, not their answers.
 cat >/etc/systemd/system/flow.service <<EOF
 [Unit]
 Description=Flow (dev, plain binary)
-After=network-online.target incus.service
+After=network-online.target docker.service incus.service
 
 [Service]
 EnvironmentFile=$ENV_FILE

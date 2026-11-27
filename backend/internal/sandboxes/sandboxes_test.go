@@ -3,10 +3,12 @@ package sandboxes
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,14 +24,36 @@ import (
 	"github.com/trick77/flow/internal/store"
 )
 
+// dialer hands out the fake flowd, which answers only while the fake runtime says the sandbox is reachable over
+// its NIC, as a real flowd behind a cut-off NIC does.
 type dialer struct {
 	fake      *flowdfake.Fake
+	rt        *sandboxfake.Runtime
 	endpoints []flowdproto.Endpoint
 }
 
 func (d *dialer) Dial(e flowdproto.Endpoint) flowdproto.API {
 	d.endpoints = append(d.endpoints, e)
-	return d.fake
+	return reachable{Fake: d.fake, rt: d.rt, name: e.Sandbox}
+}
+
+type reachable struct {
+	*flowdfake.Fake
+	rt   *sandboxfake.Runtime
+	name string
+}
+
+func (r reachable) Hello(ctx context.Context) (flowdproto.Hello, error) {
+	if r.rt != nil && !r.rt.Reachable(r.name) {
+		return flowdproto.Hello{}, flowdproto.ErrUnavailable
+	}
+	return r.Fake.Hello(ctx)
+}
+
+func labNetwork() sandbox.Network {
+	return sandbox.Network{Bridge: "flowbr0", Subnet: netip.MustParsePrefix("172.30.0.0/16"),
+		Range: netip.MustParsePrefix("172.30.128.0/17"), Gateway: netip.MustParseAddr("172.30.0.1"),
+		Resolvers: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
 }
 
 type rig struct {
@@ -37,6 +61,7 @@ type rig struct {
 	rt     *sandboxfake.Runtime
 	d      *dialer
 	ps     projects.SQL
+	db     *sql.DB
 	events []string
 }
 
@@ -53,9 +78,10 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	sealer, _ := credentials.NewAESSealer(bytes.Repeat([]byte{1}, 32))
-	r := &rig{rt: sandboxfake.New(), d: &dialer{fake: flowdfake.New("sb")}, ps: ps}
+	r := &rig{rt: sandboxfake.New(), ps: ps, db: db}
+	r.d = &dialer{fake: flowdfake.New("sb"), rt: r.rt}
 	r.m = &Manager{Store: SQL{DB: db}, Projects: ps, Runtime: r.rt, Dialer: r.d, Sealer: sealer, Image: "flow-base",
-		Network: "incusbr0", Memory: 1 << 30, Version: "fake", Log: slog.New(slog.DiscardHandler), Wait: time.Second,
+		Network: labNetwork(), Memory: 1 << 30, Version: "fake", Log: slog.New(slog.DiscardHandler), Wait: time.Second,
 		Poll: time.Millisecond, Flowd: func(arch string) ([]byte, error) { return []byte("bin-" + arch), nil },
 		Changed: func(id string) { r.events = append(r.events, id) }}
 	return r
@@ -91,8 +117,13 @@ func TestEnsure(t *testing.T) {
 		t.Errorf("Describe = %+v", d)
 	}
 	token := r.d.endpoints[0].Token
-	if r.d.endpoints[0].Address != "10.77.0.11:7433" || strings.Contains(string(sb.FlowdToken), token) {
+	if r.d.endpoints[0].Address != "172.30.128.1:7433" || strings.Contains(string(sb.FlowdToken), token) {
 		t.Errorf("endpoint %+v", r.d.endpoints[0])
+	}
+	want := labNetwork().NIC(netip.MustParseAddr("172.30.128.1"))
+	if in.NIC.Bridge != want.Bridge || in.NIC.Address != want.Address || in.NIC.Gateway != want.Gateway ||
+		len(in.Guest) != 1 || !bytes.Equal(in.Guest[0].Content, want.GuestFiles()[0].Content) {
+		t.Errorf("NIC %+v, guest %+v", in.NIC, in.Guest)
 	}
 
 	// A new build delivers flowd: release, unit, config, one exec.
@@ -135,6 +166,24 @@ func TestEnsure(t *testing.T) {
 }
 
 // Warm never boots a sandbox, even one Flow's records call warm (after a host reboot, say).
+// Forget only drops a cache entry: it must not wait for a bring-up that holds the project's lock for minutes (the
+// start endpoint calls it and is documented to answer at once).
+func TestForget_doesNotWaitForABringUp(t *testing.T) {
+	r := newRig(t)
+	unlock := r.m.lock(pid) // a bring-up in progress
+	defer unlock()
+	done := make(chan struct{})
+	go func() {
+		r.m.Forget(pid)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Forget waited for the bring-up's lock")
+	}
+}
+
 func TestWarm_neverStarts(t *testing.T) {
 	r := newRig(t)
 	ctx := t.Context()

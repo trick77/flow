@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -116,6 +117,10 @@ func apiError(code int, msg string) error {
 	case strings.Contains(msg, "is not running") || strings.Contains(msg, "already running") ||
 		strings.Contains(msg, "is running") || strings.Contains(msg, "already stopped"):
 		return fmt.Errorf("%w: %s", sandbox.ErrState, msg)
+	case strings.Contains(msg, "Parent device") && strings.Contains(msg, "doesn't exist"):
+		// Start of an instance whose bridge is gone (measured, Incus 6.0.4: `Failed to start device "eth0": Parent
+		// device "flowbr0" doesn't exist`).
+		return fmt.Errorf("%w: %s", sandbox.ErrNetworkMissing, msg)
 	}
 	return fmt.Errorf("incus: %d %s", code, msg)
 }
@@ -205,21 +210,86 @@ func (c *Client) wait(ctx context.Context, opPath string, timeout time.Duration)
 
 func inst(name string) string { return "/1.0/instances/" + url.PathEscape(name) }
 
-// Create implements sandbox.Runtime.
+// Create implements sandbox.Runtime: the instance with its NIC, then the guest network configuration pushed into
+// the stopped instance (the file API works on stopped containers).
 func (c *Client) Create(ctx context.Context, s sandbox.Spec) error {
 	config := map[string]string{}
 	if s.Nesting {
 		config["security.nesting"] = "true"
 	}
 	limits(config, s.Limits)
-	nic := map[string]string{"type": "nic", "network": s.Network, "name": "eth0",
-		"security.mac_filtering": "true", "security.ipv4_filtering": "true"}
 	body := map[string]any{"name": s.Name, "type": "container",
 		"source":  map[string]string{"type": "image", "alias": s.Image},
 		"config":  config,
-		"devices": map[string]any{"eth0": nic}}
-	err := c.sync(ctx, http.MethodPost, "/1.0/instances", body)
-	return err
+		"devices": map[string]any{"eth0": nicDevice(s.NIC)}}
+	if err := c.sync(ctx, http.MethodPost, "/1.0/instances", body); err != nil {
+		return err
+	}
+	return c.pushGuest(ctx, s.Name, s.NIC)
+}
+
+// nicDevice is the eth0 device: bridged on the host bridge (an unmanaged parent, so the project needs
+// restricted.devices.nic=allow), isolated, filtered. Incus accepts ipv4.address on an unmanaged parent only together
+// with ipv4_filtering, and then adds its `bridge incus` nftables chains for the port (measured).
+func nicDevice(n sandbox.NIC) map[string]string {
+	d := map[string]string{"type": "nic", "nictype": "bridged", "parent": n.Bridge, "name": "eth0",
+		"security.port_isolation": "true", "security.mac_filtering": "true", "security.ipv4_filtering": "true"}
+	if n.Address.IsValid() {
+		d["ipv4.address"] = n.Address.Addr().String()
+	}
+	return d
+}
+
+func (c *Client) pushGuest(ctx context.Context, name string, n sandbox.NIC) error {
+	if !n.Address.IsValid() {
+		return nil
+	}
+	for _, f := range n.GuestFiles() {
+		if err := c.pushOne(ctx, name, f.Path, f.Content, "file", f.Mode, f.UID, f.GID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetNIC implements sandbox.Runtime.
+func (c *Client) SetNIC(ctx context.Context, name string, n sandbox.NIC) error {
+	st, err := c.State(ctx, name)
+	if err != nil {
+		return err
+	}
+	if st.Status != sandbox.StatusStopped {
+		return fmt.Errorf("%w: set the NIC of %s: instance is %s", sandbox.ErrState, name, st.Status)
+	}
+	if err := c.sync(ctx, http.MethodPatch, inst(name), map[string]any{"devices": map[string]any{
+		"eth0": nicDevice(n)}}); err != nil {
+		return err
+	}
+	return c.pushGuest(ctx, name, n)
+}
+
+// BridgePorts implements sandbox.Runtime with the network state Incus reports for host interfaces it does not
+// manage; the restricted certificate may read it.
+func (c *Client) BridgePorts(ctx context.Context, bridge string) ([]string, error) {
+	r, err := c.do(ctx, http.MethodGet, "/1.0/networks/"+url.PathEscape(bridge)+"/state", nil, nil, nil)
+	if errors.Is(err, sandbox.ErrNotFound) {
+		return nil, fmt.Errorf("%w: %s", sandbox.ErrNetworkMissing, bridge)
+	}
+	if err != nil {
+		return nil, err
+	}
+	var st struct {
+		Bridge *struct {
+			UpperDevices []string `json:"upper_devices"`
+		} `json:"bridge"`
+	}
+	if err := json.Unmarshal(r.Metadata, &st); err != nil {
+		return nil, err
+	}
+	if st.Bridge == nil {
+		return nil, fmt.Errorf("incus: %s is not a bridge", bridge)
+	}
+	return st.Bridge.UpperDevices, nil
 }
 
 func limits(config map[string]string, l sandbox.Limits) {
@@ -234,11 +304,29 @@ func limits(config map[string]string, l sandbox.Limits) {
 	}
 }
 
-// Clone implements sandbox.Runtime.
+// Clone implements sandbox.Runtime: the copy loses the source's eth0, so it has no network until SetNIC. Keeping
+// the device without its address is not possible: Incus refuses IPv4 filtering on an unmanaged parent without a
+// manually specified ipv4.address (measured), and a NIC without filtering could spoof.
 func (c *Client) Clone(ctx context.Context, from, to string) error {
-	err := c.sync(ctx, http.MethodPost, "/1.0/instances", map[string]any{"name": to,
-		"source": map[string]string{"type": "copy", "source": from}})
-	return err
+	if err := c.sync(ctx, http.MethodPost, "/1.0/instances", map[string]any{"name": to,
+		"source": map[string]string{"type": "copy", "source": from}}); err != nil {
+		return err
+	}
+	r, err := c.do(ctx, http.MethodGet, inst(to), nil, nil, nil)
+	if err != nil {
+		return err
+	}
+	var in instance
+	if err := json.Unmarshal(r.Metadata, &in); err != nil {
+		return err
+	}
+	if _, ok := in.Devices["eth0"]; !ok {
+		return nil
+	}
+	delete(in.Devices, "eth0")
+	// PUT, not PATCH: PATCH keeps every device it is not given.
+	return c.sync(ctx, http.MethodPut, inst(to), map[string]any{"architecture": in.Architecture, "config": in.Config,
+		"devices": in.Devices, "profiles": in.Profiles, "ephemeral": in.Ephemeral, "description": in.Description})
 }
 
 func (c *Client) state(ctx context.Context, name, action string, timeout time.Duration, force bool) error {
@@ -309,7 +397,11 @@ type instance struct {
 	Architecture string                       `json:"architecture"`
 	CreatedAt    time.Time                    `json:"created_at"`
 	LastUsedAt   time.Time                    `json:"last_used_at"`
+	Config       map[string]string            `json:"config"`
 	Devices      map[string]map[string]string `json:"devices"`
+	Profiles     []string                     `json:"profiles"`
+	Ephemeral    bool                         `json:"ephemeral"`
+	Description  string                       `json:"description"`
 	State        *instanceState               `json:"state"`
 }
 
@@ -325,6 +417,7 @@ type instanceState struct {
 	Disk    map[string]struct{ Usage int64 } `json:"disk"`
 	Network map[string]struct {
 		Hwaddr    string `json:"hwaddr"`
+		HostName  string `json:"host_name"`
 		Addresses []struct {
 			Family  string `json:"family"`
 			Address string `json:"address"`
@@ -499,13 +592,17 @@ func toState(in instance) sandbox.State {
 	default:
 		s.Status = sandbox.StatusOther
 	}
+	if a, err := netip.ParseAddr(in.Devices["eth0"]["ipv4.address"]); err == nil {
+		s.Address = a
+	}
+	s.MemoryLimitBytes, _ = strconv.ParseInt(in.Config["limits.memory"], 10, 64)
 	if st := in.State; st != nil {
 		s.MemoryBytes, s.MemoryPeakBytes, s.CPUNanos, s.Processes = st.Memory.Usage, st.Memory.UsagePeak, st.CPU.Usage, st.Processes
 		if d, ok := st.Disk["root"]; ok {
 			s.DiskBytes = d.Usage
 		}
 		if n, ok := st.Network["eth0"]; ok {
-			s.MAC = n.Hwaddr
+			s.MAC, s.HostIface = n.Hwaddr, n.HostName
 			for _, a := range n.Addresses {
 				if a.Family == "inet" && a.Scope == "global" {
 					s.IPv4 = a.Address

@@ -1,5 +1,6 @@
 // Package sandboxfake is an in-memory sandbox.Runtime for tests and the demo mode: instances, volumes and pushed
-// files in maps, commands answered by a function the test sets.
+// files in maps, commands answered by a function the test sets. Host bridges exist unless a test removes one; like
+// Incus, an instance whose bridge was removed and made again stays cut off until it is restarted.
 package sandboxfake
 
 import (
@@ -15,13 +16,19 @@ import (
 
 // Instance is one fake instance.
 type Instance struct {
-	Spec    sandbox.Spec
-	Status  sandbox.Status
-	Limits  sandbox.Limits
-	Mounts  []sandbox.Mount
-	Files   map[string]sandbox.File
-	IPv4    string
-	Created time.Time
+	Spec   sandbox.Spec
+	Status sandbox.Status
+	Limits sandbox.Limits
+	Mounts []sandbox.Mount
+	Files  map[string]sandbox.File
+	// NIC is the NIC as last set; Guest the network configuration written into the guest for it.
+	NIC   sandbox.NIC
+	Guest []sandbox.File
+	IPv4  string
+	// HostIface is the host side of the NIC while running; Attached whether it is still a port of the bridge.
+	HostIface string
+	Attached  bool
+	Created   time.Time
 }
 
 // Runtime is the fake. The zero value is not usable; call New.
@@ -29,13 +36,16 @@ type Runtime struct {
 	mu        sync.Mutex
 	instances map[string]*Instance
 	volumes   map[string]sandbox.Volume
-	nextIP    int
+	missing   map[string]bool
+	ports     int
 	// Arch is what State reports, amd64 by default.
 	Arch string
 	// ExecFunc answers Exec; nil answers every command with exit 0 and no output.
 	ExecFunc func(name string, c sandbox.Command) (sandbox.Result, error)
 	// Execs records every command run, in order.
 	Execs []sandbox.Command
+	// Starts counts Start calls that started an instance.
+	Starts int
 	// Now is the clock; time.Now by default.
 	Now func() time.Time
 }
@@ -44,8 +54,35 @@ var _ sandbox.Runtime = (*Runtime)(nil)
 
 // New returns an empty fake.
 func New() *Runtime {
-	return &Runtime{instances: map[string]*Instance{}, volumes: map[string]sandbox.Volume{}, Arch: "amd64",
-		Now: time.Now}
+	return &Runtime{instances: map[string]*Instance{}, volumes: map[string]sandbox.Volume{}, missing: map[string]bool{},
+		Arch: "amd64", Now: time.Now}
+}
+
+// RemoveBridge deletes a host bridge as `docker network rm` does: running instances on it keep running, cut off.
+func (r *Runtime) RemoveBridge(bridge string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.missing[bridge] = true
+	for _, in := range r.instances {
+		if in.NIC.Bridge == bridge {
+			in.Attached = false
+		}
+	}
+}
+
+// AddBridge makes a removed bridge exist again; instances cut off from it stay so until restarted.
+func (r *Runtime) AddBridge(bridge string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.missing, bridge)
+}
+
+// Reachable reports whether Flow could reach the instance over its NIC now: running, attached, bridge present.
+func (r *Runtime) Reachable(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	in, ok := r.instances[name]
+	return ok && in.Status == sandbox.StatusRunning && in.Attached && !r.missing[in.NIC.Bridge]
 }
 
 func (r *Runtime) get(name string) (*Instance, error) {
@@ -64,6 +101,13 @@ func (r *Runtime) running(name string) (*Instance, error) {
 	return in, err
 }
 
+func guest(n sandbox.NIC) []sandbox.File {
+	if !n.Address.IsValid() {
+		return nil
+	}
+	return n.GuestFiles()
+}
+
 // Create implements sandbox.Runtime.
 func (r *Runtime) Create(_ context.Context, s sandbox.Spec) error {
 	r.mu.Lock()
@@ -71,12 +115,12 @@ func (r *Runtime) Create(_ context.Context, s sandbox.Spec) error {
 	if _, ok := r.instances[s.Name]; ok {
 		return fmt.Errorf("%w: %s", sandbox.ErrExists, s.Name)
 	}
-	r.instances[s.Name] = &Instance{Spec: s, Status: sandbox.StatusStopped, Limits: s.Limits,
-		Files: map[string]sandbox.File{}, Created: r.Now()}
+	r.instances[s.Name] = &Instance{Spec: s, Status: sandbox.StatusStopped, Limits: s.Limits, NIC: s.NIC,
+		Guest: guest(s.NIC), Files: map[string]sandbox.File{}, Created: r.Now()}
 	return nil
 }
 
-// Clone implements sandbox.Runtime: the copy has the source's files and mounts, stopped.
+// Clone implements sandbox.Runtime: the copy has the source's files and mounts, stopped, and no NIC.
 func (r *Runtime) Clone(_ context.Context, from, to string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -88,14 +132,47 @@ func (r *Runtime) Clone(_ context.Context, from, to string) error {
 		return fmt.Errorf("%w: %s", sandbox.ErrExists, to)
 	}
 	cp := *src
-	cp.Spec.Name, cp.Status, cp.IPv4, cp.Created = to, sandbox.StatusStopped, "", r.Now()
+	cp.Spec.Name, cp.Status, cp.IPv4, cp.HostIface, cp.Attached, cp.Created = to, sandbox.StatusStopped, "", "", false, r.Now()
+	cp.NIC = sandbox.NIC{}
 	cp.Mounts = slices.Clone(src.Mounts)
 	cp.Files = maps.Clone(src.Files)
+	cp.Guest = slices.Clone(src.Guest) // the guest's file is copied with the rest; SetNIC rewrites it
 	r.instances[to] = &cp
 	return nil
 }
 
-// Start implements sandbox.Runtime; the instance gets the next bridge address.
+// SetNIC implements sandbox.Runtime.
+func (r *Runtime) SetNIC(_ context.Context, name string, n sandbox.NIC) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	in, err := r.get(name)
+	if err != nil {
+		return err
+	}
+	if in.Status != sandbox.StatusStopped {
+		return fmt.Errorf("%w: %s is %s", sandbox.ErrState, name, in.Status)
+	}
+	in.NIC, in.Guest = n, guest(n)
+	return nil
+}
+
+// BridgePorts implements sandbox.Runtime.
+func (r *Runtime) BridgePorts(_ context.Context, bridge string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.missing[bridge] {
+		return nil, fmt.Errorf("%w: %s", sandbox.ErrNetworkMissing, bridge)
+	}
+	var ports []string
+	for _, name := range slices.Sorted(maps.Keys(r.instances)) {
+		if in := r.instances[name]; in.Status == sandbox.StatusRunning && in.Attached && in.NIC.Bridge == bridge {
+			ports = append(ports, in.HostIface)
+		}
+	}
+	return ports, nil
+}
+
+// Start implements sandbox.Runtime; the instance comes up on its NIC's address.
 func (r *Runtime) Start(_ context.Context, name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -103,9 +180,23 @@ func (r *Runtime) Start(_ context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if in.Status != sandbox.StatusRunning {
-		r.nextIP++
-		in.Status, in.IPv4 = sandbox.StatusRunning, fmt.Sprintf("10.77.0.%d", 10+r.nextIP)
+	if in.Status == sandbox.StatusRunning {
+		return nil
+	}
+	if in.NIC.Bridge != "" {
+		if r.missing[in.NIC.Bridge] {
+			return fmt.Errorf("%w: Failed to start device \"eth0\": Parent device %q doesn't exist",
+				sandbox.ErrNetworkMissing, in.NIC.Bridge)
+		}
+		if !in.NIC.Address.IsValid() {
+			return fmt.Errorf("fake: %s: IPv4 filtering needs an address on an unmanaged parent", name)
+		}
+	}
+	r.ports++
+	r.Starts++
+	in.Status, in.HostIface, in.Attached, in.IPv4 = sandbox.StatusRunning, fmt.Sprintf("veth%04d", r.ports), true, ""
+	if in.NIC.Address.IsValid() {
+		in.IPv4 = in.NIC.Address.Addr().String()
 	}
 	return nil
 }
@@ -118,7 +209,7 @@ func (r *Runtime) Stop(_ context.Context, name string, _ time.Duration) error {
 	if err != nil {
 		return err
 	}
-	in.Status, in.IPv4 = sandbox.StatusStopped, ""
+	in.Status, in.IPv4, in.HostIface, in.Attached = sandbox.StatusStopped, "", "", false
 	return nil
 }
 
@@ -219,9 +310,10 @@ func (r *Runtime) State(_ context.Context, name string) (sandbox.State, error) {
 }
 
 func (r *Runtime) state(in *Instance) sandbox.State {
-	s := sandbox.State{Name: in.Spec.Name, Status: in.Status, Arch: r.Arch, IPv4: in.IPv4, CreatedAt: in.Created}
+	s := sandbox.State{Name: in.Spec.Name, Status: in.Status, Arch: r.Arch, IPv4: in.IPv4, CreatedAt: in.Created,
+		Address: in.NIC.Address.Addr(), MemoryLimitBytes: in.Limits.MemoryBytes}
 	if in.Status == sandbox.StatusRunning {
-		s.MAC = "00:16:3e:00:00:01"
+		s.MAC, s.HostIface = "00:16:3e:00:00:01", in.HostIface
 		s.MemoryBytes, s.Processes = 114<<20, 14
 	}
 	return s

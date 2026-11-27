@@ -12,17 +12,21 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/trick77/flow/internal/layout"
 	"github.com/trick77/flow/internal/sandbox"
 )
 
@@ -35,6 +39,8 @@ type fake struct {
 	logs      map[string]string
 	n         int
 	projects  []string
+	// bridges are the host bridges and their ports; a NIC's parent not in it is missing.
+	bridges map[string][]string
 }
 
 type fakeInst struct {
@@ -47,7 +53,15 @@ type fakeInst struct {
 
 func newFake() *fake {
 	return &fake{instances: map[string]*fakeInst{}, volumes: map[string]bool{}, ops: map[string]map[string]any{},
-		logs: map[string]string{}}
+		logs: map[string]string{}, bridges: map[string][]string{"flowbr0": {"veth0"}}}
+}
+
+func stringMap(v any) map[string]string {
+	m := map[string]string{}
+	for k, vv := range v.(map[string]any) {
+		m[k] = vv.(string)
+	}
+	return m
 }
 
 func write(w http.ResponseWriter, v map[string]any) {
@@ -109,7 +123,8 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		src := body["source"].(map[string]any)
 		in := &fakeInst{status: "Stopped", config: map[string]string{}, devices: map[string]map[string]string{},
-			files: map[string]string{}, dirs: map[string]bool{"/": true, "/etc": true, "/opt": true}}
+			files: map[string]string{}, dirs: map[string]bool{"/": true, "/etc": true, "/opt": true,
+				"/etc/systemd/network": true}}
 		if src["type"] == "copy" {
 			orig, ok := f.instances[src["source"].(string)]
 			if !ok {
@@ -118,10 +133,19 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			*in = *orig
 			in.status = "Stopped"
+			in.devices = map[string]map[string]string{}
+			for k, d := range orig.devices {
+				in.devices[k] = maps.Clone(d)
+			}
 		}
 		if c, ok := body["config"].(map[string]any); ok {
 			for k, v := range c {
 				in.config[k] = v.(string)
+			}
+		}
+		if d, ok := body["devices"].(map[string]any); ok {
+			for k, v := range d {
+				in.devices[k] = stringMap(v)
 			}
 		}
 		f.instances[name] = in
@@ -139,6 +163,16 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.instance(w, r, parts, in, body)
+	case parts[0] == "networks" && len(parts) == 3 && parts[2] == "state":
+		ports, ok := f.bridges[parts[1]]
+		switch {
+		case !ok:
+			fail(w, 404, "Network not found")
+		case parts[1] == "eth0":
+			sync200(w, map[string]any{"type": "broadcast"})
+		default:
+			sync200(w, map[string]any{"type": "broadcast", "bridge": map[string]any{"upper_devices": ports}})
+		}
 	case parts[0] == "storage-pools" && len(parts) == 5 && r.Method == http.MethodGet:
 		if !f.volumes[parts[4]] {
 			fail(w, 404, "Storage pool volume not found")
@@ -155,7 +189,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (f *fake) describe(name string, in *fakeInst, state bool) map[string]any {
 	md := map[string]any{"name": name, "status": in.status, "architecture": "aarch64", "devices": in.devices,
-		"created_at": "2026-11-26T12:00:00Z"}
+		"config": in.config, "created_at": "2026-11-26T12:00:00Z"}
 	if state {
 		md["state"] = f.state(in)
 	}
@@ -166,9 +200,10 @@ func (f *fake) state(in *fakeInst) map[string]any {
 	st := map[string]any{"status": in.status, "processes": 14, "memory": map[string]any{"usage": 1000},
 		"disk": map[string]any{"root": map[string]any{"usage": 5}}}
 	if in.status == "Running" {
-		st["network"] = map[string]any{"eth0": map[string]any{"hwaddr": "00:16:3e:00:00:01", "addresses": []any{
-			map[string]any{"family": "inet6", "address": "fe80::1", "scope": "link"},
-			map[string]any{"family": "inet", "address": "10.77.0.2", "scope": "global"}}}}
+		st["network"] = map[string]any{"eth0": map[string]any{"hwaddr": "00:16:3e:00:00:01", "host_name": "veth0",
+			"addresses": []any{
+				map[string]any{"family": "inet6", "address": "fe80::1", "scope": "link"},
+				map[string]any{"family": "inet", "address": in.devices["eth0"]["ipv4.address"], "scope": "global"}}}}
 	}
 	return st
 }
@@ -189,14 +224,26 @@ func (f *fake) instance(w http.ResponseWriter, r *http.Request, parts []string, 
 		}
 		delete(f.instances, name)
 		f.async(w, "", nil)
-	case sub == "" && r.Method == http.MethodPatch:
+	case sub == "" && (r.Method == http.MethodPatch || r.Method == http.MethodPut):
+		// PATCH replaces each device it is given whole and keeps the others; PUT replaces them all. Incus refuses
+		// IPv4 filtering on an unmanaged parent without an address (measured).
 		if d, ok := body["devices"].(map[string]any); ok {
-			for k, v := range d {
-				m := map[string]string{}
-				for kk, vv := range v.(map[string]any) {
-					m[kk] = vv.(string)
+			for _, v := range d {
+				if m := stringMap(v); m["security.ipv4_filtering"] == "true" && m["ipv4.address"] == "" {
+					fail(w, 500, `Invalid devices: Device validation failed for "eth0": IPv4 filtering requires a manually specified ipv4.address when using an unmanaged parent bridge`)
+					return
 				}
-				in.devices[k] = m
+			}
+			if r.Method == http.MethodPut {
+				in.devices = map[string]map[string]string{}
+			}
+			for k, v := range d {
+				in.devices[k] = stringMap(v)
+			}
+		}
+		if c, ok := body["config"].(map[string]any); ok {
+			for k, v := range c {
+				in.config[k] = v.(string)
 			}
 		}
 		f.async(w, "", nil)
@@ -209,6 +256,10 @@ func (f *fake) instance(w http.ResponseWriter, r *http.Request, parts []string, 
 				f.async(w, "The instance is already running", nil)
 				return
 			}
+			if p := in.devices["eth0"]["parent"]; p != "" && f.bridges[p] == nil {
+				f.async(w, `Failed to start device "eth0": Parent device "`+p+`" doesn't exist`, nil)
+				return
+			}
 			in.status = "Running"
 		case "stop":
 			if body["force"] != true && in.config["stuck"] == "true" {
@@ -219,11 +270,8 @@ func (f *fake) instance(w http.ResponseWriter, r *http.Request, parts []string, 
 		}
 		f.async(w, "", nil)
 	case sub == "files":
+		// Incus serves the file API on stopped containers too (measured).
 		p := r.URL.Query().Get("path")
-		if in.status != "Running" {
-			fail(w, 400, "Instance is not running")
-			return
-		}
 		if !in.dirs[path.Dir(p)] {
 			fail(w, 404, "Not Found")
 			return
@@ -288,7 +336,7 @@ func TestLifecycle(t *testing.T) {
 	f := newFake()
 	_, c := serve(t, f)
 	ctx := context.Background()
-	spec := sandbox.Spec{Name: "sb1", Image: "flow-base", Network: "incusbr0", Nesting: true,
+	spec := sandbox.Spec{Name: "sb1", Image: "flow-base", NIC: testNIC("172.30.128.1"), Nesting: true,
 		Limits: sandbox.Limits{CPUs: 2, MemoryBytes: 1 << 30, Processes: 500}}
 	if err := c.Create(ctx, spec); err != nil {
 		t.Fatal(err)
@@ -299,8 +347,15 @@ func TestLifecycle(t *testing.T) {
 	if got := f.instances["sb1"].config; got["security.nesting"] != "true" || got["limits.memory"] != "1073741824" {
 		t.Errorf("config %v", got)
 	}
-	if err := c.Push(ctx, "sb1", sandbox.File{Path: "/etc/x"}); err == nil {
-		t.Error("push into a stopped instance succeeded")
+	want := map[string]string{"type": "nic", "nictype": "bridged", "parent": "flowbr0", "name": "eth0",
+		"security.port_isolation": "true", "security.mac_filtering": "true", "security.ipv4_filtering": "true",
+		"ipv4.address": "172.30.128.1"}
+	if got := f.instances["sb1"].devices["eth0"]; !maps.Equal(got, want) {
+		t.Errorf("eth0 = %v", got)
+	}
+	if got := f.instances["sb1"].files[layout.NetworkConfig]; !strings.HasPrefix(got, "0644:") ||
+		!strings.Contains(got, "Address=172.30.128.1/16\n") {
+		t.Errorf("guest network config of the stopped instance: %q", got)
 	}
 	if err := c.Start(ctx, "sb1"); err != nil {
 		t.Fatal(err)
@@ -309,8 +364,12 @@ func TestLifecycle(t *testing.T) {
 		t.Errorf("starting a running instance: %v", err)
 	}
 	st, err := c.State(ctx, "sb1")
-	if err != nil || st.Status != sandbox.StatusRunning || st.IPv4 != "10.77.0.2" || st.Arch != "arm64" || st.DiskBytes != 5 {
+	if err != nil || st.Status != sandbox.StatusRunning || st.IPv4 != "172.30.128.1" || st.Arch != "arm64" ||
+		st.DiskBytes != 5 || st.Address.String() != "172.30.128.1" || st.HostIface != "veth0" || st.MemoryLimitBytes != 1<<30 {
 		t.Fatalf("State = %+v, %v", st, err)
+	}
+	if err := c.SetNIC(ctx, "sb1", testNIC("172.30.128.2")); !errors.Is(err, sandbox.ErrState) {
+		t.Errorf("SetNIC on a running instance: %v", err)
 	}
 	err = c.Push(ctx, "sb1", sandbox.File{Path: "/opt/flow/releases/v1/flowd", Content: []byte("bin"), Mode: 0o755},
 		sandbox.File{Path: "/opt/flow/releases/v1/sidecar.tar", Content: []byte("tar")},
@@ -361,8 +420,21 @@ func TestLifecycle(t *testing.T) {
 	if err := c.Stop(ctx, "sb1", time.Second); err != nil {
 		t.Errorf("stopping a stopped instance: %v", err)
 	}
+	if err := c.SetNIC(ctx, "sb1", testNIC("172.30.128.9")); err != nil {
+		t.Fatal(err)
+	}
+	if d, g := f.instances["sb1"].devices["eth0"], f.instances["sb1"].files[layout.NetworkConfig]; d["ipv4.address"] != "172.30.128.9" ||
+		!strings.Contains(g, "Address=172.30.128.9/16\n") {
+		t.Errorf("SetNIC: device %v, guest %q", d, g)
+	}
 	if err := c.Clone(ctx, "sb1", "sb2"); err != nil {
 		t.Fatal(err)
+	}
+	if d, ok := f.instances["sb2"].devices["eth0"]; ok || f.instances["sb1"].devices["eth0"]["ipv4.address"] != "172.30.128.9" {
+		t.Errorf("clone kept the NIC: %v", d)
+	}
+	if err := c.SetNIC(ctx, "sb2", sandbox.NIC{Bridge: "flowbr0"}); err == nil {
+		t.Error("a filtered NIC without address was accepted")
 	}
 	if err := c.Clone(ctx, "nope", "sb3"); err == nil {
 		t.Error("clone of a missing instance")
@@ -381,6 +453,47 @@ func TestLifecycle(t *testing.T) {
 		if p != "flow" {
 			t.Fatalf("a request outside the project: %q", p)
 		}
+	}
+}
+
+func testNIC(addr string) sandbox.NIC {
+	return sandbox.NIC{Bridge: "flowbr0", Address: netip.PrefixFrom(netip.MustParseAddr(addr), 16),
+		Gateway: netip.MustParseAddr("172.30.0.1"), Resolvers: []netip.Addr{netip.MustParseAddr("1.1.1.1")}}
+}
+
+// A missing bridge is ErrNetworkMissing both when asked for and when Incus refuses a start for it.
+func TestBridge(t *testing.T) {
+	f := newFake()
+	_, c := serve(t, f)
+	ctx := context.Background()
+	if ports, err := c.BridgePorts(ctx, "flowbr0"); err != nil || !slices.Equal(ports, []string{"veth0"}) {
+		t.Errorf("ports %v, %v", ports, err)
+	}
+	if _, err := c.BridgePorts(ctx, "gone"); !errors.Is(err, sandbox.ErrNetworkMissing) {
+		t.Errorf("missing bridge: %v", err)
+	}
+	f.bridges["eth0"] = nil
+	if _, err := c.BridgePorts(ctx, "eth0"); err == nil || errors.Is(err, sandbox.ErrNetworkMissing) {
+		t.Errorf("not a bridge: %v", err)
+	}
+	if err := c.Create(ctx, sandbox.Spec{Name: "sb", Image: "flow-base", NIC: testNIC("172.30.128.1")}); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.bridges, "flowbr0")
+	if err := c.Start(ctx, "sb"); !errors.Is(err, sandbox.ErrNetworkMissing) {
+		t.Errorf("start without bridge: %v", err)
+	}
+	if err := c.SetNIC(ctx, "missing", testNIC("172.30.128.1")); !errors.Is(err, sandbox.ErrNotFound) {
+		t.Errorf("SetNIC of a missing instance: %v", err)
+	}
+	if err := c.Clone(ctx, "sb", "sb-copy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(ctx, sandbox.Spec{Name: "plain", Image: "flow-base"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Clone(ctx, "plain", "plain-copy"); err != nil {
+		t.Errorf("clone without address: %v", err)
 	}
 }
 
@@ -423,7 +536,8 @@ func TestNew_readsTheFiles(t *testing.T) {
 }
 
 func TestErrors(t *testing.T) {
-	for msg, want := range map[string]error{"Instance is not running": sandbox.ErrState} {
+	for msg, want := range map[string]error{"Instance is not running": sandbox.ErrState,
+		`Failed to start device "eth0": Parent device "flowbr0" doesn't exist`: sandbox.ErrNetworkMissing} {
 		if err := apiError(400, msg); !errors.Is(err, want) {
 			t.Errorf("%q → %v", msg, err)
 		}
