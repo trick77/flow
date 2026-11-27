@@ -356,6 +356,26 @@ func TestEnsure_failures(t *testing.T) {
 	}
 }
 
+// Stopping a sandbox whose instance is gone (deleted outside Flow, a bring-up that failed before creating it)
+// records it stopped: nothing of it runs.
+func TestStop_missingInstanceIsStopped(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	if _, err := r.m.Ensure(ctx, pid); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.rt.Stop(ctx, "flow-b679dbb3324e", time.Second)
+	if err := r.rt.Delete(ctx, "flow-b679dbb3324e"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.m.Stop(ctx, pid); err != nil {
+		t.Fatalf("stop of a missing instance: %v", err)
+	}
+	if d := r.m.Describe(ctx, pid); d.State != "stopped" || d.ErrorCode != "" {
+		t.Errorf("after the stop: %+v", d)
+	}
+}
+
 func TestSQLAndInstanceName(t *testing.T) {
 	r := newRig(t)
 	ctx := t.Context()

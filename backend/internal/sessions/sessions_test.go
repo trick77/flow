@@ -25,6 +25,7 @@ import (
 	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/flowdproto/flowdfake"
 	"github.com/trick77/flow/internal/projects"
+	"github.com/trick77/flow/internal/sandboxes"
 	"github.com/trick77/flow/internal/store"
 )
 
@@ -220,6 +221,53 @@ func TestFollow_survivesTransientStoreErrors(t *testing.T) {
 			t.Fatal("the ended follower kept its entry")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A sandbox stopped mid-turn ends every unit without a turn.ended in the log: the follower, finding it stopped,
+// ends the mirrored turn (failed, as the host logs it lost on its next start) and announces it. A sandbox that may
+// still run (ErrMayRun) proves nothing and changes nothing.
+func TestFollow_stoppedSandboxEndsTheTurn(t *testing.T) {
+	for _, tc := range []struct {
+		warmErr error
+		want    string
+	}{{sandboxes.ErrNotWarm, "failed"}, {fmt.Errorf("%w (recorded failed)", sandboxes.ErrMayRun), "working"}} {
+		r := newRig(t)
+		w := create(t, r, `{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","title":"t"}`)
+		var s apitypes.Session
+		_ = json.Unmarshal(w.Body.Bytes(), &s)
+		id := s.Summary.ID
+		if err := r.svc.Store.ApplyMirror(t.Context(), id, Mirror{Status: "working", TurnStarted: true}); err != nil {
+			t.Fatal(err)
+		}
+		r.sb.warmErr = tc.warmErr
+		updates, unsub, _ := r.hub.Subscribe("")
+		ctx, cancel := context.WithCancel(t.Context())
+		if err := r.svc.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var announced *apitypes.SessionSummary
+		select {
+		case e := <-updates:
+			announced = e.Session
+		case <-time.After(300 * time.Millisecond):
+		}
+		cancel()
+		unsub()
+		se, _ := r.svc.Store.Get(t.Context(), id)
+		if se.Status != tc.want {
+			t.Errorf("%v: status %s, want %s", tc.warmErr, se.Status, tc.want)
+		}
+		if tc.want == "failed" {
+			if se.TurnStartedAt != nil || !se.Unseen {
+				t.Errorf("turn still open or not unseen: %+v", se)
+			}
+			if announced == nil || announced.Status != apitypes.SessionStatusFailed || announced.TurnStartedAt != nil {
+				t.Errorf("announced %+v", announced)
+			}
+		} else if announced != nil || se.TurnStartedAt == nil {
+			t.Errorf("changed on ErrMayRun: %+v, announced %+v", se, announced)
+		}
 	}
 }
 

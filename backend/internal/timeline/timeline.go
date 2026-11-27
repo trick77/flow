@@ -17,6 +17,7 @@ import (
 	"github.com/trick77/flow/internal/apitypes"
 	"github.com/trick77/flow/internal/event"
 	"github.com/trick77/flow/internal/httpapi"
+	sbx "github.com/trick77/flow/internal/sandboxes"
 	"github.com/trick77/flow/internal/sessions"
 	"github.com/trick77/flow/internal/ssewire"
 	"github.com/trick77/flow/internal/store"
@@ -28,8 +29,9 @@ type API struct {
 	httpapi.NotImplemented
 	Sessions *sessions.Service
 	Hub      *sse.Hub[apitypes.AppEvent]
-	// Retry is the wait before re-dialling flowd after a stream broke; Heartbeat the keepalive interval.
-	Retry, Heartbeat time.Duration
+	// Retry is the wait before re-dialling flowd after a stream broke, and the first wait for a sandbox that does not
+	// run, doubling up to MaxRetry; Heartbeat the keepalive interval.
+	Retry, MaxRetry, Heartbeat time.Duration
 }
 
 func (a *API) retry() time.Duration {
@@ -37,6 +39,13 @@ func (a *API) retry() time.Duration {
 		return a.Retry
 	}
 	return time.Second
+}
+
+func (a *API) maxRetry() time.Duration {
+	if a.MaxRetry > 0 {
+		return a.MaxRetry
+	}
+	return 30 * time.Second
 }
 
 func (a *API) heartbeat() time.Duration {
@@ -110,28 +119,87 @@ func (a *API) StreamSessionEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+	// A sandbox that does not run (stopped, failed, none: the browser shows its state from the app stream and offers
+	// the start) is asked again ever more rarely, each time a lock and a look at the instance; a change of the
+	// project's sandbox (a start) asks at once.
+	changes, unsubscribe := a.sandboxChanges()
+	defer unsubscribe()
+	wait := a.retry()
 	for ctx.Err() == nil {
+		drain(changes) // only changes after this look count
 		api, err := a.Sessions.Sandboxes.Warm(ctx, se.ProjectID)
-		if err == nil {
-			for e, err := range api.Events(ctx, se.ID, last) {
-				if err != nil {
-					a.Sessions.Log.Debug("session stream broke", "session", se.ID, "after", last, "err", err)
-					break
-				}
-				if e.Seq > 0 && e.Seq <= last {
-					continue
-				}
-				if send(sw, e) != nil {
-					return
-				}
-				if e.Seq > 0 {
-					last = e.Seq
-				}
+		if err != nil {
+			waitForSandbox(ctx, changes, se.ProjectID, wait)
+			if errors.Is(err, sbx.ErrNotWarm) || errors.Is(err, sbx.ErrMayRun) || errors.Is(err, sbx.ErrNotFound) {
+				wait = min(wait*2, a.maxRetry())
+			} // any other failure (a busy store) is asked again at the plain retry
+			continue
+		}
+		wait = a.retry()
+		for e, err := range api.Events(ctx, se.ID, last) {
+			if err != nil {
+				a.Sessions.Log.Debug("session stream broke", "session", se.ID, "after", last, "err", err)
+				break
+			}
+			if e.Seq > 0 && e.Seq <= last {
+				continue
+			}
+			if send(sw, e) != nil {
+				return
+			}
+			if e.Seq > 0 {
+				last = e.Seq
 			}
 		}
 		select {
 		case <-ctx.Done():
 		case <-time.After(a.retry()):
+		}
+	}
+}
+
+// sandboxChanges subscribes to the app stream for sandbox changes; without a hub (or one at its cap) the channel
+// never delivers and the waits run to their end.
+func (a *API) sandboxChanges() (<-chan apitypes.AppEvent, func()) {
+	if a.Hub != nil {
+		if ch, unsubscribe, ok := a.Hub.Subscribe(""); ok {
+			return ch, unsubscribe
+		}
+	}
+	return nil, func() {}
+}
+
+func drain(ch <-chan apitypes.AppEvent) {
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// waitForSandbox waits up to d, less when the project's sandbox changes or ctx ends.
+func waitForSandbox(ctx context.Context, changes <-chan apitypes.AppEvent, projectID string, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			return
+		case e, ok := <-changes:
+			if !ok {
+				changes = nil // the hub closed: the timer alone
+				continue
+			}
+			if e.Kind == apitypes.AppEventKindSandboxUpdated && e.ProjectID == projectID {
+				return
+			}
 		}
 	}
 }
@@ -217,13 +285,14 @@ func (a *API) SendMessage(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, http.StatusAccepted, apitypes.MessageAccepted{MessageID: in.ClientID, Queued: res.Queued})
 }
 
-// InterruptTurn implements httpapi.Timeline.
+// InterruptTurn implements httpapi.Timeline. Nothing runs in a stopped sandbox: there the interrupt is a no-op,
+// never a start of it.
 func (a *API) InterruptTurn(w http.ResponseWriter, r *http.Request) {
 	se, ok := a.session(w, r)
 	if !ok {
 		return
 	}
-	if _, err := a.Sessions.Command(r.Context(), se.ID, "interrupt-"+store.NewID(), event.CmdTurnInterrupt,
+	if _, _, err := a.Sessions.CommandIfRunning(r.Context(), se.ID, "interrupt-"+store.NewID(), event.CmdTurnInterrupt,
 		event.TurnInterrupt{}); err != nil {
 		httpapi.WriteError(w, err)
 		return
@@ -232,7 +301,8 @@ func (a *API) InterruptTurn(w http.ResponseWriter, r *http.Request) {
 }
 
 // ReplyPermission implements httpapi.Timeline: one reply per request (the command id is the request's), so a second
-// click or a retry changes nothing.
+// click or a retry changes nothing. In a stopped sandbox no request is pending (request_not_pending): the sandbox
+// is not started for it.
 func (a *API) ReplyPermission(w http.ResponseWriter, r *http.Request) {
 	se, ok := a.session(w, r)
 	if !ok {
@@ -250,8 +320,11 @@ func (a *API) ReplyPermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := r.PathValue("requestId")
-	_, err := a.Sessions.Command(r.Context(), se.ID, "reply-"+req, event.CmdPermissionReply, event.PermissionReply{
-		RequestID: req, Decision: event.ReplyDecision(in.Decision), Message: in.Message})
+	_, ran, err := a.Sessions.CommandIfRunning(r.Context(), se.ID, "reply-"+req, event.CmdPermissionReply,
+		event.PermissionReply{RequestID: req, Decision: event.ReplyDecision(in.Decision), Message: in.Message})
+	if err == nil && !ran {
+		err = apitypes.Fail(apitypes.ErrorCodeRequestNotPending, "")
+	}
 	if err != nil {
 		httpapi.WriteError(w, err)
 		return
