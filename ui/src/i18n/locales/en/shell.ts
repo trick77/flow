@@ -40,6 +40,10 @@ export const shell = {
   repoNoWorktree: "worktree created with the first message",
   // The toggle of the review panel beside the timeline.
   togglePanel: "Toggle diff panel",
+  // Phones: the diff panel and Archive in one menu of the session header.
+  more: "More actions",
+  moreMenu: "Session actions",
+  panelItem: "Diff panel",
   panelTitle: "Diff",
   projects: "Projects",
   settings: "Settings",

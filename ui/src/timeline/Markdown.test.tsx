@@ -95,4 +95,24 @@ describe("Markdown", () => {
       { type: "ol", items: ["b"] },
     ]);
   });
+
+  it("closes a fence only on a bare run of its character, at least as long", () => {
+    // An inner fence with an info string does not close the block.
+    expect(parseBlocks("```markdown\n```bash\nmake\n```  \nafter")).toEqual([
+      { type: "code", lang: "markdown", code: "```bash\nmake" },
+      { type: "p", text: "after" },
+    ]);
+    // A four-backtick block keeps a whole three-backtick example; a longer
+    // run closes it.
+    expect(
+      parseBlocks("````md\n# Title\n```bash\nmake\n```\n`````\nafter"),
+    ).toEqual([
+      { type: "code", lang: "md", code: "# Title\n```bash\nmake\n```" },
+      { type: "p", text: "after" },
+    ]);
+    // Tildes do not close a backtick block.
+    expect(parseBlocks("```\n~~~\nx\n```")).toEqual([
+      { type: "code", lang: "", code: "~~~\nx" },
+    ]);
+  });
 });

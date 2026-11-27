@@ -570,6 +570,98 @@ describe("App", () => {
     expect(screen.queryByText("Persist the sidebar width")).toBeNull();
   });
 
+  it("keeps the diff panel and Archive in one menu on phones", async () => {
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: [
+        "(max-width: 420px)",
+        "(max-width: 900px)",
+        "(max-width: 1180px)",
+      ].includes(q),
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    const server: Server = {
+      sessions: [summary({})],
+      projects: [project],
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", {
+      level: 2,
+      name: "Persist the sidebar width",
+    });
+    expect(screen.queryByRole("button", { name: en.shell.archive })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: en.shell.togglePanel }),
+    ).toBeNull();
+    const more = screen.getByRole("button", { name: en.shell.more });
+    expect(more).toHaveAttribute("aria-haspopup", "menu");
+
+    // Keyboard: the first item takes the focus, Down moves, Escape closes.
+    fireEvent.click(more);
+    const menu = screen.getByRole("menu", { name: en.shell.moreMenu });
+    const panelItem = within(menu).getByRole("menuitemcheckbox", {
+      name: en.shell.panelItem,
+    });
+    expect(panelItem).toHaveFocus();
+    expect(panelItem).toHaveAttribute("aria-checked", "false");
+    fireEvent.keyDown(panelItem, { key: "ArrowDown" });
+    const archiveItem = within(menu).getByRole("menuitem", {
+      name: en.shell.archive,
+    });
+    expect(archiveItem).toHaveFocus();
+    fireEvent.keyDown(archiveItem, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(more).toHaveFocus();
+
+    // Archive from the menu asks first, as the header button did.
+    fireEvent.click(more);
+    fireEvent.click(screen.getByRole("menuitem", { name: en.shell.archive }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(more).toHaveFocus();
+    const ask = screen.getByRole("alertdialog", { name: en.shell.archive });
+    expect(ask).toHaveTextContent("Archive Persist the sidebar width?");
+    await act(async () => {
+      fireEvent.click(
+        within(ask).getByRole("button", {
+          name: en.shell.confirmArchiveAction,
+        }),
+      );
+    });
+    expect(server.calls).toContain("DELETE /api/sessions/s-done");
+  });
+
+  it("opens the diff panel from the phone menu", async () => {
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: [
+        "(max-width: 420px)",
+        "(max-width: 900px)",
+        "(max-width: 1180px)",
+      ].includes(q),
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    serve({ sessions: [summary({})], projects: [project], calls: [] });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", {
+      level: 2,
+      name: "Persist the sidebar width",
+    });
+    const more = screen.getByRole("button", { name: en.shell.more });
+    fireEvent.click(more);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("menuitemcheckbox", { name: en.shell.panelItem }),
+      );
+    });
+    expect(document.getElementById("review-panel")).not.toBeNull();
+    fireEvent.click(more);
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: en.shell.panelItem }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
   it("goes back to the session from a page, and to a session picked in the sidebar", async () => {
     serve({
       sessions: [summary({}), summary({ id: "s2", title: "Second one" })],
