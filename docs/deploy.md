@@ -22,10 +22,13 @@ sh deploy/host-setup.sh
 
 Creates the sandbox network (`flow` on `flowbr0`), the firewall policies, the Incus project `flow`, Incus' API on
 the sandbox network's gateway (`172.30.0.1:8443`, `INCUS_LISTEN`) and Flow's restricted client certificate in
-`/etc/flow-host/incus` (`CERT_DIR`), owned by 65532 so the container can read it. Settings changed here
-(`BACKEND_SANDBOX_*`, `BACKEND_INCUS_POOL`, `BACKEND_INCUS_PROJECT`, `INCUS_LISTEN`, `CERT_DIR`, `DOCKER_NETWORK`)
-must reach `.env` too (step 3). A host set up before the listen address moved to the gateway: run it again, then
-`.env`'s `BACKEND_INCUS_URL` is `https://<INCUS_LISTEN>`.
+`/etc/flow-host/incus` (`CERT_DIR`), owned by 65532 so the container can read it. Only Flow's container, at its
+static address on the sandbox network (`CONTAINER_ADDRESS`, default `172.30.1.2`, set in `compose.yaml`), reaches
+the API; every other container is refused (firewalld policy `flow-sb-incus`). Settings changed here
+(`BACKEND_SANDBOX_*`, `BACKEND_INCUS_POOL`, `BACKEND_INCUS_PROJECT`, `INCUS_LISTEN`, `CONTAINER_ADDRESS`,
+`CERT_DIR`, `DOCKER_NETWORK`) must reach `.env` too (step 3). A host set up before the listen address moved to the
+gateway: run it again, then `.env`'s `BACKEND_INCUS_URL` is `https://<INCUS_LISTEN>`, and `docker compose up -d`
+makes a running Flow container again with its static address (until then the firewall refuses its Incus calls).
 
 ## 2. Sandbox base image
 

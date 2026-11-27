@@ -26,9 +26,18 @@ BAN_WAIT="${BAN_WAIT:-60}" # seconds its owner gets to put it first again
 # (the default): every difference outside Flow's and the ban chain's counts. Example: 'f2b-|crowdsec'.
 OTHER_CHURN="${OTHER_CHURN:-}"
 # The Incus API on the sandbox network's gateway: Flow's container reaches it there (loopback is the container's
-# own), sandboxes do not (policy flow-sb-host), other containers only with a trusted client certificate. Incus
-# can bind it at boot: the drop-in starts Incus after Docker has made the bridge.
+# own); sandboxes (policy flow-sb-host) and every other container (flow-sb-incus: only CONTAINER_ADDRESS passes) do
+# not. An address missing when Incus starts is bound once more after 30 s, then never (measured, Incus 6.0.4: "Still
+# unable to listen on https socket"; setting the same value again does not bind either, unset and set does): the
+# unit flow-incus-listen.service does that once Docker has made the bridge.
 INCUS_LISTEN="${INCUS_LISTEN:-$GATEWAY:8443}"
+# Flow's container's static address on DOCKER_NETWORK (compose.yaml, the same name): the one container that reaches
+# the Incus API. Outside DOCKER_RANGE (Docker could hand it to another container) and RANGE. Default: the second
+# address after DOCKER_RANGE, 172.30.1.2.
+CONTAINER_ADDRESS="${CONTAINER_ADDRESS:-$(awk -v r="$DOCKER_RANGE" '
+	function ip(s,  a) { split(s, a, "."); return ((a[1]*256 + a[2])*256 + a[3])*256 + a[4] }
+	BEGIN { split(r, p, "/"); n = int(ip(p[1]) / 2^(32 - p[2])) * 2^(32 - p[2]) + 2^(32 - p[2]) + 2
+		printf "%d.%d.%d.%d\n", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256 }')}"
 INCUS_DIR="${INCUS_DIR:-/var/lib/incus}" # Incus' own variable: where its server.crt lies
 CERT_DIR="${CERT_DIR:-/etc/flow-host/incus}"
 # Owner of CERT_DIR and its files: the uid:gid Flow's container runs as (compose.yaml `user`), never 1000.
@@ -44,8 +53,12 @@ LAN_DESTINATIONS="${LAN_DESTINATIONS:-10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 16
 POLICY_HOST=flow-sb-host
 POLICY_DOCKER=flow-sb-docker
 POLICY_LAN=flow-sb-lan
+POLICY_INCUS=flow-sb-incus
+POLICIES="$POLICY_HOST $POLICY_DOCKER $POLICY_LAN $POLICY_INCUS"
 RULE_UNIT=flow-sandbox-published.service
 RULE_UNIT_FILE=/etc/systemd/system/$RULE_UNIT
+LISTEN_UNIT=flow-incus-listen.service
+LISTEN_UNIT_FILE=/etc/systemd/system/$LISTEN_UNIT
 DROPIN=/etc/systemd/system/incus.service.d/flow-order.conf
 MANIFEST=$STATE_DIR/manifest
 BASELINE=$STATE_DIR/baseline
@@ -114,13 +127,29 @@ policy_rules() {
 			printf 'rule family="ipv4" source address="%s" destination address="%s" reject\n' "$RANGE" "$d"
 		done
 		;;
+	# Every container (all Docker bridges are in zone docker) but Flow's: the Incus API's port, on the listen
+	# address (any host address for a wildcard listener).
+	"$POLICY_INCUS")
+		lip="$(listen_ip)"
+		printf 'rule family="ipv4" source NOT address="%s"%s port port="%s" protocol="tcp" reject\n' \
+			"$CONTAINER_ADDRESS" "${lip:+ destination address=\"$lip\"}" "${INCUS_LISTEN##*:}"
+		;;
 	esac
 }
 policy_egress() {
 	case "$1" in
-	"$POLICY_HOST") echo HOST ;;
+	"$POLICY_HOST" | "$POLICY_INCUS") echo HOST ;;
 	"$POLICY_DOCKER") echo docker ;;
 	"$POLICY_LAN") echo ANY ;;
+	esac
+}
+
+# listen_ip prints INCUS_LISTEN's IPv4 address, nothing for a wildcard (0.0.0.0, [::], empty).
+listen_ip() {
+	h="${INCUS_LISTEN%:*}"
+	case "$h" in
+	"" | 0.0.0.0 | "[::]") ;;
+	*) printf '%s\n' "$h" ;;
 	esac
 }
 
@@ -176,6 +205,14 @@ check_settings() {
 	ip_in "$GATEWAY" "$SUBNET" || die "gateway $GATEWAY is not in $SUBNET"
 	! ip_in "$GATEWAY" "$RANGE" || die "gateway $GATEWAY lies in the sandbox range $RANGE"
 	[ "${#BRIDGE}" -le 15 ] || die "bridge name $BRIDGE is longer than 15 characters"
+	printf '%s\n' "$INCUS_LISTEN" | grep -Eq '^((([0-9]{1,3}\.){3}[0-9]{1,3})|\[::\])?:[0-9]{1,5}$' ||
+		die "INCUS_LISTEN $INCUS_LISTEN is not <IPv4 address>:<port> (or a wildcard: 0.0.0.0:<port>, [::]:<port>, :<port>)"
+	cidr_valid "$CONTAINER_ADDRESS/32" || die "CONTAINER_ADDRESS $CONTAINER_ADDRESS is not an IPv4 address"
+	ip_in "$CONTAINER_ADDRESS" "$SUBNET" || die "CONTAINER_ADDRESS $CONTAINER_ADDRESS is not in $SUBNET"
+	! ip_in "$CONTAINER_ADDRESS" "$RANGE" || die "CONTAINER_ADDRESS $CONTAINER_ADDRESS lies in the sandbox range $RANGE"
+	! ip_in "$CONTAINER_ADDRESS" "$DOCKER_RANGE" ||
+		die "CONTAINER_ADDRESS $CONTAINER_ADDRESS lies in Docker's range $DOCKER_RANGE (Docker may give it to another container)"
+	[ "$CONTAINER_ADDRESS" != "$GATEWAY" ] || die "CONTAINER_ADDRESS is the gateway $GATEWAY"
 	if [ -n "$OTHER_CHURN" ]; then
 		rc=0
 		printf 'x\n' | grep -Eq -- "$OTHER_CHURN" || rc=$?
@@ -286,7 +323,7 @@ resolve_ban() {
 # before DOCKER-FORWARD, the units docker.service and (when Incus is installed) incus.service, and Incus without a
 # managed network. A ban chain is checked when the host has one (resolve_ban).
 preflight() {
-	for c in docker firewall-cmd iptables nft ip systemctl awk comm sort; do
+	for c in docker firewall-cmd iptables nft ip ss systemctl awk comm sort; do
 		command -v "$c" >/dev/null 2>&1 || die "$c not found"
 	done
 	[ "$(firewall-cmd --state 2>/dev/null)" = running ] || die "firewalld is not running"
