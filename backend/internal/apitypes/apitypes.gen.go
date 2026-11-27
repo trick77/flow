@@ -419,10 +419,13 @@ type SessionSummary struct {
 	// Position in the check queue while status is queued.
 	GatePosition int `json:"gatePosition,omitempty"`
 	// Messages waiting in the session's queue.
-	Queued         int        `json:"queued,omitempty"`
-	TurnStartedAt  *time.Time `json:"turnStartedAt,omitempty"`
-	LastActivityAt time.Time  `json:"lastActivityAt"`
-	CreatedAt      time.Time  `json:"createdAt"`
+	Queued        int        `json:"queued,omitempty"`
+	TurnStartedAt *time.Time `json:"turnStartedAt,omitempty"`
+	// The last seq of the session's log Flow has mirrored: what a mark as seen names while the log cannot be read
+	// (sandbox stopped).
+	LastSeq        int       `json:"lastSeq,omitempty"`
+	LastActivityAt time.Time `json:"lastActivityAt"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
 
 // SessionList is part of the contract.

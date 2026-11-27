@@ -263,6 +263,11 @@ export interface SessionSummary {
   /** Messages waiting in the session's queue. */
   queued?: number;
   turnStartedAt?: string;
+  /**
+   * The last seq of the session's log Flow has mirrored: what a mark as seen names while the log cannot
+   * be read (sandbox stopped).
+   */
+  lastSeq?: number;
   lastActivityAt: string;
   createdAt: string;
 }
