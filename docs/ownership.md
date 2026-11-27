@@ -32,7 +32,7 @@ is added before code imports it.
 |---|---|---|---|
 | auth | `internal/auth`, `docs/auth.md` | `httpapi.Auth`, `httpapi.Guard` | kit/auth |
 | profile and settings (backend) | `internal/profile` | `httpapi.Profile`, `profile.Store` | flowdproto (config sync) |
-| GitHub App and credentials | `internal/github`, `internal/credentials` | `httpapi.Connections`, `credentials.Store`, `Sealer`, `Source` | profile |
+| GitHub App and credentials | `internal/github`, `internal/credentials` | `httpapi.Connections`, `credentials.Store`, `Sealer`, `Source`, `GitHub` (github implements it) | profile |
 | projects | `internal/projects` | `httpapi.Projects`, `projects.Store` | sandboxes |
 | sandboxes and Incus | `internal/sandboxes`, `internal/sandbox/incus`, `deploy/` (host setup and teardown, base image, dev run), the sandbox network (`config/network.go`) | `httpapi.Sandboxes`, `sandboxes.Store`, `sandboxes.Addresses`, `sandbox.Runtime` | flowdproto, credentials.Source |
 | sessions | `internal/sessions`, `internal/gate` | `httpapi.Sessions`, `sessions.Store`, control requests (child tools, gate) | flowdproto, projects, sandboxes, helper |

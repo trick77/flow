@@ -289,12 +289,28 @@ sandbox (Incus system container, one per project)
 - **Decision.** Flow pushes the whole set with `PUT /v1/env` (`flowdproto.Env`, monotonic revision); flowd's
   credentials component is the only code that writes credentials anywhere in a sandbox. Nothing that rotates is
   ever a process environment variable:
-  - git: `/etc/gitconfig` `credential.https://github.com.helper = /opt/flow/bin/git-credential-flow` (flowd
-    multi-call), which asks flowd over `flowd.sock` on every operation;
-  - gh: `GH_CONFIG_DIR=/run/flow/credentials/gh`; flowd rewrites `hosts.yml` atomically (temp + rename) on every
-    renewal; every `gh` run is a new process that reads it (**provisional**: gh's docs were not fetched; check
-    `GH_CONFIG_DIR` and the hosts.yml token key in the image). Not `GH_TOKEN`: frozen at process start, stale after
-    8 hours. The spec still names `GH_TOKEN`; this follows the coordinator's later instruction.
+  - git: flowd writes `/etc/gitconfig` at its start with `git config --file` (other entries stay):
+    `credential.https://github.com.helper = /opt/flow/bin/flowd git-credential` (an absolute path: git runs it as
+    written and appends `get`/`store`/`erase`), `push.default=current`, `push.autoSetupRemote=true`. System-wide,
+    so session units, terminals, setup scripts (private submodules, Go modules fetched over git) and flowd's own
+    clones all use it. The helper asks flowd over `flowd.sock` (0666 in root's 0711 `/run/flow`; one request
+    kind, no part of the bearer API) on every `get` and stores nothing; username = the login, password = the
+    token, `password_expiry_utc` set. A token with under a minute left is not handed out: the helper waits up to
+    10 s for the push of the renewed one. Without a token it writes the reason to stderr and answers nothing, so
+    git fails with its own error; public clones never ask. The URL form `x-access-token:<token>@` is never used (it
+    would put the token into process arguments and `.git/config`). Go's private modules over https need only
+    this, plus `GOPRIVATE`/`GONOSUMDB` naming them (environment, not git config: set per repository, e.g. in
+    `.flow/setup.sh` or the repository's own config; Flow sets none).
+  - push: session branches are made with `--no-track` (no upstream), so a bare `git push` publishes the branch
+    under its own name and sets the upstream (`push.default=current` also keeps a branch that tracks the default
+    branch from pushing to it).
+  - gh: `GH_CONFIG_DIR=/run/flow/credentials/gh` (root 0755); flowd rewrites `hosts.yml` (root 0644; temp file +
+    rename) on every newer push: `github.com: {users: {<login>: {oauth_token}}, oauth_token, user, git_protocol:
+    https}`, the layout gh itself writes since multiple accounts, plus `config.yml` `version: "1"`. Removed when
+    the set carries no token. gh reads the token from `hosts.<host>.oauth_token` when no `GH_TOKEN`/`GITHUB_TOKEN`
+    is set ([go-gh auth](https://github.com/cli/go-gh/blob/trunk/pkg/auth/auth.go)), and every run is a new
+    process that reads the file. Not `GH_TOKEN`: frozen at process start, stale after 8 hours. The spec still
+    names `GH_TOKEN`; this follows the coordinator's later instruction.
   - git identity: `GIT_AUTHOR_*`/`GIT_COMMITTER_*` from the profile in each unit's environment (changes apply to new
     units; identity does not expire).
 - **Claude, per session** (owner decision): `claudeAuth` on the session (DB, API, `SessionSpec`, `session.started`),
@@ -315,13 +331,44 @@ sandbox (Incus system container, one per project)
   its next host start.
 - OpenCode provider keys: `providers.env` for the `opencode serve` unit; a change restarts it when no OpenCode
   turn runs.
-- **Flow unreachable for more than 8 hours:** the token in flowd expires; the git helper and gh fail fast with
-  `flow: GitHub token expired (github_token_expired); Flow will renew it`, flowd adds a `notice
-  {code: github_token_expired}` to sessions that ran git/gh, the turn sees a normal command failure instead of a
-  hang. The next `PUT /v1/env` fixes it.
-- **Refresh token invalid:** Flow marks the connection `disconnected` (API `GitHubConnection.state`), pushes
-  `githubState: disconnected` with no token; helpers fail with `github_disconnected`; the owner reconnects with the
-  device flow.
+- **GitHub App, Flow side** (`internal/github`, sources:
+  [user tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app),
+  [refresh](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)).
+  `BACKEND_GITHUB_CLIENT_ID` only: the device flow and the refresh need no client secret ("required unless the
+  user access token was generated using the device flow"); unset → `GitHubConnection.available=false`, GitHub
+  routes `not_implemented`, anonymous default-branch lookups. Device flow: one code at a time (a start while one
+  is out returns it), the device code stays in Flow, GitHub is polled at most at its interval (+5 s per
+  `slow_down`), a browser poll in between is answered `pending` from memory; `access_denied` → `disconnected`,
+  `expired_token` → `expired`, other OAuth errors end the code with `upstream`, network failures keep it. The
+  connection is one `credentials` row (kind `github`): login, expiries, sealed `{accessToken, refreshToken,
+  expiries, accountId}`. One mutex holds every load, renewal, connect and disconnect: a refresh rotates the
+  refresh token and kills the old access token ("Once you use a refresh token, that refresh token and the old
+  user access token will no longer work"), so two renewals must never run. Renewal 15 minutes before the 8-hour
+  token ends (once per token's life; every renewal cuts off the old token until the push lands), from a one-minute
+  loop and from any use; never at Flow's start while the stored token is valid; not under the caller's context
+  (a cut request must not lose the only valid refresh token). The new pair is stored before the access token is
+  handed out; a failed write keeps it in memory and is retried, GitHub is never asked again with the burned one.
+  Each renewal pushes the set to warm sandboxes at once (`credentials.Service.Changed`): push-driven because flowd
+  cannot dial Flow. Network errors, 5xx, 429 and answers without an OAuth error are transient (the token is handed
+  out while valid, then `expired`); an OAuth error answer (`bad_refresh_token`, or the refresh token past its six
+  months) drops the tokens but keeps the row's login: `GitHubConnection.state=expired` ("connect again"), the set
+  carries `disconnected`, and it is never retried. A crash between GitHub's answer and the write leaves the burned
+  token stored: the next renewal gets that refusal and reports it the same way. Disconnect deletes the row and
+  pushes; no revoke call (GitHub's revoke endpoints need the client secret). `listGitHubRepos`:
+  `GET /user/installations` and `/user/installations/{id}/repositories` with the user token (what the App is
+  installed on and the owner can reach), deduplicated, sorted, at most 1000. Default branch: `GET /repos/{name}`
+  with the token, anonymous on 404 (public repositories outside the installation) and while not connected; a
+  repository neither finds is `github_not_connected` while not connected, else `invalid_request`. The token goes
+  only into the `Authorization` header and form bodies, never a URL, log or API answer.
+- **Flow unreachable for more than 8 hours:** the token in flowd expires; the git helper fails with
+  `flow: GitHub token expired (github_token_expired); Flow will renew it` (gh, reading the file, gets GitHub's 401),
+  flowd adds a `notice {code: github_token_expired}` to the session whose git asked (the helper's process is found
+  in its session unit's cgroup by `SO_PEERCRED`; at most one per session and code in 10 minutes, through
+  `hostproto` `notice`; terminals and setup scripts get the stderr line only), the turn sees a normal command
+  failure instead of a hang. The next `PUT /v1/env` fixes it.
+- **Refresh token invalid, or not connected:** the set carries `githubState: disconnected` and no token; the helper
+  fails at once with `github_disconnected` and the session gets `notice {github_disconnected}`; the owner
+  (re)connects with the device flow.
 - **Flow side** (`internal/credentials`): the API's `createApiKey` stores the subscription token (`claude_token`),
   the Anthropic key (`anthropic`) or an OpenCode provider key (`opencode_provider`, `<PROVIDER>_API_KEY`) sealed,
   one per kind and provider; a second replaces the first with a new id and `createdAt`, which is the status the

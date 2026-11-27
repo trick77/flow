@@ -181,7 +181,8 @@ no sentence depends on them. Codes in use:
 | `sidecar_shutting_down` | warning | sidecar | a command arrived while the sidecar stops (`kind`) |
 | `sidecar_busy` | error | sidecar | a `message.send` while a turn runs: the host's queue should have held it (`messageId`) |
 | `sidecar_reply_not_pending` | warning | sidecar | a reply to a request the sidecar no longer holds (`requestId`, `reason`: `answered`, `unknown`, or `withdrawn` for one the SDK withdrew while it was shown) |
-| `github_token_expired` | not built yet | flowd | git or gh ran with an expired token (docs/architecture.md, credentials) |
+| `github_token_expired` | error | flowd | the session's git asked for the GitHub token and flowd's copy had expired with no renewed one pushed (Flow unreachable, or its renewal failing); at most once per 10 minutes (docs/architecture.md, credentials) |
+| `github_disconnected` | error | flowd | the session's git asked for the GitHub token and GitHub is not connected, or must be connected again: the UI offers "connect GitHub"; at most once per 10 minutes |
 | `message_may_not_have_run` | error | host (Claude adapter) | the sidecar exited or its pipe broke during a turn; the message is never re-sent by itself (`messageId`) |
 | `provider_session` | info | host (Claude adapter) | the provider has the session (the first `system/init` of a turn): the marker resume and `priorCostUsd` are read from; readers show no row for it |
 
