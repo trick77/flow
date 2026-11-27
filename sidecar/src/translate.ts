@@ -381,7 +381,7 @@ export class Translator {
     }
     if (e.type === "message_stop") this.streamMessages.delete(stream);
     if (FRAMING_STREAM_EVENTS.has(e.type)) return [];
-    return [passthrough(`stream_event/${e.type}`, m)];
+    return [passthrough(`stream_event/${e.type}`, m, m.parent_tool_use_id)];
   }
 
   private assistant(m: SDKAssistantMessage, turn?: Turn): EventDraft[] {

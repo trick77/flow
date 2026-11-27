@@ -128,12 +128,21 @@ func (s SQL) Create(ctx context.Context, se Session, worktrees []Worktree) error
 	return tx.Commit()
 }
 
-// Update implements Store: the fields an owner or the follower changes.
-func (s SQL) Update(ctx context.Context, se Session) error {
-	res, err := s.DB.ExecContext(ctx, `UPDATE sessions SET title = ?, title_source = ?, model = ?, mode = ?, mode_cap = ?,
-		provider_session_id = ?, updated_at = ? WHERE id = ?`, se.Title, se.TitleSource, se.Model, se.Mode, se.ModeCap,
-		se.ProviderSessionID, store.Format(time.Now()), se.ID)
-	return affected(res, err, "session "+se.ID)
+// Update implements Store: the patch's fields only.
+func (s SQL) Update(ctx context.Context, id string, p Patch) error {
+	q := `UPDATE sessions SET updated_at = ?`
+	args := []any{store.Format(time.Now())}
+	if p.Title != "" {
+		q, args = q+`, title = ?, title_source = 'owner'`, append(args, p.Title)
+	}
+	if p.Model != "" {
+		q, args = q+`, model = ?`, append(args, p.Model)
+	}
+	if p.Mode != "" {
+		q, args = q+`, mode = ?`, append(args, p.Mode)
+	}
+	res, err := s.DB.ExecContext(ctx, q+` WHERE id = ?`, append(args, id)...)
+	return affected(res, err, "session "+id)
 }
 
 func affected(res sql.Result, err error, what string) error {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/trick77/flow/internal/apitypes"
 	"github.com/trick77/flow/internal/event"
+	"github.com/trick77/flow/internal/sessions"
 )
 
 func (r *rig) do(t *testing.T, method, path, body string) (int, []byte) {
@@ -101,9 +102,7 @@ func TestReplies_questionAndPlan(t *testing.T) {
 // A plan approved into a mode above the session's cap is refused, as a mode change is.
 func TestReplies_planModeAboveCap(t *testing.T) {
 	r := newRig(t)
-	se, _ := r.api.Sessions.Store.Get(t.Context(), r.id)
-	se.ModeCap = "accept_edits"
-	if err := r.api.Sessions.Store.Update(t.Context(), se); err != nil {
+	if err := r.api.Sessions.Store.ApplyMirror(t.Context(), r.id, sessions.Mirror{ModeCap: "accept_edits"}); err != nil {
 		t.Fatal(err)
 	}
 	code, body := r.do(t, "POST", "/s/"+r.id+"/plans/p1", `{"decision":"approved","mode":"full_access"}`)
@@ -195,6 +194,12 @@ func TestReadSessionLog(t *testing.T) {
 	}
 	if got := read("?after=" + "999"); len(got.Events) != 0 || got.LastSeq != all.LastSeq {
 		t.Errorf("past the end: %+v", got)
+	}
+	// At the int64 maximum after+1 and after+limit overflow: still an empty page, answered at once.
+	start := time.Now()
+	if got := read("?after=9223372036854775807"); len(got.Events) != 0 || got.LastSeq != all.LastSeq ||
+		time.Since(start) > 5*time.Second {
+		t.Errorf("after at the int64 maximum: %+v in %s", got, time.Since(start))
 	}
 	for _, q := range []string{"?after=1&before=3", "?limit=0", "?limit=5000", "?after=-1", "?before=x"} {
 		if code, _ := r.do(t, "GET", "/s/"+r.id+"/log"+q, ""); code != http.StatusBadRequest {

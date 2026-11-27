@@ -593,7 +593,7 @@ describe("stdio loop against a stand-in SDK", () => {
     expect(answers.bash).toEqual({
       behavior: "allow",
       updatedInput: { command: "go test ./...", description: "Run tests" },
-      updatedPermissions: suggestions,
+      updatedPermissions: [{ ...suggestions[0], destination: "session" }],
     });
     // The same reply again: already answered, not applied twice.
     h.send("permission.reply", { requestId: "req_1", decision: "deny" });

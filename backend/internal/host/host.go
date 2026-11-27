@@ -93,11 +93,13 @@ type Host struct {
 	interruptCmd string
 	pendingID    string
 	pendingKind  event.EventKind
-	queue        []event.MessageSend
-	blocks       map[string]string
-	blockOrder   []string
-	subs         map[chan hostproto.Frame]struct{}
-	shutdownIdle bool
+	// pendingQuestions are the open question request's questions: a reply naming others is refused.
+	pendingQuestions []event.Question
+	queue            []event.MessageSend
+	blocks           map[string]string
+	blockOrder       []string
+	subs             map[chan hostproto.Frame]struct{}
+	shutdownIdle     bool
 	// gateFailed: the open turn's last check run (gate.finished) had a non-zero exit, so the turn ends failed.
 	gateFailed bool
 	stop       chan struct{}
@@ -190,7 +192,7 @@ func (h *Host) recover(events []event.Event) {
 		case *event.PermissionRequested:
 			h.pendingID, h.pendingKind = p.RequestID, e.Kind
 		case *event.QuestionAsked:
-			h.pendingID, h.pendingKind = p.RequestID, e.Kind
+			h.pendingID, h.pendingKind, h.pendingQuestions = p.RequestID, e.Kind, p.Questions
 		case *event.PlanProposed:
 			h.pendingID, h.pendingKind = p.RequestID, e.Kind
 		case *event.PermissionResolved, *event.QuestionResolved, *event.PlanResolved:
@@ -440,6 +442,13 @@ func (h *Host) apply(c event.Command, p any) error {
 	switch p := p.(type) {
 	case *event.MessageSend:
 		switch {
+		case h.turn == "" && len(h.queue) > 0:
+			// Idle with messages still queued (a host started held): the new one goes behind them, or ahead with
+			// interrupt as on a busy host, and the queue drains in that order.
+			if err := h.enqueue(cmd, *p, p.WhenBusy == event.WhenBusyInterrupt); err != nil {
+				return err
+			}
+			h.drain()
 		case h.turn == "":
 			return h.startTurn(cmd, *p)
 		case p.WhenBusy == event.WhenBusyInterrupt:
@@ -487,6 +496,12 @@ func (h *Host) apply(c event.Command, p any) error {
 		h.setStatus(event.SessionStatusWorking)
 		h.send(c)
 	case *event.QuestionReply:
+		if h.pendingKind == event.KindQuestionAsked && h.pendingID == p.RequestID {
+			if bad := unknownAnswer(h.pendingQuestions, p.Answers); bad != "" {
+				// The agent would hear "no answer" for it while the log said answered.
+				return &CommandError{Code: hostproto.CodeInvalid, Detail: "answer names " + bad}
+			}
+		}
 		if err := h.resolve(event.KindQuestionAsked, p.RequestID); err != nil {
 			return err
 		}
@@ -587,6 +602,23 @@ func (h *Host) gate(cmd string, p *event.GateUpdate) {
 			h.setStatus(event.SessionStatusDone) // a run outside a turn (a terminal's make) leaves nothing working
 		}
 	}
+}
+
+// unknownAnswer names the first question or option id of answers the questions do not have ("" when all are known):
+// the adapter can only pass on the answers it finds there.
+func unknownAnswer(questions []event.Question, answers []event.Answer) string {
+	for _, a := range answers {
+		i := slices.IndexFunc(questions, func(q event.Question) bool { return q.ID == a.QuestionID })
+		if i < 0 {
+			return "question " + a.QuestionID
+		}
+		for _, o := range a.OptionIds {
+			if !slices.ContainsFunc(questions[i].Options, func(x event.QuestionOption) bool { return x.ID == o }) {
+				return "option " + o + " of " + a.QuestionID
+			}
+		}
+	}
+	return ""
 }
 
 func (h *Host) resolve(kind event.EventKind, id string) error {
@@ -791,6 +823,11 @@ func (h *Host) request(d event.EventDraft) {
 		return
 	}
 	h.pendingID, h.pendingKind = req.RequestID, d.Kind
+	if d.Kind == event.KindQuestionAsked {
+		var q event.QuestionAsked
+		_ = json.Unmarshal(d.Data, &q)
+		h.pendingQuestions = q.Questions
+	}
 	h.setStatus(map[event.EventKind]event.SessionStatus{event.KindPermissionRequested: event.SessionStatusApproval,
 		event.KindQuestionAsked: event.SessionStatusQuestion, event.KindPlanProposed: event.SessionStatusPlan}[d.Kind])
 }
