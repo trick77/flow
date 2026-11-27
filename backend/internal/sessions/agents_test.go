@@ -35,16 +35,19 @@ func TestListAgents(t *testing.T) {
 		keys      Keys
 		auths     []apitypes.ClaudeAuth
 		available bool
+		login     bool
 	}{
-		{"nothing stored", keyList{}, nil, false},
-		{"no key store", nil, nil, false},
-		{"an OpenCode key only", keyList{apitypes.ApiKeyKindOpencodeProvider}, nil, false},
-		{"token", keyList{apitypes.ApiKeyKindClaudeToken}, []apitypes.ClaudeAuth{apitypes.ClaudeAuthSubscriptionToken}, true},
+		{"nothing stored", keyList{}, nil, false, false},
+		{"no key store", nil, nil, false, false},
+		{"an OpenCode key only", keyList{apitypes.ApiKeyKindOpencodeProvider}, nil, false, false},
+		{"token", keyList{apitypes.ApiKeyKindClaudeToken}, []apitypes.ClaudeAuth{apitypes.ClaudeAuthSubscriptionToken}, true, false},
 		{"token and API key", keyList{apitypes.ApiKeyKindAnthropic, apitypes.ApiKeyKindClaudeToken},
-			[]apitypes.ClaudeAuth{apitypes.ClaudeAuthSubscriptionToken, apitypes.ClaudeAuthAPIKey}, true},
+			[]apitypes.ClaudeAuth{apitypes.ClaudeAuthSubscriptionToken, apitypes.ClaudeAuthAPIKey}, true, false},
+		{"only a login on the home volume", keyList{}, []apitypes.ClaudeAuth{apitypes.ClaudeAuthSubscriptionLogin}, true, true},
 	} {
 		w := httptest.NewRecorder()
-		(&API{Keys: tc.keys}).ListAgents(w, httptest.NewRequest("GET", "/api/agents", nil))
+		login := tc.login
+		(&API{Keys: tc.keys, ClaudeSignedIn: func(context.Context) bool { return login }}).ListAgents(w, httptest.NewRequest("GET", "/api/agents", nil))
 		if w.Code != 200 {
 			t.Fatalf("%s: status %d %s", tc.name, w.Code, w.Body)
 		}

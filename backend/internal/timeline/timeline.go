@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/trick77/flow/internal/apitypes"
 	"github.com/trick77/flow/internal/event"
+	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/httpapi"
 	sbx "github.com/trick77/flow/internal/sandboxes"
 	"github.com/trick77/flow/internal/sessions"
@@ -23,8 +25,8 @@ import (
 	"github.com/trick77/flow/internal/store"
 )
 
-// API implements httpapi.Timeline: the session stream, the app stream, messages, interrupt and permission replies
-// (the rest answer not_implemented).
+// API implements httpapi.Timeline: the session stream and log, the app stream, messages and the queue, interrupt
+// and the replies to permission, question and plan requests.
 type API struct {
 	httpapi.NotImplemented
 	Sessions *sessions.Service
@@ -156,6 +158,113 @@ func (a *API) StreamSessionEvents(w http.ResponseWriter, r *http.Request) {
 		case <-time.After(a.retry()):
 		}
 	}
+}
+
+// Log page bounds: events per page (default and most), and the encoded bytes one page carries at most (events are
+// up to event.MaxLine each). A page cut by bytes is shorter; the reader pages on from its edge.
+const (
+	logDefaultLimit = 500
+	logMaxLimit     = 1000
+	logMaxBytes     = 8 << 20
+	logReadWait     = 30 * time.Second
+)
+
+// ReadSessionLog implements httpapi.Timeline: a page of durable events from the log, forwards after ?after (default
+// 0) or backwards before ?before, at most ?limit (default 500, at most 1000) and about 8 MiB. Seqs are gapless, so a
+// page is one forward read from flowd's stream between two known seqs. The log lives in the sandbox: one that is not
+// running is never started for it and answers sandbox_unavailable (the timeline offers the start).
+func (a *API) ReadSessionLog(w http.ResponseWriter, r *http.Request) {
+	se, ok := a.session(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	param := func(name string) (int64, bool, bool) {
+		v := q.Get(name)
+		if v == "" {
+			return 0, false, true
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		return n, true, err == nil && n >= 0
+	}
+	after, hasAfter, ok1 := param("after")
+	before, hasBefore, ok2 := param("before")
+	limit, hasLimit, ok3 := param("limit")
+	switch {
+	case !ok1 || hasAfter && hasBefore:
+		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "after"})
+		return
+	case !ok2:
+		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "before"})
+		return
+	case !ok3 || hasLimit && (limit < 1 || limit > logMaxLimit):
+		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "limit"})
+		return
+	}
+	if !hasLimit {
+		limit = logDefaultLimit
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), logReadWait)
+	defer cancel()
+	api, err := a.Sessions.Sandboxes.Warm(ctx, se.ProjectID)
+	if err != nil {
+		httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error()))
+		return
+	}
+	st, err := api.Session(ctx, se.ID)
+	if err != nil {
+		if errors.Is(err, flowdproto.ErrNotFound) {
+			err = apitypes.Fail(apitypes.ErrorCodeNotFound, "")
+		} else {
+			err = apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+		}
+		httpapi.WriteError(w, err)
+		return
+	}
+	lo, hi := after+1, min(st.LastSeq, after+limit)
+	if hasBefore {
+		hi = min(before-1, st.LastSeq)
+		lo = max(1, hi-limit+1)
+	}
+	page := apitypes.EventPage{Events: []json.RawMessage{}, LastSeq: st.LastSeq}
+	// A stream that breaks (flowd restarting) is dialled again from the next seq, a few times.
+	next, size, full := lo, 0, false
+	var streamErr error
+	for attempt := 0; next <= hi && !full && attempt < 3; attempt++ {
+		for e, err := range api.Events(ctx, se.ID, next-1) {
+			if err != nil {
+				streamErr = err
+				break
+			}
+			if e.Seq < next {
+				continue // ephemeral (no seq), or before the page
+			}
+			b, err := json.Marshal(e)
+			if err != nil {
+				httpapi.WriteError(w, err)
+				return
+			}
+			page.Events = append(page.Events, b)
+			size += len(b)
+			next = e.Seq + 1
+			for hasBefore && size > logMaxBytes && len(page.Events) > 1 {
+				size -= len(page.Events[0]) // backwards: the newest stay, the reader pages on before the first
+				page.Events = page.Events[1:]
+			}
+			if full = !hasBefore && size > logMaxBytes; full || next > hi {
+				break
+			}
+		}
+	}
+	if next <= hi && !full {
+		detail := "log stream ended early"
+		if streamErr != nil {
+			detail = streamErr.Error()
+		}
+		httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, detail))
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, page)
 }
 
 // sandboxChanges subscribes to the app stream for sandbox changes; without a hub (or one at its cap) the channel
@@ -320,10 +429,149 @@ func (a *API) ReplyPermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := r.PathValue("requestId")
-	_, ran, err := a.Sessions.CommandIfRunning(r.Context(), se.ID, "reply-"+req, event.CmdPermissionReply,
-		event.PermissionReply{RequestID: req, Decision: event.ReplyDecision(in.Decision), Message: in.Message})
+	a.reply(w, r, se, req, event.CmdPermissionReply, event.PermissionReply{RequestID: req,
+		Decision: event.ReplyDecision(in.Decision), Message: in.Message})
+}
+
+// reply sends one owner reply to a request: one per request (the command id is the request's), so a second click or
+// a retry changes nothing; in a stopped sandbox no request is pending (request_not_pending), and the sandbox is not
+// started for it.
+func (a *API) reply(w http.ResponseWriter, r *http.Request, se sessions.Session, req string, kind event.CommandKind, payload any) {
+	_, ran, err := a.Sessions.CommandIfRunning(r.Context(), se.ID, "reply-"+req, kind, payload)
 	if err == nil && !ran {
 		err = apitypes.Fail(apitypes.ErrorCodeRequestNotPending, "")
+	}
+	if err != nil {
+		httpapi.WriteError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ReplyQuestion implements httpapi.Timeline: chosen option ids and/or free text per question, or one text typed in
+// the composer; the sidecar turns them into AskUserQuestion's answers (keyed by question text). A reply that answers
+// nothing is refused: the agent would hear "no answer" while the log says answered.
+func (a *API) ReplyQuestion(w http.ResponseWriter, r *http.Request) {
+	se, ok := a.session(w, r)
+	if !ok {
+		return
+	}
+	var in apitypes.QuestionAnswer
+	if err := httpapi.Decode(r, &in); err != nil {
+		httpapi.WriteError(w, err)
+		return
+	}
+	answered := strings.TrimSpace(in.Text) != ""
+	size := len(in.Text)
+	answers := make([]event.Answer, 0, len(in.Answers))
+	for _, ans := range in.Answers {
+		if ans.QuestionID == "" {
+			httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "answers"})
+			return
+		}
+		answered = answered || len(ans.OptionIds) > 0 || strings.TrimSpace(ans.Text) != ""
+		size += len(ans.Text)
+		ids := ans.OptionIds
+		if ids == nil {
+			ids = []string{} // required in the contract: never null
+		}
+		answers = append(answers, event.Answer{QuestionID: ans.QuestionID, OptionIds: ids, Text: ans.Text})
+	}
+	if !answered {
+		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "answers"})
+		return
+	}
+	if size > maxReplyText {
+		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "text"})
+		return
+	}
+	req := r.PathValue("requestId")
+	reply := event.QuestionReply{RequestID: req, Text: in.Text}
+	if len(answers) > 0 {
+		reply.Answers = answers
+	}
+	a.reply(w, r, se, req, event.CmdQuestionReply, reply)
+}
+
+// maxReplyText bounds the free text of a question or plan reply: the host logs the resolution before the agent hears
+// it, and a resolution too large to log would leave the request resolved with nothing on record.
+const maxReplyText = 64 << 10
+
+// ReplyPlan implements httpapi.Timeline: approve (optionally with the mode to go on in: the session's mode changes,
+// held to its cap by the host) or reject with feedback, which the agent reads as the reason to keep planning.
+func (a *API) ReplyPlan(w http.ResponseWriter, r *http.Request) {
+	se, ok := a.session(w, r)
+	if !ok {
+		return
+	}
+	var in apitypes.PlanAnswer
+	if err := httpapi.Decode(r, &in); err != nil {
+		httpapi.WriteError(w, err)
+		return
+	}
+	switch in.Decision {
+	case apitypes.PlanReplyDecisionApproved, apitypes.PlanReplyDecisionRejected:
+	default:
+		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "decision"})
+		return
+	}
+	mode := event.PermissionMode(in.Mode)
+	if mode != "" && (!slices.Contains(event.PermissionModeValues, mode) || in.Decision != apitypes.PlanReplyDecisionApproved) {
+		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "mode"})
+		return
+	}
+	if mode != "" && se.ModeCap != "" &&
+		slices.Index(event.PermissionModeValues, mode) > slices.Index(event.PermissionModeValues, event.PermissionMode(se.ModeCap)) {
+		httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeModeAboveCap, ""))
+		return
+	}
+	if len(in.Feedback) > maxReplyText {
+		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "feedback"})
+		return
+	}
+	req := r.PathValue("requestId")
+	a.reply(w, r, se, req, event.CmdPlanReply, event.PlanReply{RequestID: req,
+		Decision: event.PlanReplyDecision(in.Decision), Feedback: in.Feedback, Mode: mode})
+}
+
+// SendQueuedNow implements httpapi.Timeline: the queued message moves to the head and the running turn is
+// interrupted (or, between turns, it starts at once). Like sending a message, it starts a stopped sandbox. A message
+// no longer queued (sent or removed already) is not_found. The command id is the message's, so a retry or second
+// click is acknowledged, not applied twice.
+func (a *API) SendQueuedNow(w http.ResponseWriter, r *http.Request) {
+	se, ok := a.session(w, r)
+	if !ok {
+		return
+	}
+	msg := r.PathValue("messageId")
+	// Held: a host that is down starts without sending its queue's head first, then runs this message.
+	_, _, err := a.Sessions.CommandHeld(r.Context(), se.ID, "send-now-"+msg, event.CmdMessageSendNow,
+		event.MessageSendNow{MessageID: msg}, true, false)
+	queueAnswer(w, err)
+}
+
+// RemoveQueued implements httpapi.Timeline: drops a queued message. A host that is down (after a sandbox restart,
+// which leaves queues as they are) is started without sending its queue's head, then stopped again. Never starts a
+// stopped sandbox: the answer there is sandbox_unavailable. A message no longer queued is not_found.
+func (a *API) RemoveQueued(w http.ResponseWriter, r *http.Request) {
+	se, ok := a.session(w, r)
+	if !ok {
+		return
+	}
+	msg := r.PathValue("messageId")
+	_, ran, err := a.Sessions.CommandHeld(r.Context(), se.ID, "remove-"+msg, event.CmdMessageRemove,
+		event.MessageRemove{MessageID: msg}, false, true)
+	if err == nil && !ran {
+		err = apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, "sandbox not running")
+	}
+	queueAnswer(w, err)
+}
+
+// queueAnswer answers a queue operation: the host's "not queued" is not_found here (the message, not a request).
+func queueAnswer(w http.ResponseWriter, err error) {
+	var ae *apitypes.Error
+	if errors.As(err, &ae) && ae.Code == apitypes.ErrorCodeRequestNotPending {
+		err = apitypes.Fail(apitypes.ErrorCodeNotFound, "message not queued")
 	}
 	if err != nil {
 		httpapi.WriteError(w, err)

@@ -110,6 +110,11 @@ func (p *ptyShell) Hangup() {
 	_ = p.cmd.Process.Signal(syscall.SIGHUP)
 }
 
+func (p *ptyShell) Kill() {
+	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+	_ = p.cmd.Process.Kill()
+}
+
 func (p *ptyShell) Wait() int {
 	err := p.cmd.Wait()
 	st := p.cmd.ProcessState

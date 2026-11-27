@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/trick77/flow/internal/event"
 	"github.com/trick77/flow/internal/flowdproto"
@@ -31,6 +32,9 @@ type ShellSpec struct {
 
 // flushWait bounds how long an ended terminal keeps writing out its clients' queues.
 const flushWait = 3 * writeWait
+
+// hangupWait is how long a stopped terminal waits for its hung-up shell before SIGKILL (a var for tests).
+var hangupWait = 5 * time.Second
 
 // StartShell starts a shell on a new PTY; Linux only (pty_linux.go), elsewhere it fails.
 var StartShell = startShell
@@ -94,7 +98,14 @@ func Run(ctx context.Context, args []string, log *slog.Logger) error {
 	case <-srv.Done():
 	case <-ctx.Done():
 		sh.Hangup()
-		<-srv.Done()
+		select {
+		case <-srv.Done():
+		case <-time.After(hangupWait):
+			// A shell that ignores SIGHUP would hold the stop until systemd's own timeout (90 s), with no exit recorded.
+			log.Warn("shell ignored the hangup, killing it", "id", *id)
+			sh.Kill()
+			<-srv.Done()
+		}
 	}
 	code := srv.Code()
 	if err := writeExit(*exitFile, code); err != nil {

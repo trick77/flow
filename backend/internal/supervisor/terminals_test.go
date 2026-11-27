@@ -48,6 +48,7 @@ func (e *echoShell) Close() error          { return e.r.Close() }
 func (e *echoShell) Resize(int, int) error { return nil }
 func (e *echoShell) Pid() int              { return 7 }
 func (e *echoShell) Hangup()               { e.end(129) }
+func (e *echoShell) Kill()                 { e.end(137) }
 func (e *echoShell) Wait() int             { return <-e.exit }
 func (e *echoShell) end(code int)          { e.once.Do(func() { _ = e.w.Close(); e.exit <- code }) }
 

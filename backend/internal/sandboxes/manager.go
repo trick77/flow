@@ -112,6 +112,41 @@ type Manager struct {
 	// volMu guards volReady: the home volume exists.
 	volMu    sync.Mutex
 	volReady bool
+	// claudeSignedIn is the last ClaudeSignedIn a flowd reported (guarded by mu): every sandbox mounts the one home
+	// volume, so any warm sandbox's answer holds for all.
+	claudeSignedIn bool
+}
+
+// ClaudeSignedIn reports whether the home volume holds a Claude login: the last answer any flowd gave (false before
+// the first), refreshed by one short Hello to one cached (warm) sandbox, so a login made in a terminal shows without
+// a bring-up. Never starts a sandbox; a flowd that does not answer in time leaves the last value.
+func (m *Manager) ClaudeSignedIn(ctx context.Context) bool {
+	m.mu.Lock()
+	var api flowdproto.API
+	for _, c := range m.apis {
+		api = c.api
+		break
+	}
+	m.mu.Unlock()
+	if api != nil {
+		hctx, cancel := context.WithTimeout(ctx, signInWait)
+		if h, err := api.Hello(hctx); err == nil {
+			m.noteHello(h)
+		}
+		cancel()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.claudeSignedIn
+}
+
+// signInWait bounds ClaudeSignedIn's refresh: it serves the agent catalog, which must answer at once.
+const signInWait = time.Second
+
+func (m *Manager) noteHello(h flowdproto.Hello) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claudeSignedIn = h.ClaudeSignedIn
 }
 
 // cachedAPI is a flowd connection and the address it dials.
@@ -711,6 +746,9 @@ func (m *Manager) hello(ctx context.Context, api flowdproto.API, wait, refusedIs
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		h, err := api.Hello(hctx)
 		cancel()
+		if err == nil {
+			m.noteHello(h)
+		}
 		if err == nil || !wait || errors.Is(err, flowdproto.ErrProtocol) || time.Now().After(deadline) ||
 			refusedIsFinal && errors.Is(err, flowdproto.ErrUnauthorized) {
 			return h, err

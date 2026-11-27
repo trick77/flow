@@ -710,6 +710,19 @@ describe("turn results", () => {
     expect(third[0].data).toMatchObject({ costUsd: 0.04 });
   });
 
+  it("a total a hair below the prior sum after a resume is no spend, not a reset", () => {
+    const tr = translator({ prior: 0.3 });
+    const first = valid(
+      tr.translate(result({ total_cost_usd: 0.29999999999999993 }), turn())
+        .drafts,
+    );
+    expect(first[0].data).toMatchObject({ costUsd: 0 });
+    const second = valid(
+      tr.translate(result({ total_cost_usd: 0.35 }), turn()).drafts,
+    );
+    expect(second[0].data).toMatchObject({ costUsd: 0.05 });
+  });
+
   it("[docs only] a resume without the earlier cost reports none for its first turn", () => {
     const tr = new Translator({ cwd: CWD, mode: () => "ask", now: () => 0 });
     expect(

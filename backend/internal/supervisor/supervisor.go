@@ -240,8 +240,16 @@ func (s *Supervisor) mkdirAgent(dir string) error {
 	if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
+	// The name may lie under the agent's own tree: a link planted there is refused, never followed by the chown.
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
 	if os.Geteuid() == 0 {
-		return os.Chown(dir, layout.AgentUID, layout.AgentGID)
+		return os.Lchown(dir, layout.AgentUID, layout.AgentGID)
 	}
 	return nil
 }
@@ -412,8 +420,13 @@ func (s *Supervisor) addWorktree(ctx context.Context, session string, w flowdpro
 			return st, err
 		}
 		checkout := s.p(layout.Checkout(name))
+		_, statErr := os.Stat(dir)
+		existed := statErr == nil
 		unlock := s.lock(checkout)
 		err := s.newWorktree(ctx, checkout, dir, w)
+		if err != nil {
+			s.dropWorktree(ctx, checkout, dir, existed)
+		}
 		unlock()
 		if err != nil {
 			return st, err
@@ -448,6 +461,25 @@ func (s *Supervisor) newWorktree(ctx context.Context, checkout, dir string, w fl
 	}
 	_, err = s.git(ctx, checkout, "worktree", "add", "--quiet", "-B", w.Branch, dir, w.BaseRef)
 	return err
+}
+
+// dropWorktree undoes a worktree add that failed or was killed midway (a cancelled request kills git, whose own
+// cleanup then never runs): the half-made directory holds .git, and a later call would adopt it as finished.
+// Callers hold the checkout's lock. Runs on after ctx ended; failures are logged, the add's error stands.
+func (s *Supervisor) dropWorktree(ctx context.Context, checkout, dir string, existed bool) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if _, err := s.git(ctx, checkout, "worktree", "remove", "--force", "--force", dir); err != nil {
+		s.o.Log.Debug("removing a failed worktree", "dir", dir, "err", err)
+	}
+	if !existed {
+		if err := os.RemoveAll(dir); err != nil {
+			s.o.Log.Warn("removing a failed worktree", "dir", dir, "err", err)
+		}
+	}
+	if _, err := s.git(ctx, checkout, "worktree", "prune"); err != nil {
+		s.o.Log.Warn("pruning after a failed worktree", "dir", dir, "err", err)
+	}
 }
 
 // ownCommits counts the commits on branch that its base does not reach.
@@ -567,12 +599,11 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 		return flowdproto.SessionState{}, err
 	}
 	// A host that resumes an existing log logs no worktree.added for its spec (only a first start does): worktrees
-	// added now while it was down get theirs as commands once it runs.
+	// added while it was down get theirs as commands once it runs.
 	resumed := false
 	if fi, err := os.Stat(s.p(layout.EventLog(sp.ID))); err == nil && fi.Size() > 0 {
 		resumed = true
 	}
-	var added []flowdproto.WorktreeState
 	for _, w := range sp.Worktrees {
 		if hasWorktree(spec.Worktrees, w.Repo) {
 			continue
@@ -582,7 +613,6 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 			return flowdproto.SessionState{}, err
 		}
 		spec.Worktrees = append(spec.Worktrees, st)
-		added = append(added, st)
 		if err := s.writeSpec(spec); err != nil {
 			return flowdproto.SessionState{}, err
 		}
@@ -633,7 +663,16 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 	}
 	s.o.Log.Info("host started", "session", sp.ID, "unit", unit)
 	if resumed {
-		for _, st := range added {
+		// Every spec worktree the log lacks, not only those made by this call: a start that failed after the spec
+		// recorded one (host too slow, request cancelled) announced nothing, and its retry adds nothing new.
+		logged, err := s.loggedWorktrees(sp.ID)
+		if err != nil {
+			return flowdproto.SessionState{}, err
+		}
+		for _, st := range spec.Worktrees {
+			if logged[st.Repo] {
+				continue
+			}
 			if err := s.announceWorktree(ctx, sp.ID, st); err != nil {
 				return flowdproto.SessionState{}, err
 			}
@@ -652,6 +691,25 @@ func (s *Supervisor) announceWorktree(ctx context.Context, id string, st flowdpr
 		_, err = s.Command(ctx, c)
 	}
 	return err
+}
+
+// loggedWorktrees names the repositories the session's log holds a worktree.added for.
+func (s *Supervisor) loggedWorktrees(id string) (map[string]bool, error) {
+	evs, err := eventlog.NewReader(s.p(layout.EventLog(id))).Read(0, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, e := range evs {
+		if e.Kind != event.KindWorktreeAdded {
+			continue
+		}
+		var w event.WorktreeAdded
+		if json.Unmarshal(e.Data, &w) == nil {
+			out[w.Repo] = true
+		}
+	}
+	return out, nil
 }
 
 func hasWorktree(ws []flowdproto.WorktreeState, repo string) bool {
@@ -708,20 +766,37 @@ func (s *Supervisor) session(ctx, qctx context.Context, id string, fromLog bool)
 	return st, err
 }
 
-// StopSession implements flowdproto.API.
+// StopSession implements flowdproto.API. The host is told to shut down first (host.shutdown, now), so a turn it runs
+// ends in the log as interrupted with its open request expired, instead of staying open until a next start calls it
+// lost; then the unit is stopped and its environment file removed. Those need no spec: one that is missing or
+// unreadable (it lies in the agent's directory) must not keep a host with its credential running. Only the remove
+// step works from the spec. Under the unit's lock, as EnsureSession and AddWorktree.
 func (s *Supervisor) StopSession(ctx context.Context, id string, remove bool) error {
-	sp, err := s.readSpec(id)
-	if err != nil {
-		return err
+	if !layout.ValidName(id) {
+		return invalid("session id %q", id)
 	}
-	if err := s.o.Units.Stop(ctx, layout.HostUnit(id)); err != nil {
+	unit := layout.HostUnit(id)
+	defer s.lock(unit)()
+	reason := event.ShutdownReasonStop
+	if remove {
+		reason = event.ShutdownReasonArchive
+	}
+	s.shutdownHost(ctx, id, reason)
+	if err := s.o.Units.Stop(ctx, unit); err != nil {
 		return err
 	}
 	if err := os.Remove(s.p(layout.SessionEnvFile(id))); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	sp, err := s.readSpec(id)
 	if !remove {
+		if errors.Is(err, flowdproto.ErrNotFound) {
+			return err // a session flowd does not know: nothing ran (its unit, had there been one, is stopped)
+		}
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 	s.forgetLog(id)
 	// Safe to run again after any partial run: a worktree already gone counts as removed.
@@ -754,6 +829,25 @@ func (s *Supervisor) StopSession(ctx context.Context, id string, remove bool) er
 		}
 	}
 	return nil
+}
+
+// shutdownWait bounds the host.shutdown StopSession sends before it stops the unit: a host that does not answer is
+// stopped all the same.
+const shutdownWait = 5 * time.Second
+
+// shutdownHost asks a running host to stop now. Best effort: a host that is not running, refuses or does not answer
+// in time is simply stopped by its unit.
+func (s *Supervisor) shutdownHost(ctx context.Context, id string, reason event.ShutdownReason) {
+	ctx, cancel := context.WithTimeout(ctx, shutdownWait)
+	defer cancel()
+	c, err := event.NewCommand("shutdown-"+strconv.FormatInt(time.Now().UnixNano(), 36), id, event.CmdHostShutdown,
+		event.HostShutdown{Reason: reason})
+	if err == nil {
+		_, err = s.Command(ctx, c)
+	}
+	if err != nil && !errors.Is(err, errHostDown) {
+		s.o.Log.Warn("host shutdown before stop", "session", id, "err", err)
+	}
 }
 
 // removeWorktree removes one worktree of a session and its branch; callers hold the checkout's lock. A worktree with
@@ -811,6 +905,12 @@ func (s *Supervisor) claim(name, id string) error {
 
 // AddWorktree implements flowdproto.API: the worktree is created and the running host logs worktree.added.
 func (s *Supervisor) AddWorktree(ctx context.Context, id string, w flowdproto.WorktreeSpec) (flowdproto.WorktreeState, error) {
+	if !layout.ValidName(id) {
+		return flowdproto.WorktreeState{}, invalid("session id %q", id)
+	}
+	// The spec is read, extended and written back under the unit's lock: another AddWorktree, a stop or a start in
+	// between would otherwise lose one side's change.
+	defer s.lock(layout.HostUnit(id))()
 	sp, err := s.readSpec(id)
 	if err != nil {
 		return flowdproto.WorktreeState{}, err

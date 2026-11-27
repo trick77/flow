@@ -21,6 +21,8 @@ type Shell interface {
 	Wait() int
 	// Hangup tells the shell's session the terminal is going away (SIGHUP to its process group).
 	Hangup()
+	// Kill ends the shell's process group with SIGKILL: for a shell that ignores the hangup.
+	Kill()
 	Pid() int
 }
 
