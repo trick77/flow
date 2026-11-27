@@ -80,6 +80,14 @@ func (h *Host) serveConn(ctx context.Context, conn net.Conn) {
 				return
 			}
 			continue
+		case hostproto.OpNotice:
+			if req.Notice == nil || req.Notice.Code == "" {
+				resp.Error = hostproto.CodeInvalid
+				break
+			}
+			if !h.Notice(*req.Notice) {
+				resp.Error = hostproto.CodeShutdown
+			}
 		case hostproto.OpSubscribe:
 			if enc.Encode(resp) != nil {
 				return

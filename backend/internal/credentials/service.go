@@ -44,6 +44,8 @@ type Service struct {
 	Now func() time.Time
 	// Profile gives the git identity Env carries (the owner's profile; commits are made as the user). nil: none.
 	Profile ProfileReader
+	// GitHub gives the user token Env carries (package github). nil: GitHub disconnected.
+	GitHub GitHub
 
 	mu  sync.Mutex
 	rev int64
@@ -210,6 +212,13 @@ func (s *Service) Current(ctx context.Context) (Env, error) {
 			e.ProviderKeys[c.EnvName] = string(plain)
 		}
 	}
+	if s.GitHub != nil {
+		t := s.GitHub.Token(ctx)
+		e.GitHubState, e.GitHubLogin = t.State, t.Login
+		if t.State == flowdproto.GitHubConnected {
+			e.GitHubToken, e.GitHubTokenExpiresAt = t.Token, t.ExpiresAt
+		}
+	}
 	return e, nil
 }
 
@@ -226,7 +235,7 @@ func (s *Service) Env(ctx context.Context) (flowdproto.Env, error) {
 		return flowdproto.Env{}, err
 	}
 	e := flowdproto.Env{Revision: rev, GitHubToken: c.GitHubToken, GitHubTokenExpiresAt: c.GitHubTokenExpiresAt,
-		GitHubState: c.GitHubState, ClaudeOAuthToken: c.ClaudeOAuthToken, AnthropicAPIKey: c.AnthropicAPIKey,
+		GitHubState: c.GitHubState, GitHubLogin: c.GitHubLogin, ClaudeOAuthToken: c.ClaudeOAuthToken, AnthropicAPIKey: c.AnthropicAPIKey,
 		ProviderKeys: c.ProviderKeys}
 	if s.Profile != nil {
 		p, err := s.Profile.Get(ctx)

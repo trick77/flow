@@ -61,6 +61,10 @@ type Config struct {
 	FlowdDir, SidecarDir string
 	// OIDC is the oidc mode's sign-in; empty in dev mode.
 	OIDC OIDC
+	// GitHubClientID is the owner's GitHub App's client id (not its app id): the device flow and the user-token
+	// renewal need only it, no client secret (docs/deploy.md, "GitHub App"). Empty: the GitHub connection is
+	// reported unavailable and repositories are reached anonymously.
+	GitHubClientID string
 }
 
 // OIDC configures sign-in through the owner's identity provider (docs/auth.md).
@@ -116,6 +120,7 @@ func Load(getenv func(string) string) (Config, error) {
 		SandboxMemory:   int64(r.Int("BACKEND_SANDBOX_MEMORY_MIB", DefaultSandboxMemoryMiB)) << 20,
 		SandboxCPUs:     r.Int("BACKEND_SANDBOX_CPUS", DefaultSandboxCPUs),
 		SessionReplay:   r.Bool("BACKEND_SESSION_REPLAY", false),
+		GitHubClientID:  r.String("BACKEND_GITHUB_CLIENT_ID", ""),
 		SetupTimeout:    r.Duration("BACKEND_SETUP_TIMEOUT", DefaultSetupTimeout),
 		HomeVolume:      r.String("BACKEND_HOME_VOLUME", "flow-home"),
 		// Where backend/Containerfile puts them.

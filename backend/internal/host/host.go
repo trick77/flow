@@ -430,6 +430,18 @@ func (h *Host) Command(c event.Command) (duplicate bool, err error) {
 	return false, nil
 }
 
+// Notice logs a notice flowd raised for the session, inside the running turn if one runs (the turn whose command
+// met it); false while the host stops.
+func (h *Host) Notice(n event.Notice) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stopped {
+		return false
+	}
+	h.append(event.KindNotice, "", n)
+	return true
+}
+
 // Queued reports whether the message with this id waits in the queue: what a message.send's reply tells the sender
 // (also for a duplicate, as long as it waits).
 func (h *Host) Queued(messageID string) bool {

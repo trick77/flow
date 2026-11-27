@@ -47,6 +47,8 @@ type Options struct {
 	Log       *slog.Logger
 	// HostWait bounds how long EnsureSession waits for a started host's socket.
 	HostWait time.Duration
+	// HelperWait bounds how long git's credential helper waits for a push bringing a usable GitHub token (10 s).
+	HelperWait time.Duration
 }
 
 // Supervisor is flowd's state.
@@ -55,6 +57,11 @@ type Supervisor struct {
 	mu     sync.Mutex
 	env    int64
 	envSet flowdproto.Env
+	// envWake is closed (and replaced) by every newer push: the credential helper waits on it.
+	envWake chan struct{}
+	// ghMu serializes writing gh's files; notices holds when a session last got a GitHub notice of a code (mu).
+	ghMu    sync.Mutex
+	notices map[string]time.Time
 	// locks serializes work on one repository's main checkout (git takes its own lock and fails instead of waiting).
 	locks sync.Map
 	// logs holds one reader per session whose log was read (guarded by mu), so its seq index and the status read
@@ -103,7 +110,10 @@ func New(o Options) *Supervisor {
 	if o.HostWait == 0 {
 		o.HostWait = 15 * time.Second
 	}
-	return &Supervisor{o: o}
+	if o.HelperWait == 0 {
+		o.HelperWait = 10 * time.Second
+	}
+	return &Supervisor{o: o, envWake: make(chan struct{}), notices: map[string]time.Time{}}
 }
 
 func (s *Supervisor) p(rel string) string { return filepath.Join(s.o.Root, rel) }
@@ -196,16 +206,25 @@ func (s *Supervisor) envReady() error {
 
 // PutEnv implements flowdproto.API. The set is kept in memory (a restarted flowd reports revision 0, and Flow
 // pushes again); session hosts get their part at their next start (sessionEnv), and none starts before the first
-// push (envReady). git and gh delivery is not built.
+// push (envReady). The GitHub token takes effect at once: git's helper asks for it on every use (gitToken), and
+// gh's hosts.yml is rewritten (writeGitHub).
 // Every push also makes the home volume's directories: Flow pushes at every bring-up, so a volume attached to a
 // running sandbox gets them without a flowd restart.
 func (s *Supervisor) PutEnv(_ context.Context, e flowdproto.Env) error {
 	s.homeDirs()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e.Revision > s.env {
+	newer := e.Revision > s.env
+	if newer {
 		s.env = e.Revision
 		s.envSet = e
+		close(s.envWake)
+		s.envWake = make(chan struct{})
+	}
+	s.mu.Unlock()
+	if newer {
+		if err := s.writeGitHub(); err != nil {
+			s.o.Log.Error("writing gh's hosts.yml", "err", err)
+		}
 	}
 	return nil
 }
@@ -455,7 +474,9 @@ func (s *Supervisor) addWorktree(ctx context.Context, session string, w flowdpro
 // stale commit while its recorded base says otherwise. One without commits of its own (all reachable from the base)
 // is reset to the base; one with commits of its own is refused and kept, since only the owner may drop work.
 func (s *Supervisor) newWorktree(ctx context.Context, checkout, dir string, w flowdproto.WorktreeSpec, base string) error {
-	_, err := s.git(ctx, checkout, "worktree", "add", "--quiet", "-b", w.Branch, dir, base)
+	// --no-track: a session branch has no upstream until its first push (push.autoSetupRemote, writeGitConfig);
+	// tracking origin/<default> would make a bare git push aim at the default branch's name.
+	_, err := s.git(ctx, checkout, "worktree", "add", "--quiet", "--no-track", "-b", w.Branch, dir, base)
 	if err == nil || !strings.Contains(err.Error(), "a branch named '"+w.Branch+"' already exists") {
 		return err
 	}
@@ -466,7 +487,7 @@ func (s *Supervisor) newWorktree(ctx context.Context, checkout, dir string, w fl
 	if own > 0 {
 		return invalid("branch %s holds %d commits not in %s: left for the owner, not reused", w.Branch, own, w.BaseRef)
 	}
-	_, err = s.git(ctx, checkout, "worktree", "add", "--quiet", "-B", w.Branch, dir, base)
+	_, err = s.git(ctx, checkout, "worktree", "add", "--quiet", "--no-track", "-B", w.Branch, dir, base)
 	return err
 }
 

@@ -147,8 +147,12 @@ type Env struct {
 	// valid; git and gh then fail with GitHubState's reason instead of hanging.
 	GitHubToken          string    `json:"githubToken,omitempty"`
 	GitHubTokenExpiresAt time.Time `json:"githubTokenExpiresAt,omitzero"`
-	// GitHubState is connected, expired (Flow could not renew in time) or disconnected (reconnect needed).
+	// GitHubState is connected, expired (Flow could not renew in time) or disconnected (not connected, or reconnect
+	// needed). Flow renews the token about 15 minutes before it ends and pushes the new one at once: GitHub
+	// invalidates the old token with the refresh, so flowd's copy is always the one current token.
 	GitHubState string `json:"githubState"`
+	// GitHubLogin is the account the token acts as (gh's hosts.yml names it).
+	GitHubLogin string `json:"githubLogin,omitempty"`
 	// ClaudeOAuthToken reaches only the hosts of sessions with ClaudeAuth subscription_token, as
 	// CLAUDE_CODE_OAUTH_TOKEN; AnthropicAPIKey only those with api_key, as ANTHROPIC_API_KEY. A subscription_login
 	// session gets neither. Claude Code prefers an API key over a token over a stored login, so setting more than

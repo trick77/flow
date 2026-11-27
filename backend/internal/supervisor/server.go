@@ -268,6 +268,12 @@ func run(ctx context.Context, log *slog.Logger, version, configPath string, o *O
 	if err := s.prepare(configPath); err != nil {
 		return err
 	}
+	if err := s.writeGitConfig(ctx); err != nil {
+		log.ErrorContext(ctx, "writing git's system config", "path", layout.SystemGitConfig, "err", err)
+	}
+	if err := s.serveCredentials(ctx); err != nil {
+		log.ErrorContext(ctx, "serving git's credential helper", "path", layout.FlowdSocket, "err", err)
+	}
 	s.Reattach(ctx)
 	s.ReattachTerminals(ctx)
 	l, err := net.Listen("tcp", cfg.Listen)

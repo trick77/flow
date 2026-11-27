@@ -1,6 +1,7 @@
 // Command flowd is the supervisor daemon inside each sandbox's system container. The server pushes the binary
 // matching the sandbox's architecture into it. Multi-call: "flowd host" is a session host, started by flowd as a
-// transient systemd unit; "flowd term" a terminal, "flowd job" a job's runner (a repository's setup script).
+// transient systemd unit; "flowd term" a terminal, "flowd job" a job's runner (a repository's setup script),
+// "flowd git-credential" git's credential helper for github.com (asks flowd for the token).
 package main
 
 import (
@@ -19,6 +20,10 @@ import (
 )
 
 func main() {
+	// git's credential helper first: its stdout belongs to git's protocol, nothing else may write there.
+	if len(os.Args) > 1 && os.Args[1] == "git-credential" {
+		os.Exit(supervisor.RunGitCredential(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	if err := start(); err != nil {
 		slog.Error("fatal", logging.Err(err))
 		os.Exit(1)

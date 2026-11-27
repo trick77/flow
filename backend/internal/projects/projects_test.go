@@ -112,6 +112,31 @@ func TestRemoteDefaultBranch(t *testing.T) {
 	if _, err := RemoteDefaultBranch("http://127.0.0.1:1/", srv.Client())(t.Context(), "a/b"); err == nil {
 		t.Error("unreachable server: no error")
 	}
+	// The status of a refusal is readable (a private repository asked anonymously).
+	var se *StatusError
+	if _, err := f(t.Context(), "a/missing"); !errors.As(err, &se) || se.HTTPStatus() != http.StatusNotFound {
+		t.Errorf("missing: %v", err)
+	}
+}
+
+// The lookup's own API errors reach the owner as they are (github_not_connected for a private repository while
+// GitHub is not connected); anything else is upstream.
+func TestAPI_CreateProject_lookupErrors(t *testing.T) {
+	for name, c := range map[string]struct {
+		err  error
+		code int
+		want string
+	}{
+		"not connected": {&apitypes.Error{Code: apitypes.ErrorCodeGithubNotConnected, Field: "repos"}, 409, "github_not_connected"},
+		"other":         {errors.New("boom"), 502, "upstream"},
+	} {
+		a := &API{Store: open(t), Sandboxes: &fakeSandboxes{},
+			DefaultBranch: func(context.Context, string) (string, error) { return "", c.err }}
+		w := call(t, a.CreateProject, "POST", "/api/projects", `{"name":"demo","repos":["octo/private"]}`, nil)
+		if w.Code != c.code || !strings.Contains(w.Body.String(), c.want) {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		}
+	}
 }
 
 type fakeSandboxes struct {

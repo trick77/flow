@@ -27,6 +27,9 @@ const (
 	OpCommand Op = "command"
 	// OpSubscribe turns the connection into a Frame stream: first a live.snapshot of open blocks, then frames.
 	OpSubscribe Op = "subscribe"
+	// OpNotice has the host log a notice flowd raised for the session (git asked for a GitHub token that is
+	// missing). Additive within protocol 1: a host from before answers invalid, and flowd drops the notice.
+	OpNotice Op = "notice"
 )
 
 // Request is one line from flowd.
@@ -34,6 +37,7 @@ type Request struct {
 	ID      string         `json:"id"`
 	Op      Op             `json:"op"`
 	Command *event.Command `json:"command,omitempty"`
+	Notice  *event.Notice  `json:"notice,omitempty"`
 }
 
 // Response is the host's answer to the request with the same ID.
