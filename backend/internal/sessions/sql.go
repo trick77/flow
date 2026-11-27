@@ -162,7 +162,10 @@ func (s SQL) ApplyMirror(ctx context.Context, id string, m Mirror) error {
 		q += `, status_at = CASE WHEN status = ? THEN status_at ELSE ? END, status = ?`
 		args = append(args, m.Status, at, m.Status)
 	}
-	if m.Unseen {
+	switch {
+	case m.Unseen && m.LastSeq > 0:
+		q, args = q+`, unseen = CASE WHEN seen_seq >= ? THEN unseen ELSE 1 END`, append(args, m.LastSeq)
+	case m.Unseen:
 		q += `, unseen = 1`
 	}
 	if m.ProviderSessionID != "" {

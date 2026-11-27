@@ -24,7 +24,7 @@ func TestDeleteAndRebuild_timeoutRecordsFailed(t *testing.T) {
 	removeTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { removeTimeout = old })
 	for name, op := range map[string]func(m *Manager) error{
-		"delete":  func(m *Manager) error { return m.Delete(t.Context(), pid) },
+		"delete":  func(m *Manager) error { return m.Delete(t.Context(), pid, nil) },
 		"rebuild": func(m *Manager) error { return m.Rebuild(t.Context(), pid) },
 	} {
 		r := newRig(t)
@@ -63,7 +63,7 @@ func TestTryLock_waitsForShortHolders(t *testing.T) {
 		t.Fatal(err)
 	}
 	hold(50 * time.Millisecond)
-	if err := r.m.Delete(ctx, pid); err != nil {
+	if err := r.m.Delete(ctx, pid, nil); err != nil {
 		t.Errorf("delete behind a short holder: %v", err)
 	}
 	r2 := newRig(t)
@@ -71,7 +71,7 @@ func TestTryLock_waitsForShortHolders(t *testing.T) {
 	unlock := r2.m.lock(pid)
 	defer unlock()
 	t0 := time.Now()
-	if err := r2.m.Delete(ctx, pid); code(err) != apitypes.ErrorCodeSandboxBusy {
+	if err := r2.m.Delete(ctx, pid, nil); code(err) != apitypes.ErrorCodeSandboxBusy {
 		t.Errorf("delete behind a bring-up: %v", err)
 	}
 	if time.Since(t0) < 50*time.Millisecond {
@@ -95,7 +95,7 @@ func TestDeleteAndRebuild_sessionMadeMeanwhile(t *testing.T) {
 		return open, nil
 	}
 	for name, op := range map[string]func() error{
-		"delete":  func() error { return r.m.Delete(ctx, pid) },
+		"delete":  func() error { return r.m.Delete(ctx, pid, nil) },
 		"rebuild": func() error { return r.m.Rebuild(ctx, pid) },
 	} {
 		if err := op(); code(err) != apitypes.ErrorCodeProjectHasSessions {
@@ -103,7 +103,7 @@ func TestDeleteAndRebuild_sessionMadeMeanwhile(t *testing.T) {
 		}
 	}
 	open = -1
-	if err := r.m.Delete(ctx, pid); err == nil {
+	if err := r.m.Delete(ctx, pid, nil); err == nil {
 		t.Error("count failed: no error")
 	}
 	if in, ok := r.rt.Instance(instance); !ok || in.Status != sandbox.StatusRunning {
@@ -113,7 +113,7 @@ func TestDeleteAndRebuild_sessionMadeMeanwhile(t *testing.T) {
 		t.Errorf("state %s", d.State)
 	}
 	open = 0
-	if err := r.m.Delete(ctx, pid); err != nil {
+	if err := r.m.Delete(ctx, pid, nil); err != nil {
 		t.Error(err)
 	}
 }

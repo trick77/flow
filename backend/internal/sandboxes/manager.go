@@ -1089,7 +1089,11 @@ func (m *Manager) removeInstance(ctx context.Context, name string) error {
 // setup, an environment push, a session start), until the project's rows take it with them; a project without a row
 // gets one in that state for the same reason. The address is released. A removal that fails leaves the row failed
 // and the project in place, so the delete can be tried again. The home volume stays: every sandbox shares it.
-func (m *Manager) Delete(ctx context.Context, projectID string) error {
+// rows (nil: none) removes the project's rows after the instance, under the same hold of the project's lock, so no
+// bring-up comes between the two. When it fails (a session made after the count, a store error) the project stays
+// without an instance: the row turns stopped, from which a start, a rebuild and a delete all work, and rows' error
+// is returned as is.
+func (m *Manager) Delete(ctx context.Context, projectID string, rows func(context.Context) error) error {
 	unlock, err := m.tryLock(projectID)
 	if err != nil {
 		return err
@@ -1121,6 +1125,14 @@ func (m *Manager) Delete(ctx context.Context, projectID string) error {
 		m.Log.Warn("sandbox deleted, its address not released", "sandbox", sb.Instance, "err", err)
 	}
 	m.Log.Info("sandbox deleted", "sandbox", sb.Instance)
+	if rows == nil {
+		return nil
+	}
+	// The instance is gone whatever the caller does now (or however long the removal took): the rows must follow it.
+	if err := rows(context.WithoutCancel(ctx)); err != nil {
+		m.setState(context.WithoutCancel(ctx), &sb, StateStopped, "")
+		return err
+	}
 	return nil
 }
 

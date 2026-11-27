@@ -28,8 +28,10 @@ type ListFilter struct {
 type Mirror struct {
 	LastSeq int64
 	// At is the event's time: the turn's start and the session's last activity. Zero is now.
-	At                time.Time
-	Status            string
+	At     time.Time
+	Status string
+	// Unseen marks the session unseen: with a LastSeq only when the owner has not seen that seq (a mark from the
+	// session stream may be ahead of the mirror); without one (a turn cut off by a stop, in no event) always.
 	Unseen            bool
 	ProviderSessionID string
 	TurnStarted       bool

@@ -54,8 +54,9 @@ type Service struct {
 	Sandboxes Sandboxes
 	Hub       *sse.Hub[apitypes.AppEvent]
 	Log       *slog.Logger
-	// Retry is the wait before a follower dials again.
-	Retry time.Duration
+	// Retry is the wait before a follower dials again, and its first wait for a sandbox that does not run, doubling up
+	// to MaxRetry (default 30 s).
+	Retry, MaxRetry time.Duration
 	// Meter, when set, takes every event the follower reads (internal/metering).
 	Meter Meter
 	// Limits bound every session host unit (BACKEND_SESSION_*), sent with each spec.
@@ -845,8 +846,19 @@ func (s *Service) follow(ctx context.Context, id string, f *follower) {
 		}
 		s.mu.Unlock()
 	}()
+	maxRetry := s.MaxRetry
+	if maxRetry == 0 {
+		maxRetry = 30 * time.Second
+	}
+	// A sandbox that does not run is asked again ever more rarely, each time a lock and a look at the instance; a
+	// change of the project's sandbox (a start) asks at once.
+	changes, unsubscribe := s.sandboxChanges()
+	defer unsubscribe()
+	wait := retry
 	unknown := map[string]bool{}
 	for ctx.Err() == nil {
+		drainChanges(changes) // only changes after this look count
+		next := retry
 		se, err := s.Store.Get(ctx, id)
 		switch {
 		case errors.Is(err, ErrNotFound) || err == nil && se.ArchivedAt != nil:
@@ -862,10 +874,58 @@ func (s *Service) follow(ctx context.Context, id string, f *follower) {
 			case errors.Is(err, sandboxes.ErrNotWarm):
 				s.turnCutOff(ctx, se)
 			}
+			if errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrMayRun) ||
+				errors.Is(err, sandboxes.ErrNotFound) {
+				next, wait = wait, min(wait*2, maxRetry)
+			} else {
+				wait = retry
+			}
 		}
+		waitForSandbox(ctx, changes, se.ProjectID, next)
+	}
+}
+
+// sandboxChanges subscribes to the app events, for waitForSandbox; nil (the timer alone) without a hub or a place.
+func (s *Service) sandboxChanges() (<-chan apitypes.AppEvent, func()) {
+	if s.Hub != nil {
+		if ch, unsubscribe, ok := s.Hub.Subscribe(""); ok {
+			return ch, unsubscribe
+		}
+	}
+	return nil, func() {}
+}
+
+func drainChanges(ch <-chan apitypes.AppEvent) {
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
+// waitForSandbox waits up to d, less when the project's sandbox changes or ctx ends.
+func waitForSandbox(ctx context.Context, changes <-chan apitypes.AppEvent, projectID string, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for {
 		select {
 		case <-ctx.Done():
-		case <-time.After(retry):
+			return
+		case <-timer.C:
+			return
+		case e, ok := <-changes:
+			if !ok {
+				changes = nil // the hub closed: the timer alone
+				continue
+			}
+			if e.Kind == apitypes.AppEventKindSandboxUpdated && projectID != "" && e.ProjectID == projectID {
+				return
+			}
 		}
 	}
 }

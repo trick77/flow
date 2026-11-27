@@ -52,7 +52,7 @@ func TestDelete(t *testing.T) {
 	if _, err := r.m.Ensure(ctx, pid); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.m.Delete(ctx, pid); err != nil {
+	if err := r.m.Delete(ctx, pid, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := r.rt.Instance(instance); ok {
@@ -81,8 +81,48 @@ func TestDelete(t *testing.T) {
 		t.Errorf("Describe = %+v", d)
 	}
 	// Again (a retry after the rows failed to go): the instance is gone already.
-	if err := r.m.Delete(ctx, pid); err != nil {
+	if err := r.m.Delete(ctx, pid, nil); err != nil {
 		t.Errorf("second delete: %v", err)
+	}
+}
+
+// The project's rows go under the same hold of the lock as the instance. When they cannot (a session made after the
+// count), the project stays usable without an instance: the row turns stopped and a bring-up makes the instance anew.
+func TestDelete_rowsFail(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	r.m.LockWait = 20 * time.Millisecond
+	if _, err := r.m.Ensure(ctx, pid); err != nil {
+		t.Fatal(err)
+	}
+	refused := errors.New("project has sessions")
+	err := r.m.Delete(ctx, pid, func(context.Context) error {
+		if unlock, err := r.m.tryLock(pid); err == nil {
+			unlock()
+			t.Error("rows ran without the project's lock")
+		}
+		if d := r.m.Describe(ctx, pid); d.State != apitypes.SandboxStateDeleting {
+			t.Errorf("state while the rows go %s", d.State)
+		}
+		return refused
+	})
+	if !errors.Is(err, refused) {
+		t.Fatalf("Delete = %v, want the rows' error", err)
+	}
+	if d := r.m.Describe(ctx, pid); d.State != apitypes.SandboxStateStopped {
+		t.Errorf("after the rows failed: %+v", d)
+	}
+	if _, err := r.m.Warm(ctx, pid); !errors.Is(err, ErrNotWarm) {
+		t.Errorf("Warm: %v", err)
+	}
+	if _, err := r.m.Ensure(ctx, pid); err != nil {
+		t.Fatalf("Ensure after the rows failed: %v", err)
+	}
+	if in, ok := r.rt.Instance(instance); !ok || in.Status != sandbox.StatusRunning {
+		t.Errorf("instance %+v", in)
+	}
+	if d := r.m.Describe(ctx, pid); d.State != apitypes.SandboxStateWarm {
+		t.Errorf("after the bring-up: %+v", d)
 	}
 }
 
@@ -91,7 +131,7 @@ func TestDelete(t *testing.T) {
 func TestDelete_neverBroughtUp(t *testing.T) {
 	r := newRig(t)
 	ctx := t.Context()
-	if err := r.m.Delete(ctx, pid); err != nil {
+	if err := r.m.Delete(ctx, pid, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.m.Ensure(ctx, pid); err == nil {
@@ -114,18 +154,18 @@ func TestDelete_stoppedAndFailing(t *testing.T) {
 	}
 	fake := r.m.Runtime
 	r.m.Runtime = failingDelete{Runtime: fake, deleteErr: errors.New("incus said no")}
-	if err := r.m.Delete(ctx, pid); code(err) != apitypes.ErrorCodeSandboxUnavailable {
+	if err := r.m.Delete(ctx, pid, nil); code(err) != apitypes.ErrorCodeSandboxUnavailable {
 		t.Errorf("failing delete: %v", err)
 	}
 	if d := r.m.Describe(ctx, pid); d.State != apitypes.SandboxStateFailed {
 		t.Errorf("after a failed delete: %+v", d)
 	}
 	r.m.Runtime = failingDelete{Runtime: fake, stateErr: errors.New("incus away")}
-	if err := r.m.Delete(ctx, pid); code(err) != apitypes.ErrorCodeSandboxUnavailable {
+	if err := r.m.Delete(ctx, pid, nil); code(err) != apitypes.ErrorCodeSandboxUnavailable {
 		t.Errorf("unreadable state: %v", err)
 	}
 	r.m.Runtime = fake
-	if err := r.m.Delete(ctx, pid); err != nil {
+	if err := r.m.Delete(ctx, pid, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := r.rt.Instance(instance); ok {
@@ -139,7 +179,7 @@ func TestDeleteAndRebuild_busy(t *testing.T) {
 	unlock := r.m.lock(pid)
 	defer unlock()
 	done := make(chan [2]error)
-	go func() { done <- [2]error{r.m.Delete(t.Context(), pid), r.m.Rebuild(t.Context(), pid)} }()
+	go func() { done <- [2]error{r.m.Delete(t.Context(), pid, nil), r.m.Rebuild(t.Context(), pid)} }()
 	select {
 	case errs := <-done:
 		for _, err := range errs {
@@ -217,7 +257,7 @@ func TestRebuild_failingDelete(t *testing.T) {
 	if err := r.m.Rebuild(ctx, pid); err == nil {
 		t.Error("closed database: no error")
 	}
-	if err := r.m.Delete(ctx, pid); err == nil {
+	if err := r.m.Delete(ctx, pid, nil); err == nil {
 		t.Error("closed database: no error")
 	}
 }
@@ -255,7 +295,7 @@ func TestMarkSetup(t *testing.T) {
 	if d := r.m.Describe(ctx, pid); d.State != apitypes.SandboxStateSetup {
 		t.Errorf("stopped sandbox: %+v", d)
 	}
-	if err := r.m.Delete(ctx, pid); err != nil {
+	if err := r.m.Delete(ctx, pid, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.m.markSetup(pid)

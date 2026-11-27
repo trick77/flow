@@ -123,9 +123,12 @@ func (f *fakeSandboxes) Setup(id string) { f.setups = append(f.setups, id) }
 func (f *fakeSandboxes) Describe(context.Context, string) apitypes.Sandbox {
 	return apitypes.Sandbox{State: apitypes.SandboxStateSetup}
 }
-func (f *fakeSandboxes) Delete(_ context.Context, id string) error {
+func (f *fakeSandboxes) Delete(ctx context.Context, id string, rows func(context.Context) error) error {
 	f.deletes = append(f.deletes, id)
-	return f.deleteErr
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	return rows(ctx)
 }
 
 // addSession puts a session with a worktree of repo into the project, archived or not, as the sessions area does.

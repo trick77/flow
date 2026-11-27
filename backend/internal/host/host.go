@@ -630,9 +630,16 @@ func (h *Host) resolve(kind event.EventKind, id string) error {
 	return nil
 }
 
+// interrupt tells the adapter to stop the turn. The open request expires at once: the adapter answers it as the
+// interrupt it is, so a reply that comes before turn.ended would reach no one, and must be refused (not pending)
+// instead of being logged as accepted.
 func (h *Host) interrupt(cmd string) {
 	if h.interruptCmd == "" {
 		h.interruptCmd = cmd
+	}
+	if h.pendingKind != "" {
+		h.expire(cmd)
+		h.setStatus(event.SessionStatusWorking)
 	}
 	c, err := event.NewCommand(cmd, h.cfg.Spec.Session.ID, event.CmdTurnInterrupt, event.TurnInterrupt{})
 	if err == nil {
@@ -705,18 +712,7 @@ func (h *Host) drain() {
 
 // endTurn closes the open request and the turn; callers hold mu.
 func (h *Host) endTurn(t event.TurnEnded, cmd string) {
-	switch h.pendingKind {
-	case event.KindPermissionRequested:
-		h.append(event.KindPermissionResolved, cmd, event.PermissionResolved{RequestID: h.pendingID,
-			Decision: event.PermissionDecisionExpired})
-	case event.KindQuestionAsked:
-		h.append(event.KindQuestionResolved, cmd, event.QuestionResolved{RequestID: h.pendingID,
-			Outcome: event.QuestionOutcomeExpired})
-	case event.KindPlanProposed:
-		h.append(event.KindPlanResolved, cmd, event.PlanResolved{RequestID: h.pendingID,
-			Decision: event.PlanDecisionExpired})
-	}
-	h.pendingID, h.pendingKind = "", ""
+	h.expire(cmd)
 	if t.DurationMs == 0 && !h.turnStart.IsZero() {
 		t.DurationMs = h.cfg.Now().Sub(h.turnStart).Milliseconds()
 	}
@@ -729,6 +725,22 @@ func (h *Host) endTurn(t event.TurnEnded, cmd string) {
 	}
 	h.gateFailed = false
 	h.setStatus(status)
+}
+
+// expire closes the open request as expired; callers hold mu.
+func (h *Host) expire(cmd string) {
+	switch h.pendingKind {
+	case event.KindPermissionRequested:
+		h.append(event.KindPermissionResolved, cmd, event.PermissionResolved{RequestID: h.pendingID,
+			Decision: event.PermissionDecisionExpired})
+	case event.KindQuestionAsked:
+		h.append(event.KindQuestionResolved, cmd, event.QuestionResolved{RequestID: h.pendingID,
+			Outcome: event.QuestionOutcomeExpired})
+	case event.KindPlanProposed:
+		h.append(event.KindPlanResolved, cmd, event.PlanResolved{RequestID: h.pendingID,
+			Decision: event.PlanDecisionExpired})
+	}
+	h.pendingID, h.pendingKind = "", ""
 }
 
 // Draft takes one draft from the adapter.
