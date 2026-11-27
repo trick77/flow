@@ -156,6 +156,78 @@ describe("SessionPickers", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  const withEfforts: AgentCatalog = {
+    ...catalog,
+    providers: catalog.providers.map((p) =>
+      p.provider === "claude"
+        ? {
+            ...p,
+            efforts: ["low", "medium", "high", "xhigh", "max"],
+            defaultEffort: "default",
+          }
+        : p,
+    ),
+  };
+
+  it("changes the effort, and back to the agent's own", async () => {
+    fetchMock.mockResolvedValueOnce(
+      json(200, { summary: { model: "claude-opus-5-5", effort: "max" } }),
+    );
+    const props = view({ catalog: withEfforts });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Effort: Agent default" }),
+    );
+    // The agent's own first, then the catalog's levels in order.
+    expect(
+      screen.getAllByRole("menuitemradio").map((o) => o.textContent),
+    ).toEqual([
+      expect.stringContaining("Agent default"),
+      "Low",
+      "Medium",
+      "High",
+      "Extra high",
+      "Max",
+    ]);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Max" }));
+    // Pending: every picker waits for the answer.
+    expect(screen.getByRole("button", { name: "Effort: Max" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Model:/ })).toBeDisabled();
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      effort: "max",
+    });
+    await waitFor(() =>
+      expect(props.onUpdated).toHaveBeenCalledWith({ effort: "max" }),
+    );
+  });
+
+  it("sends default to go back to the agent's own effort", () => {
+    fetchMock.mockReturnValueOnce(new Promise(() => {}));
+    view({ catalog: withEfforts, effort: "high" });
+    fireEvent.click(screen.getByRole("button", { name: "Effort: High" }));
+    fireEvent.click(
+      screen.getByRole("menuitemradio", { name: /Agent default/ }),
+    );
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      effort: "default",
+    });
+  });
+
+  it("takes an effort while a turn runs, for the next turn, and says so", () => {
+    view({ catalog: withEfforts, turnRunning: true });
+    const effort = screen.getByRole("button", { name: /^Effort:/ });
+    expect(effort).toBeEnabled();
+    expect(effort).toHaveAttribute("title", en.composer.modelNextTurn);
+    fireEvent.click(effort);
+    expect(screen.getByRole("menu")).toHaveTextContent(
+      en.composer.modelNextTurn,
+    );
+  });
+
+  it("shows no effort for an agent that takes none", () => {
+    view();
+    expect(screen.queryByRole("button", { name: /^Effort:/ })).toBeNull();
+  });
+
   it("is read-only for an agent the catalog does not list", () => {
     view({
       provider: "opencode",

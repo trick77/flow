@@ -494,6 +494,7 @@ export function SessionView({
             sessionId={session.id}
             provider={session.provider}
             model={session.model}
+            effort={session.effort}
             mode={session.mode}
             modeCap={session.modeCap}
             catalog={catalog}

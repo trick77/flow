@@ -150,6 +150,8 @@ export const timeline = {
     mode_change_failed:
       "The mode could not be changed. The previous one stays.",
     model_change_failed: "The model could not be changed.",
+    effort_change_failed:
+      "The effort could not be changed. The previous one stays.",
     draft_too_large: "An agent event was too large to show.",
     request_too_large:
       "A request was too large to show. The agent was told no.",
@@ -163,6 +165,8 @@ export const timeline = {
       "That request was no longer open. The reply was not delivered.",
     github_token_expired:
       "The GitHub token expired. Flow renews it; git and gh fail until then.",
+    github_disconnected:
+      "A clone or push failed because GitHub is not connected. Connect it in Settings.",
     message_may_not_have_run:
       "The agent stopped during this message. It may not have run, or only in part. Send it again if needed.",
   },

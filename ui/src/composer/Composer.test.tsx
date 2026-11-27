@@ -153,6 +153,33 @@ describe("Composer", () => {
     expect(screen.queryByRole("button", { name: /Model/ })).toBeNull();
   });
 
+  it("passes the session's effort to its picker", () => {
+    render(
+      <Composer
+        sessionId="s1"
+        running={false}
+        provider="claude"
+        model="claude-opus-5-5"
+        effort="xhigh"
+        mode="ask"
+        catalog={{
+          providers: [
+            {
+              provider: "claude",
+              available: true,
+              models: [{ id: "claude-opus-5-5", label: "Opus 5.5" }],
+              efforts: ["low", "high", "xhigh"],
+            },
+          ],
+          modes: ["ask"],
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Effort: Extra high" }),
+    ).toBeInTheDocument();
+  });
+
   it("answers the waiting question instead of sending a message", async () => {
     fetchMock.mockResolvedValueOnce(
       reply(409, { code: "request_not_pending" }),

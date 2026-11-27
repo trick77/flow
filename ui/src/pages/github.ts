@@ -52,14 +52,23 @@ type PollAnswer = Omit<GitHubConnection, "state"> & { state: string };
 
 // pollOutcome is the one place that reads a poll's answer (or its failure).
 // pending with intervalSeconds is a slow-down (the interval now in force);
-// disconnected means the code was denied or the server holds none; expired,
-// that the code expired. A 501 means the server cannot connect GitHub; a lost
-// answer (incl. 502, GitHub not answering) is retried; any other refusal
-// ends the flow.
+// disconnected means the code was denied or the server holds none and no
+// connection (a server without a code answers the connection as it stands);
+// expired, that the code expired. A 501 means the server cannot connect
+// GitHub. The server answers upstream or internal only once the code is over
+// (GitHub away is pending), so those end the flow with their code; an answer
+// lost on the way is retried; any other refusal ends the flow.
 export function pollOutcome(answer: unknown, err?: unknown): PollOutcome {
   if (err !== undefined) {
     if (err instanceof ApiError && err.code === "not_implemented") {
       return { kind: "unavailable" };
+    }
+    if (
+      err instanceof ApiError &&
+      err.status >= 500 &&
+      (err.code === "upstream" || err.code === "internal")
+    ) {
+      return { kind: "failed", code: err.code };
     }
     if (answerLost(err)) return { kind: "retry" };
     return { kind: "failed", code: errorCode(err) };
@@ -109,7 +118,7 @@ export function nextInterval(currentMs: number, o: PollOutcome): number {
 export const MIN_INTERVAL_MS = 5000;
 
 // ActiveFlow is a device code being confirmed, in the form the poll loop
-// uses: the expiry as epoch milliseconds.
+// uses: the expiry as epoch milliseconds by this browser's clock.
 export interface ActiveFlow {
   userCode: string;
   verificationUri: string;
@@ -117,8 +126,17 @@ export interface ActiveFlow {
   intervalMs: number;
 }
 
-export function activeFlow(f: DeviceFlow): ActiveFlow {
-  const expiresAt = Date.parse(f.expiresAt);
+// activeFlow converts the start answer received at now (this browser's
+// clock). The deadline counts from the seconds the code has left, never from
+// the server's absolute expiresAt: a browser clock ahead of the server's
+// would expire the code early or at once. expiresAt is the fallback for a
+// server that does not send the seconds.
+export function activeFlow(f: DeviceFlow, now = Date.now()): ActiveFlow {
+  const left = (f as Partial<DeviceFlow>).expiresInSeconds;
+  const expiresAt =
+    typeof left === "number" && left >= 0
+      ? now + left * 1000
+      : Date.parse(f.expiresAt);
   return {
     userCode: f.userCode,
     verificationUri: f.verificationUri,

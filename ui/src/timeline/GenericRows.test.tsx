@@ -168,6 +168,7 @@ describe("notice texts", () => {
     "provider_error",
     "mode_change_failed",
     "model_change_failed",
+    "effort_change_failed",
     "draft_too_large",
     "request_too_large",
     "sidecar_translate_failed",
@@ -177,6 +178,7 @@ describe("notice texts", () => {
     "sidecar_busy",
     "sidecar_reply_not_pending",
     "github_token_expired",
+    "github_disconnected",
   ];
   it.each(codes)("%s", (code) => {
     const state = reduceStream(emptyStream, {

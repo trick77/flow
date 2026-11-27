@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { errorCode, interruptTurn, replyQuestion, sendMessage } from "../api";
 import type {
   AgentCatalog,
+  Effort,
   ErrorCode,
   PermissionMode,
   Provider,
@@ -30,6 +31,7 @@ export function Composer({
   running,
   provider,
   model,
+  effort,
   mode,
   modeCap,
   catalog,
@@ -43,9 +45,10 @@ export function Composer({
   running: boolean;
   // projectName names the sandbox in the note under the box.
   projectName?: string;
-  // The session's agent, model and permission mode: pickers in the bar.
+  // The session's agent, model, effort and permission mode: pickers in the bar.
   provider?: Provider;
   model?: string;
+  effort?: Effort;
   mode?: PermissionMode;
   modeCap?: PermissionMode;
   catalog?: AgentCatalog;
@@ -53,7 +56,7 @@ export function Composer({
   // The request id of the question waiting for an answer, if any.
   questionId?: string;
   inputRef?: Ref<HTMLTextAreaElement>;
-  // A model or mode change the server accepted.
+  // A model, effort or mode change the server accepted.
   onUpdated?: (fields: SettingsPatch) => void;
 }) {
   const { t } = useTranslation("composer");
@@ -138,6 +141,7 @@ export function Composer({
                 sessionId={sessionId}
                 provider={provider}
                 model={model}
+                effort={effort}
                 mode={mode}
                 modeCap={modeCap}
                 catalog={catalog}

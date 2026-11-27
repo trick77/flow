@@ -4,6 +4,7 @@ import { errorCode, listAgents } from "../api";
 import type {
   AgentCatalog,
   ClaudeAuth,
+  Effort,
   ErrorCode,
   ModelInfo,
   PermissionMode,
@@ -171,6 +172,27 @@ export function defaultChoice(
 export function defaultMode(catalog: AgentCatalog): PermissionMode | undefined {
   if (catalog.modes.includes("plan")) return "plan";
   return catalog.modes[0];
+}
+
+// efforts are the efforts a provider offers, default (the agent's own) first;
+// none when it takes no effort.
+export function efforts(provider: ProviderInfo | undefined): Effort[] {
+  const levels = (provider?.efforts ?? []).filter((e) => e !== "default");
+  return levels.length > 0 ? ["default", ...levels] : [];
+}
+
+// defaultEffort is the effort a start begins with: the remembered one while
+// the provider still offers it, else the provider's default (else the
+// agent's own). Undefined when the provider takes no effort.
+export function defaultEffort(
+  provider: ProviderInfo,
+  prefs: StartPrefs,
+): Effort | undefined {
+  const offered = efforts(provider);
+  if (offered.length === 0) return undefined;
+  if (prefs.effort && offered.includes(prefs.effort)) return prefs.effort;
+  const d = provider.defaultEffort;
+  return d && offered.includes(d) ? d : "default";
 }
 
 // defaultAuth is the Claude credential a start uses: the stored setup-token

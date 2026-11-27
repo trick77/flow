@@ -97,6 +97,7 @@ const paths = {
       <circle cx="9" cy="17" r="2" />
     </>
   ),
+  gauge: <path d="M4.5 17a7.5 7.5 0 1 1 15 0M12 17l3.5-5" />,
   back: <path d="M14.5 6l-6 6 6 6" />,
   chevDown: <path d="M6.5 9.5l5.5 5.5 5.5-5.5" />,
   plus: <path d="M12 5v14M5 12h14" />,

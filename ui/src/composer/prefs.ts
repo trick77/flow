@@ -1,4 +1,4 @@
-import type { Provider } from "../api/types.gen";
+import type { Effort, Provider } from "../api/types.gen";
 
 // What a new session starts with, as this browser last used it. Only a
 // convenience: storage may be missing, full, blocked or hold anything, and
@@ -11,6 +11,9 @@ export interface StartPrefs {
   // stored before it was kept have none; the model then goes by id alone.
   provider?: Provider;
   model?: string;
+  // The effort, default (the agent's own) included; checked against the
+  // model's provider's list.
+  effort?: Effort;
 }
 
 export const PREFS_KEY = "flow.newSession";
@@ -26,6 +29,7 @@ export function loadPrefs(storage?: Storage): StartPrefs {
       projectId: str(o.projectId),
       provider: str(o.provider) as Provider | undefined,
       model: str(o.model),
+      effort: str(o.effort) as Effort | undefined,
     };
   } catch {
     return {};

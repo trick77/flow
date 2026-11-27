@@ -12,8 +12,10 @@ import {
   choiceKey,
   defaultAuth,
   defaultChoice,
+  defaultEffort,
   defaultMode,
   defaultProject,
+  efforts,
   findModel,
   loadCatalog,
   modelLabel,
@@ -147,6 +149,28 @@ describe("agent catalog", () => {
       model: "a:b",
     });
     expect(parseChoiceKey("nokey")).toBeUndefined();
+  });
+
+  it("offers the efforts with the agent's own first, and picks the default", () => {
+    const leveled: ProviderInfo = {
+      ...claude,
+      efforts: ["low", "high", "max"],
+      defaultEffort: "default",
+    };
+    expect(efforts(leveled)).toEqual(["default", "low", "high", "max"]);
+    expect(efforts(claude)).toEqual([]);
+    expect(efforts(undefined)).toEqual([]);
+    // The remembered one while offered, else the catalog's default.
+    expect(defaultEffort(leveled, {})).toBe("default");
+    expect(defaultEffort(leveled, { effort: "max" })).toBe("max");
+    expect(defaultEffort(leveled, { effort: "xhigh" })).toBe("default");
+    expect(defaultEffort({ ...leveled, defaultEffort: "high" }, {})).toBe(
+      "high",
+    );
+    expect(defaultEffort({ ...leveled, defaultEffort: "medium" }, {})).toBe(
+      "default",
+    );
+    expect(defaultEffort(claude, { effort: "max" })).toBeUndefined();
   });
 
   it("compares modes with the cap in the catalog's order", () => {
