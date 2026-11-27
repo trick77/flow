@@ -16,6 +16,7 @@ type Session struct {
 	ClaudeAuth        string
 	ProviderSessionID string
 	Model             string
+	Effort            string
 	Mode              string
 	ModeCap           string
 	Branch            string

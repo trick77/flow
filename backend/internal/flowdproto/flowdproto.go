@@ -220,6 +220,7 @@ type SessionSpec struct {
 	Provider          event.Provider       `json:"provider"`
 	ClaudeAuth        event.ClaudeAuth     `json:"claudeAuth,omitempty"`
 	Model             string               `json:"model"`
+	Effort            event.Effort         `json:"effort,omitempty"` // absent: default (a Flow before efforts)
 	Mode              event.PermissionMode `json:"mode"`
 	ModeCap           event.PermissionMode `json:"modeCap,omitempty"`
 	ProviderSessionID string               `json:"providerSessionId,omitempty"`

@@ -95,8 +95,33 @@ func TestUpdateSession(t *testing.T) {
 		t.Errorf("unchanged model sent again: %d, %v", w.Code, settingsOf(t, r, id))
 	}
 
+	// An effort goes the model's way, and default (the agent's own) is a change back, not an absent field.
+	if se, _ := r.svc.Store.Get(t.Context(), id); se.Effort != "default" {
+		t.Errorf("a session created without an effort holds %q", se.Effort)
+	}
+	if w := patch(t, r, id, `{"effort":"default"}`); w.Code != http.StatusOK || len(settingsOf(t, r, id)) != 1 {
+		t.Errorf("effort default on a default session: %d, %v", w.Code, settingsOf(t, r, id))
+	}
+	w = patch(t, r, id, `{"effort":"max"}`)
+	_ = json.Unmarshal(w.Body.Bytes(), &s)
+	if w.Code != http.StatusOK || s.Summary.Effort != "max" {
+		t.Errorf("effort max: %d %+v", w.Code, s.Summary)
+	}
+	waitRow(t, r, id, func(se Session) bool { return se.Effort == "max" && se.Model == "claude-sonnet-5-5" })
+	w = patch(t, r, id, `{"effort":"default"}`)
+	_ = json.Unmarshal(w.Body.Bytes(), &s)
+	if w.Code != http.StatusOK || s.Summary.Effort != "default" {
+		t.Errorf("effort back to default: %d %+v", w.Code, s.Summary)
+	}
+	if got := settingsOf(t, r, id); len(got) != 3 || got[1].Effort != "max" || got[2].Effort != "default" ||
+		got[2].Model != "" {
+		t.Errorf("session.settings %+v", got)
+	}
+	waitRow(t, r, id, func(se Session) bool { return se.Effort == "default" })
+
 	_ = r.svc.Store.ApplyMirror(t.Context(), id, Mirror{ModeCap: "accept_edits"})
 	for body, code := range map[string]string{
+		`{"effort":"huge"}`: "invalid_request", `{"effort":"Max"}`: "invalid_request",
 		`{"mode":"full_access"}`: "mode_above_cap", `{"mode":"root"}`: "invalid_request",
 		`{"model":"a b"}`: "invalid_request", `{"title":"   "}`: "invalid_request", `{"title":"a\u0007b"}`: "invalid_request",
 	} {
@@ -253,6 +278,7 @@ func TestCreate_sharesUpdatesValidation(t *testing.T) {
 		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"` + strings.Repeat("m", 201) + `","mode":"ask"}`,
 		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","title":"a\u0007b"}`,
 		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","title":"   "}`,
+		`{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","effort":"huge"}`,
 	} {
 		if w := create(t, r, body); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_request") {
 			t.Errorf("%s: %d %s", body, w.Code, w.Body)
@@ -263,6 +289,36 @@ func TestCreate_sharesUpdatesValidation(t *testing.T) {
 		`"message":{"clientId":"c1","text":"fix\tit\r\nmore"}}`)
 	if w.Code != http.StatusCreated {
 		t.Errorf("derived title: %d %s", w.Code, w.Body)
+	}
+}
+
+// An effort given at create is the row's, the summary's and the host spec's (the host's session.started carries it).
+func TestCreate_effort(t *testing.T) {
+	r := newRig(t)
+	w := create(t, r, `{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","effort":"high"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body)
+	}
+	var s apitypes.Session
+	_ = json.Unmarshal(w.Body.Bytes(), &s)
+	se, _ := r.svc.Store.Get(t.Context(), s.Summary.ID)
+	if s.Summary.Effort != "high" || se.Effort != "high" {
+		t.Errorf("summary %q, row %q", s.Summary.Effort, se.Effort)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	var started *event.SessionStarted
+	for e, err := range r.sb.api.Events(ctx, s.Summary.ID, 0) {
+		if err != nil {
+			break
+		}
+		if e.Kind == event.KindSessionStarted {
+			started = &event.SessionStarted{}
+			_ = json.Unmarshal(e.Data, started)
+		}
+	}
+	if started == nil || started.Effort != event.EffortHigh {
+		t.Errorf("session.started %+v", started)
 	}
 }
 
@@ -374,7 +430,8 @@ func TestFollow_skipsValuesNotInTheContract(t *testing.T) {
 	r.sb.api.Script = func(string) []event.EventDraft {
 		return []event.EventDraft{
 			{Kind: event.KindSessionStatus, Data: json.RawMessage(`{"status":"paused"}`)},
-			{Kind: event.KindSessionSettings, Data: json.RawMessage(`{"model":"x-model","mode":"root","modeCap":"sudo"}`)},
+			{Kind: event.KindSessionSettings, Data: json.RawMessage(`{"model":"x-model","mode":"root","modeCap":"sudo",` +
+				`"effort":"huge"}`)},
 		}
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -388,7 +445,8 @@ func TestFollow_skipsValuesNotInTheContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitRow(t, r, id, func(se Session) bool { return se.Status == "done" })
-	if se, _ := r.svc.Store.Get(t.Context(), id); se.Model != "x-model" || se.Mode != "ask" || se.ModeCap != "" {
+	if se, _ := r.svc.Store.Get(t.Context(), id); se.Model != "x-model" || se.Mode != "ask" || se.ModeCap != "" ||
+		se.Effort != "default" {
 		t.Errorf("row %+v", se)
 	}
 }

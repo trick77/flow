@@ -313,6 +313,63 @@ func TestObserve_modelFallbacks(t *testing.T) {
 	}
 }
 
+// Each turn is recorded with the effort it started on: turn.started's (default included: a turn back on the agent's
+// own effort must not take the last turn's level), else the last session.settings', else the row's, else default.
+func TestObserve_effortPerTurn(t *testing.T) {
+	r := newRig(t, demoSession, "claude", "subscription_token")
+	at := ts("2026-11-26T12:00:00Z")
+	seq := int64(0)
+	ev := func(kind event.EventKind, turn string, p any) event.Event {
+		seq++
+		e, err := event.New(demoSession, kind, at.Add(time.Duration(seq)*time.Second), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.Seq, e.Turn = seq, turn
+		return e
+	}
+	ended := event.TurnEnded{Outcome: event.TurnOutcomeCompleted, DurationMs: 500}
+	r.feed(t, r.rec(), []event.Event{
+		ev(event.KindSessionStarted, "", event.SessionStarted{Provider: "claude", Model: "m", Mode: "ask", Cwd: "/"}),
+		ev(event.KindSessionSettings, "", event.SessionSettings{Effort: event.EffortHigh}),
+		ev(event.KindTurnStarted, "t-1", event.TurnStarted{MessageID: "a", Model: "m", Effort: event.EffortHigh}),
+		ev(event.KindTurnEnded, "t-1", ended),
+		ev(event.KindSessionSettings, "", event.SessionSettings{Effort: event.EffortDefault}),
+		ev(event.KindTurnStarted, "t-2", event.TurnStarted{MessageID: "b", Model: "m", Effort: event.EffortDefault}),
+		ev(event.KindTurnEnded, "t-2", ended),
+		// A host from before efforts stamps none: the settings change since the last turn names it.
+		ev(event.KindSessionSettings, "", event.SessionSettings{Effort: event.EffortXhigh}),
+		ev(event.KindTurnStarted, "t-3", event.TurnStarted{MessageID: "c", Model: "m"}),
+		ev(event.KindTurnEnded, "t-3", ended),
+	})
+	rows, err := r.db.QueryContext(t.Context(), `SELECT t.effort, s.effort FROM metering_turns t
+		JOIN metering_turn_starts s ON s.session_id = t.session_id AND s.turn = t.turn ORDER BY t.seq`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var turn, start string
+		if err := rows.Scan(&turn, &start); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, turn+"/"+start)
+	}
+	if want := []string{"high/high", "default/default", "xhigh/xhigh"}; !slices.Equal(got, want) {
+		t.Errorf("efforts %v, want %v", got, want)
+	}
+
+	// Joined mid-turn with nothing to go on: the row's effort, else default.
+	r = newRig(t, demoSession, "claude", "subscription_token")
+	seq = 0
+	r.feed(t, r.rec(), []event.Event{ev(event.KindTurnEnded, "t-9", ended)})
+	var e string
+	if err := r.db.QueryRowContext(t.Context(), `SELECT effort FROM metering_turns`).Scan(&e); err != nil || e != "default" {
+		t.Errorf("mid-turn effort %q, %v", e, err)
+	}
+}
+
 // events.jsonl has every kind: pass-through, an unknown tool, a child's report; plus an unknown kind and a failed
 // turn of an API-key session.
 func TestObserve_countersAndCredentialModes(t *testing.T) {

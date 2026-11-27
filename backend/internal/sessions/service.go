@@ -181,6 +181,13 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	if !validModel(in.Model) {
 		return apitypes.Session{}, invalid("model")
 	}
+	effort := string(in.Effort)
+	if effort == "" {
+		effort = string(event.EffortDefault)
+	}
+	if !validEffort(effort) {
+		return apitypes.Session{}, invalid("effort")
+	}
 	title := ""
 	if in.Title != "" {
 		var ok bool
@@ -237,7 +244,7 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 		return apitypes.Session{}, err
 	}
 	se := Session{ID: store.NewID(), ProjectID: in.ProjectID, Title: title, Provider: string(in.Provider),
-		Model: in.Model, Mode: string(in.Mode), Status: string(event.SessionStatusIdle)}
+		Model: in.Model, Effort: effort, Mode: string(in.Mode), Status: string(event.SessionStatusIdle)}
 	if in.Message != nil {
 		se.ClientID = in.Message.ClientID
 	}
@@ -327,9 +334,24 @@ func validModel(m string) bool {
 	return m != "" && len(m) <= 200 && !strings.ContainsFunc(m, unicode.IsSpace) && clean(m)
 }
 
-// Update changes a session's title, model or permission mode; absent (empty) fields stay. A mode above the session's
-// cap is mode_above_cap. A model or mode change goes to the agent as settings.set (the host logs session.settings,
-// the sidecar calls setModel / setPermissionMode on a running query, or starts its next one with them): the log is
+// validEffort: one of the contract's efforts, default (the agent's own) included. Create and Update share it; both
+// read an absent effort first (Create as default, Update as no change).
+func validEffort(e string) bool {
+	return slices.Contains(event.EffortValues, event.Effort(e))
+}
+
+// rowEffort is the row's effort, default for a row that holds none (a test or a store without the column).
+func rowEffort(se Session) string {
+	if se.Effort == "" {
+		return string(event.EffortDefault)
+	}
+	return se.Effort
+}
+
+// Update changes a session's title, model, effort or permission mode; absent (empty) fields stay. A mode above the
+// session's cap is mode_above_cap. A model, effort or mode change goes to the agent as settings.set (the host logs
+// session.settings, the sidecar calls setModel / applyFlagSettings / setPermissionMode on a running query, or starts
+// its next one with them): the log is
 // the record a restarted host takes its settings from, over the spec, so a change only written to the row would be
 // undone at the next start. It therefore starts a stopped sandbox and host, as sending a message does. A title
 // change alone touches only the row.
@@ -355,6 +377,10 @@ func (s *Service) Update(ctx context.Context, id string, in apitypes.SessionUpda
 	if model != "" && !validModel(model) {
 		return apitypes.Session{}, invalid("model")
 	}
+	effort := string(in.Effort)
+	if effort != "" && !validEffort(effort) {
+		return apitypes.Session{}, invalid("effort")
+	}
 	mode := event.PermissionMode(in.Mode)
 	if mode != "" && modeRank(mode) < 0 {
 		return apitypes.Session{}, invalid("mode")
@@ -366,16 +392,19 @@ func (s *Service) Update(ctx context.Context, id string, in apitypes.SessionUpda
 	if model != "" && model != se.Model {
 		set.Model = model
 	}
+	if effort != "" && effort != rowEffort(se) {
+		set.Effort = event.Effort(effort)
+	}
 	if mode != "" && string(mode) != se.Mode {
 		set.Mode = mode
 	}
-	if set.Model != "" || set.Mode != "" {
+	if set.Model != "" || set.Effort != "" || set.Mode != "" {
 		// Held: a host started for it must not first send queued messages under the old settings.
 		if _, _, err := s.CommandHeld(ctx, id, "settings-"+store.NewID(), event.CmdSettingsSet, set, true, true); err != nil {
 			return apitypes.Session{}, err
 		}
 	}
-	// Only the title: model and mode reach the row through the session.settings the host logged for the command,
+	// Only the title: model, effort and mode reach the row through the session.settings the host logged for the command,
 	// which the follower mirrors, as it mirrors the agent's correction after it. Written here as well, a write landing
 	// after a mirrored correction would put the refused value back.
 	if title != "" {
@@ -397,6 +426,9 @@ func (s *Service) Update(ctx context.Context, id string, in apitypes.SessionUpda
 	// The answer names the change as sent; the follower's session.updated carries what the agent runs with.
 	if set.Model != "" {
 		out.Summary.Model = set.Model
+	}
+	if set.Effort != "" {
+		out.Summary.Effort = apitypes.Effort(set.Effort)
 	}
 	if set.Mode != "" {
 		out.Summary.Mode = apitypes.PermissionMode(set.Mode)
@@ -446,7 +478,8 @@ func (s *Service) Spec(ctx context.Context, se Session) (flowdproto.SessionSpec,
 		return flowdproto.SessionSpec{}, err
 	}
 	spec := flowdproto.SessionSpec{ID: se.ID, Name: se.Name, Provider: event.Provider(se.Provider),
-		ClaudeAuth: event.ClaudeAuth(se.ClaudeAuth), Model: se.Model, Mode: event.PermissionMode(se.Mode),
+		ClaudeAuth: event.ClaudeAuth(se.ClaudeAuth), Model: se.Model, Effort: event.Effort(rowEffort(se)),
+		Mode:    event.PermissionMode(se.Mode),
 		ModeCap: event.PermissionMode(se.ModeCap), ProviderSessionID: se.ProviderSessionID,
 		Worktrees: []flowdproto.WorktreeSpec{}, Limits: s.Limits, Replay: s.Replay}
 	if se.ParentID != nil {
@@ -764,7 +797,7 @@ func (s *Service) Summary(ctx context.Context, se Session) (apitypes.SessionSumm
 	}
 	sum := apitypes.SessionSummary{ID: se.ID, ProjectID: se.ProjectID, Title: se.Title,
 		Provider: apitypes.Provider(se.Provider), ClaudeAuth: apitypes.ClaudeAuth(se.ClaudeAuth), Model: se.Model,
-		Mode: apitypes.PermissionMode(se.Mode), ModeCap: apitypes.PermissionMode(se.ModeCap),
+		Effort: apitypes.Effort(rowEffort(se)), Mode: apitypes.PermissionMode(se.Mode), ModeCap: apitypes.PermissionMode(se.ModeCap),
 		Status: apitypes.SessionStatus(se.Status), Unseen: se.Unseen, Repos: []string{}, Branch: se.Branch,
 		TurnStartedAt: se.TurnStartedAt, LastSeq: int(se.LastSeq), LastActivityAt: se.LastActivityAt,
 		CreatedAt: se.CreatedAt}
@@ -970,13 +1003,14 @@ func (s *Service) dropUnknown(id string, m *Mirror, unknown map[string]bool) {
 	drop("status", &m.Status, slices.Contains(event.SessionStatusValues, event.SessionStatus(m.Status)))
 	drop("mode", &m.Mode, modeRank(event.PermissionMode(m.Mode)) >= 0)
 	drop("modeCap", &m.ModeCap, modeRank(event.PermissionMode(m.ModeCap)) >= 0)
+	drop("effort", &m.Effort, validEffort(m.Effort))
 }
 
 // mirror follows one stream from the row's last seq until it fails; unknown is dropUnknown's, kept by the follower.
 func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session, unknown map[string]bool) {
 	last := se.LastSeq
 	ms := metering.Session{ID: se.ID, ProjectID: se.ProjectID, ParentID: se.ParentID, Provider: se.Provider,
-		ClaudeAuth: se.ClaudeAuth, Model: se.Model}
+		ClaudeAuth: se.ClaudeAuth, Model: se.Model, Effort: rowEffort(se)}
 	for e, err := range api.Events(ctx, se.ID, last) {
 		if err != nil {
 			if ctx.Err() == nil {
@@ -1009,7 +1043,7 @@ func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session, un
 			// agent's correction (a mode the SDK put in force, a failed change put back).
 			if p, err := e.Payload(); err == nil {
 				st := p.(*event.SessionSettings)
-				m.Model, m.Mode, m.ModeCap = st.Model, string(st.Mode), string(st.ModeCap)
+				m.Model, m.Effort, m.Mode, m.ModeCap = st.Model, string(st.Effort), string(st.Mode), string(st.ModeCap)
 				publish = true
 			}
 		case event.KindPlanResolved:

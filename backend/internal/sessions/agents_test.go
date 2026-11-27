@@ -76,6 +76,10 @@ func TestListAgents(t *testing.T) {
 			p.DefaultModel != "claude-opus-5-5" {
 			t.Errorf("%s: models %v, default %q", tc.name, ids, p.DefaultModel)
 		}
+		if !slices.Equal(p.Efforts, []apitypes.Effort{"low", "medium", "high", "xhigh", "max"}) ||
+			p.DefaultEffort != apitypes.EffortDefault {
+			t.Errorf("%s: efforts %v, default %q", tc.name, p.Efforts, p.DefaultEffort)
+		}
 	}
 	w := httptest.NewRecorder()
 	(&API{Keys: failingKeys{}}).ListAgents(w, httptest.NewRequest("GET", "/api/agents", nil))

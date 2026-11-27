@@ -63,7 +63,7 @@ func newAdapter(spec Spec, pace Pace, paths Paths, logPath, version string, envi
 			SettingsPath: paths.Settings, Version: version, MCPCommand: mcpCommand, MCPToken: lookup(environ, claude.MCPTokenVar)},
 		State: func() claude.State {
 			a := state()
-			return claude.State{Resume: a.Resume, PriorCostUSD: a.PriorCostUSD, Model: a.Model, Mode: a.Mode,
+			return claude.State{Resume: a.Resume, PriorCostUSD: a.PriorCostUSD, Model: a.Model, Effort: a.Effort, Mode: a.Mode,
 				ModeCap: a.ModeCap, Worktrees: a.Worktrees}
 		},
 		Log: log,

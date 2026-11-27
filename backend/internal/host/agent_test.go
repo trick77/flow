@@ -72,7 +72,8 @@ func TestAgentState_fromTheLog(t *testing.T) {
 	evs = append(evs, turn("t-4", event.TurnEnded{Outcome: "interrupted"}, false)...)
 	evs = append(evs, turn("t-5", event.TurnEnded{Outcome: "error", ErrorCode: "adapter_exited"}, false)...)
 	evs = append(evs,
-		ev(t, event.KindSessionSettings, "", event.SessionSettings{Model: "m1", ModeCap: event.PermissionModeAuto}),
+		ev(t, event.KindSessionSettings, "", event.SessionSettings{Model: "m1", Effort: event.EffortMax,
+			ModeCap: event.PermissionModeAuto}),
 		ev(t, event.KindPlanResolved, "t-4", event.PlanResolved{RequestID: "p", Decision: "approved",
 			Mode: event.PermissionModeAcceptEdits}),
 		ev(t, event.KindPlanResolved, "t-4", event.PlanResolved{RequestID: "q", Decision: "rejected",
@@ -81,8 +82,8 @@ func TestAgentState_fromTheLog(t *testing.T) {
 
 	r = start(t, path, newFake())
 	got := r.h.AgentState()
-	want := AgentState{Resume: true, PriorCostUSD: 0.35, Model: "m1", Mode: event.PermissionModeAcceptEdits,
-		ModeCap: event.PermissionModeAuto}
+	want := AgentState{Resume: true, PriorCostUSD: 0.35, Model: "m1", Effort: event.EffortMax,
+		Mode: event.PermissionModeAcceptEdits, ModeCap: event.PermissionModeAuto}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("AgentState = %+v, want %+v", got, want)
 	}
@@ -97,8 +98,52 @@ func TestAgentState_fromTheLog(t *testing.T) {
 	r.waitKind(event.KindTurnEnded, 7)
 	_, _ = r.h.Command(cmd(t, "s1", event.CmdSettingsSet, event.SettingsSet{Model: "m2", Mode: event.PermissionModePlan}))
 	got = r.h.AgentState()
-	if got.PriorCostUSD != 0.4 || got.Model != "m2" || got.Mode != event.PermissionModePlan {
+	if got.PriorCostUSD != 0.4 || got.Model != "m2" || got.Mode != event.PermissionModePlan ||
+		got.Effort != event.EffortMax {
 		t.Errorf("after a turn and a settings change: %+v", got)
+	}
+	// Back to the agent's own effort: default is a value, not "no change".
+	_, _ = r.h.Command(cmd(t, "s2", event.CmdSettingsSet, event.SettingsSet{Effort: event.EffortDefault}))
+	if got = r.h.AgentState(); got.Effort != event.EffortDefault || got.Model != "m2" {
+		t.Errorf("after effort default: %+v", got)
+	}
+}
+
+// Every turn.started carries the effort the session is set to, default included (metering reads a turn's effort
+// from it; an absent one would fall back to the last turn's level), and session.started the spec's.
+func TestTurnStarted_effort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	f := newFake()
+	r := start(t, path, f)
+	for _, c := range []event.Command{
+		cmd(t, "e1", event.CmdSettingsSet, event.SettingsSet{Effort: event.EffortHigh}), send(t, "m1", "go"),
+	} {
+		if _, err := r.h.Command(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.out <- draft(event.KindTurnEnded, event.TurnEnded{Outcome: "completed"})
+	r.waitKind(event.KindTurnEnded, 1)
+	for _, c := range []event.Command{
+		cmd(t, "e2", event.CmdSettingsSet, event.SettingsSet{Effort: event.EffortDefault}), send(t, "m2", "again"),
+	} {
+		if _, err := r.h.Command(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.waitKind(event.KindTurnStarted, 2)
+	evs := r.events()
+	if s := payloads[event.SessionStarted](t, evs, event.KindSessionStarted); len(s) != 1 ||
+		s[0].Effort != event.EffortDefault {
+		t.Errorf("session.started (a spec without an effort): %+v", s)
+	}
+	starts := payloads[event.TurnStarted](t, evs, event.KindTurnStarted)
+	if len(starts) != 2 || starts[0].Effort != event.EffortHigh || starts[1].Effort != event.EffortDefault {
+		t.Errorf("turn.started: %+v", starts)
+	}
+	sets := payloads[event.SessionSettings](t, evs, event.KindSessionSettings)
+	if len(sets) != 2 || sets[0].Effort != event.EffortHigh || sets[1].Effort != event.EffortDefault {
+		t.Errorf("session.settings: %+v", sets)
 	}
 }
 

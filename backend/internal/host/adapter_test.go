@@ -18,7 +18,7 @@ func TestNewAdapter_selection(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "s", "events.jsonl")
 	paths := Paths{Node: layout.NodeBin, Claude: layout.ClaudeCLI, Settings: layout.Settings}
 	environ := []string{"PATH=/bin", "ANTHROPIC_API_KEY=key", "CLAUDE_CODE_OAUTH_TOKEN=tok", "BACKEND_MCP_TOKEN=mcp"}
-	state := func() AgentState { return AgentState{} }
+	state := func() AgentState { return AgentState{Model: "m", Effort: event.EffortXhigh} }
 	log := slog.New(slog.DiscardHandler)
 	mk := func(edit func(*Spec)) (Adapter, error) {
 		s := spec()
@@ -55,6 +55,10 @@ func TestNewAdapter_selection(t *testing.T) {
 	}
 	if cfg.RecordPath != filepath.Join(filepath.Dir(logPath), layout.SDKRecording) {
 		t.Errorf("record path %q", cfg.RecordPath)
+	}
+	// The host's state reaches the start line: model and effort as the log has them.
+	if st := cfg.State(); st.Model != "m" || st.Effort != event.EffortXhigh {
+		t.Errorf("state %+v", st)
 	}
 	// No MCP server until flowd mcp exists: Claude Code would start a command that is not there.
 	if s := claude.NewStartSpec(cfg.Session, claude.State{}); s.MCPServers != nil {

@@ -104,8 +104,8 @@ func newRig(t *testing.T, o opts) *rig {
 			MCPToken: "mcp-token"},
 		State: func() claude.State {
 			s := h.AgentState()
-			return claude.State{Resume: s.Resume, PriorCostUSD: s.PriorCostUSD, Model: s.Model, Mode: s.Mode,
-				ModeCap: s.ModeCap}
+			return claude.State{Resume: s.Resume, PriorCostUSD: s.PriorCostUSD, Model: s.Model, Effort: s.Effort,
+				Mode: s.Mode, ModeCap: s.ModeCap}
 		},
 		Log: log, ShutdownWait: o.shutdown, KillWait: o.kill, StderrCap: o.stderrCap,
 	})
@@ -305,8 +305,8 @@ func TestStartLine_firstStartAndResume(t *testing.T) {
 	}
 	dir := filepath.Dir(r.logPath)
 	want := claude.StartSpec{SessionID: sid, Resume: false, Cwd: dir, Mode: event.PermissionModeAsk,
-		ModeCap: event.PermissionModeAuto, Model: "claude-opus-5-5", ClaudeExecutable: layout.ClaudeCLI,
-		SettingsPath: layout.Settings, Version: "1.2.3", MCPServers: map[string]claude.MCPServer{"flow": {Type: "stdio",
+		ModeCap: event.PermissionModeAuto, Model: "claude-opus-5-5", Effort: event.EffortDefault,
+		ClaudeExecutable: layout.ClaudeCLI, SettingsPath: layout.Settings, Version: "1.2.3", MCPServers: map[string]claude.MCPServer{"flow": {Type: "stdio",
 			Command: "/opt/flow/releases/1.2.3/flowd", Args: []string{"mcp"},
 			Env: map[string]string{claude.MCPTokenVar: "mcp-token"}}}}
 	if raw(t, starts[0]) != raw(t, want) {
@@ -320,7 +320,7 @@ func TestStartLine_firstStartAndResume(t *testing.T) {
 	}
 
 	_, _ = r.h.Command(command(t, "s1", event.CmdSettingsSet, event.SettingsSet{Model: "claude-sonnet-5",
-		Mode: event.PermissionModePlan}))
+		Effort: event.EffortXhigh, Mode: event.PermissionModePlan}))
 	r.send("m2", "exit") // completes, then the sidecar exits between turns
 	r.waitKind(event.KindTurnEnded, 2)
 	r.waitJournal("sidecar ended") // a message sent while it is still going would fail, never be re-sent
@@ -332,7 +332,7 @@ func TestStartLine_firstStartAndResume(t *testing.T) {
 	}
 	s := starts[1]
 	if !s.Resume || s.PriorCostUSD == nil || *s.PriorCostUSD != 1.0 || s.Model != "claude-sonnet-5" ||
-		s.Mode != event.PermissionModePlan || s.SessionID != sid {
+		s.Effort != event.EffortXhigh || s.Mode != event.PermissionModePlan || s.SessionID != sid {
 		t.Errorf("restart start line %s", raw(t, s))
 	}
 	evs := r.events()

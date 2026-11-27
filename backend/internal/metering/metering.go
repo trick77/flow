@@ -123,6 +123,8 @@ type Session struct {
 	ClaudeAuth string
 	// Model is the session's model as the follower read it: the last fallback for a turn's.
 	Model string
+	// Effort likewise ("" reads as default).
+	Effort string
 }
 
 // Recorder writes the ledger. Create it with its Store.
@@ -132,12 +134,12 @@ type Recorder struct {
 	Now func() time.Time
 
 	mu sync.Mutex
-	// live holds a session's provider and model from session.started or session.settings until the next turn
-	// starts with them: an entry lives between a settings change and a turn start, or until Forget.
+	// live holds a session's provider, model and effort from session.started or session.settings until the next
+	// turn starts with them: an entry lives between a settings change and a turn start, or until Forget.
 	live map[string]modelRef
 }
 
-type modelRef struct{ provider, model string }
+type modelRef struct{ provider, model, effort string }
 
 func (r *Recorder) now() time.Time {
 	if r.Now != nil {
@@ -168,9 +170,9 @@ func (r *Recorder) Observe(ctx context.Context, se Session, e event.Event) error
 	}
 	switch p := p.(type) {
 	case *event.SessionStarted:
-		r.setModel(se.ID, string(p.Provider), p.Model)
+		r.setModel(se.ID, string(p.Provider), p.Model, string(p.Effort))
 	case *event.SessionSettings:
-		r.setModel(se.ID, "", p.Model)
+		r.setModel(se.ID, "", p.Model, string(p.Effort))
 	case *event.TurnStarted:
 		return r.turnStart(ctx, se, e, p)
 	case *event.SessionStatusChanged:
@@ -197,8 +199,8 @@ func (r *Recorder) Observe(ctx context.Context, se Session, e event.Event) error
 	return nil
 }
 
-func (r *Recorder) setModel(id, provider, model string) {
-	if model == "" {
+func (r *Recorder) setModel(id, provider, model, effort string) {
+	if model == "" && effort == "" {
 		return
 	}
 	r.mu.Lock()
@@ -207,15 +209,20 @@ func (r *Recorder) setModel(id, provider, model string) {
 		r.live = map[string]modelRef{}
 	}
 	l := r.live[id]
-	l.model = model
+	if model != "" {
+		l.model = model
+	}
+	if effort != "" {
+		l.effort = effort
+	}
 	if provider != "" {
 		l.provider = provider
 	}
 	r.live[id] = l
 }
 
-// turnStart fixes the turn's provider and model: the event's (the host stamps them), else a change since the last
-// turn, else the last turn's, else the session row's.
+// turnStart fixes the turn's provider, model and effort: the event's (the host stamps them, the effort default
+// included), else a change since the last turn, else the last turn's, else the session row's, else default.
 func (r *Recorder) turnStart(ctx context.Context, se Session, e event.Event, p *event.TurnStarted) error {
 	r.mu.Lock()
 	l := r.live[se.ID]
@@ -226,7 +233,8 @@ func (r *Recorder) turnStart(ctx context.Context, se Session, e event.Event, p *
 	}
 	s := TurnStart{ID: store.NewID(), SessionID: se.ID, ProjectID: se.ProjectID, Seq: e.Seq, Turn: e.Turn,
 		Provider: firstOf(string(p.Provider), l.provider, prev.Provider, se.Provider),
-		Model:    firstOf(p.Model, l.model, prev.Model, se.Model), At: e.TS}
+		Model:    firstOf(p.Model, l.model, prev.Model, se.Model),
+		Effort:   firstOf(string(p.Effort), l.effort, prev.Effort, se.Effort, string(event.EffortDefault)), At: e.TS}
 	if err := r.Store.RecordTurnStart(ctx, s); err != nil {
 		return err
 	}
@@ -312,7 +320,8 @@ func (r *Recorder) turn(ctx context.Context, se Session, e event.Event, p *event
 	}
 	t := Turn{ID: store.NewID(), SessionID: se.ID, ProjectID: se.ProjectID, ParentSessionID: se.ParentID, Seq: e.Seq,
 		Turn: e.Turn, Repos: repos, Provider: firstOf(string(p.Provider), start.Provider, se.Provider),
-		Model: firstOf(p.Model, start.Model, se.Model), CredentialMode: CredentialMode(se),
+		Model:  firstOf(p.Model, start.Model, se.Model),
+		Effort: firstOf(start.Effort, se.Effort, string(event.EffortDefault)), CredentialMode: CredentialMode(se),
 		StartedAt: e.TS.Add(-time.Duration(p.DurationMs) * time.Millisecond), EndedAt: e.TS, DurationMs: p.DurationMs,
 		Outcome: string(p.Outcome), ErrorCode: p.ErrorCode, CostUSD: p.CostUSD}
 	if p.Usage != nil {

@@ -230,7 +230,7 @@ func (f *Fake) EnsureSession(_ context.Context, s flowdproto.SessionSpec) (flowd
 			Status: event.SessionStatusIdle}}
 		f.sessions[s.ID] = h
 		f.append(h, event.KindSessionStarted, "", event.SessionStarted{Provider: s.Provider, ClaudeAuth: s.ClaudeAuth,
-			Model: s.Model, Mode: s.Mode, ModeCap: s.ModeCap, ProviderSessionID: s.ID, Cwd: dir})
+			Model: s.Model, Effort: s.Effort, Mode: s.Mode, ModeCap: s.ModeCap, ProviderSessionID: s.ID, Cwd: dir})
 		for _, w := range s.Worktrees {
 			f.addWorktree(h, w)
 		}
@@ -438,10 +438,13 @@ func (f *Fake) apply(h *host, cmd string, p any) {
 			f.resume(h)
 		}
 	case *event.SettingsSet:
-		f.append(h, event.KindSessionSettings, cmd, event.SessionSettings{Model: p.Model, Mode: p.Mode,
-			ModeCap: p.ModeCap})
+		f.append(h, event.KindSessionSettings, cmd, event.SessionSettings{Model: p.Model, Effort: p.Effort,
+			Mode: p.Mode, ModeCap: p.ModeCap})
 		if p.Model != "" {
 			h.spec.Model = p.Model // the next turn's, as the host stamps it
+		}
+		if p.Effort != "" {
+			h.spec.Effort = p.Effort
 		}
 	case *event.GateUpdate:
 		switch p.State {
@@ -480,7 +483,7 @@ func (f *Fake) startTurn(h *host, cmd string, m event.MessageSend) {
 	f.append(h, event.KindMessageUser, cmd, event.UserMessage{MessageID: m.MessageID, Text: m.Text,
 		Origin: m.Origin, FromSession: m.FromSession})
 	f.append(h, event.KindTurnStarted, cmd, event.TurnStarted{MessageID: m.MessageID, Provider: h.spec.Provider,
-		Model: h.spec.Model})
+		Model: h.spec.Model, Effort: h.spec.Effort})
 	f.setStatus(h, event.SessionStatusWorking)
 	h.pending = f.Script(m.Text)
 	f.resume(h)

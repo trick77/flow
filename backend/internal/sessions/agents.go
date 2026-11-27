@@ -20,6 +20,12 @@ var claudeModels = []apitypes.ModelInfo{
 // claudeDefaultModel is the model a new Claude session gets unless the owner picks another.
 const claudeDefaultModel = "claude-opus-5-5"
 
+// claudeEfforts are the efforts Claude Code takes (the SDK's EffortLevel), least to most, offered for every model:
+// the levels a model supports are only known from a running query (supportedModels), and Claude Code lowers a level
+// the model lacks by itself (max runs as high). A new session starts on Claude Code's own effort (default).
+var claudeEfforts = []apitypes.Effort{apitypes.EffortLow, apitypes.EffortMedium, apitypes.EffortHigh,
+	apitypes.EffortXhigh, apitypes.EffortMax}
+
 // catalogModes are the permission modes, least to most permissive (the contract's order).
 var catalogModes = []apitypes.PermissionMode{apitypes.PermissionModePlan, apitypes.PermissionModeAsk,
 	apitypes.PermissionModeAcceptEdits, apitypes.PermissionModeAuto, apitypes.PermissionModeFullAccess}
@@ -35,7 +41,7 @@ type Keys interface {
 // not "not built".
 func Catalog(ctx context.Context, keys Keys, signedIn func(context.Context) bool) (apitypes.AgentCatalog, error) {
 	claude := apitypes.ProviderInfo{Provider: apitypes.ProviderClaude, Models: claudeModels,
-		DefaultModel: claudeDefaultModel}
+		DefaultModel: claudeDefaultModel, Efforts: claudeEfforts, DefaultEffort: apitypes.EffortDefault}
 	if keys != nil {
 		list, err := keys.Keys(ctx)
 		if err != nil {
