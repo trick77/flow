@@ -428,10 +428,16 @@ turn ended more than the prompt-cache lifetime ago (5 minutes unless the 1-hour 
 **Session.** create (DB row, name, branch) → worktrees on fresh `origin/<default>` → `PUT /v1/sessions/{id}` starts the
 host → `session.started` → turns → idle with the host alive (token economy) → archive (`DELETE /api/sessions/{id}`)
 closes the session's terminal (a shell would keep its credential), stops the host and removes worktrees, then
-publishes `session.removed` and ends the session's follower; the log stays. Archiving never starts a sandbox (owner
+publishes `session.removed` and ends the session's follower; the log stays. A worktree with uncommitted or untracked
+changes (`git status --porcelain` not empty) is not removed: it stays on disk with its branch, the session directory
+and its claim, the archive still succeeds and flowd logs which worktree it kept (only the owner may drop work; a
+status that cannot be read fails the removal). Archiving never starts a sandbox (owner
 decision): in a stopped one nothing of the session runs, so the row is marked archived with `cleanup_pending`, and
 the sandbox's next bring-up (start, or Flow's reconnect) removes host and worktrees (`sessions.Service.Sweep`). Only
-"not warm" or "no sandbox" counts as stopped; any other failure to reach the sandbox fails the archive. Archive and
+"not warm" with the instance stopped or gone, or "no sandbox", counts as stopped; a sandbox not warm by the records
+(`failed`, say) whose instance may run, and any other failure to reach the sandbox, fails the archive. A reconnect
+without a start that fails (a fetch, flowd briefly away) leaves a warm sandbox warm for the next try; only one cut
+off from its bridge or on another address is recorded `failed`. Archive and
 whatever starts the session's host or terminal hold one per-session lock, so a send in flight cannot recreate them
 after an archive. A stopped host restarts on the next message with resume and logs `session.resumed`.
 
