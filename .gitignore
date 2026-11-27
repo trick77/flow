@@ -3,6 +3,10 @@ sidecar/node_modules/
 sidecar/dist/
 sidecar/coverage/
 
+# Tool caches a run from the repository root leaves behind.
+/node_modules/
+/coverage/
+
 # Local builds (make build)
 /bin/
 
