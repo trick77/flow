@@ -250,6 +250,7 @@ sandbox (Incus system container, one per project)
 | root fs `/home/flow/work/.sessions/<name>/<repo>` | worktrees; agent cwd = the one worktree, or the session dir with several | spec; "Agent working directory" |
 | root fs `/var/lib/flow/sessions/<id>/events.jsonl` | logs | outside work trees: no git noise, survives worktree removal |
 | root fs `/var/lib/flow/sessions/<id>/spec.json`, `/var/lib/flow/session-dirs/<name>` | host spec; which session id owns a session directory | the log is served with no host running; no session adopts another's worktrees |
+| root fs `/var/lib/flow/jobs/<id>.{log,json}` (root 0700) | setup scripts' logs and results | the result is the marker that a script ran; root's, so no planted link is followed |
 | root fs `/opt/flow/releases/<v>/`, `/etc/flow/` | flowd, sidecar, config, Claude settings layer | versioned, root-owned |
 | home volume `/srv/flow-home/` | `claude/` (`CLAUDE_CONFIG_DIR`), `config/` + `data/` (XDG for OpenCode), `agent-config/`, `cache/{go-mod,npm}` | one volume, all sandboxes |
 | image `/opt/ms-playwright` | Playwright's browsers | the volume is not mounted when the image is built |
@@ -464,10 +465,9 @@ and without a ban chain, then end to end with Flow itself.
 
 **Sandbox.** none → `setup` (Incus create from the base image or clone, limits, home volume, NIC on `flowbr0` with
 its assigned address, start,
-push flowd, `Hello`, `PUT /v1/env`, clone repos, run each `.flow/setup.sh` as a flowd job (`PUT /v1/jobs/{id}`, its
-own unit, log read by line for the setup log; config sync is a job too) → `warm` →
-`stopping` → `stopped` (filesystem kept) → `setup` again on demand (no re-clone; setup scripts rerun only when their
-hash changed). The RAM budget stops the least recently used warm sandbox whose sessions are all idle and whose last
+push flowd, `Hello`, `PUT /v1/env`, clone repos, run each `.flow/setup.sh` as a flowd job, see "Setup scripts") →
+`warm` → `stopping` → `stopped` (filesystem kept) → `setup` again on demand (no re-clone, setup scripts not run
+again). The RAM budget stops the least recently used warm sandbox whose sessions are all idle and whose last
 turn ended more than the prompt-cache lifetime ago (5 minutes unless the 1-hour TTL is configured,
 [env-vars](https://code.claude.com/docs/en/env-vars); Flow never overrides it).
 
@@ -500,9 +500,38 @@ after an archive. A stopped host restarts on the next message with resume and lo
   to be tried again. The home volume stays (every sandbox shares it); metering rows stay (no foreign keys).
 - **Rebuild** (`POST .../sandbox/rebuild`) re-creates the instance from the base image: it is deleted, the row keeps
   its id, address and flowd token, and a background bring-up creates it, delivers flowd and clones every repository
-  afresh. Same refusals as the delete. The spec's "re-run `.flow/setup.sh`" cannot be built yet: flowd runs no jobs
-  (`flowdclient` answers `StartJob` unsupported). Archived sessions' logs and kept worktrees go with the old
-  instance; their pending cleanups find nothing and are done (`sessions.Service.stop`).
+  afresh, then runs every repository's `.flow/setup.sh` again (the new instance holds no job results). Same
+  refusals as the delete. Archived sessions' logs and kept worktrees go with the old instance; their pending
+  cleanups find nothing and are done (`sessions.Service.stop`).
+- **Setup scripts** (`sandboxes/setup.go`, `supervisor/jobs.go`). A bring-up that finds the sandbox not warm (the
+  first after a create or Rebuild, a start, a retry after a failure; never a reconnect to a warm one) runs, after the
+  clones, the job of each repository whose main checkout holds `.flow/setup.sh` as a regular file (no link at it or
+  at `.flow`; committed in HEAD as mode 100644/100755), in project order, one at a time: `PUT /v1/jobs/setup-<repo
+  dir>`, then `GET /v1/jobs/{id}` every 2 s (no call waits for the script, so the 5 min call timeout never cuts it;
+  flowd away for a moment is waited out, the set pushed again, the start asked again, which is idempotent). The
+  sandbox stays `setup` meanwhile; the bring-up's limit grows by each repository's script limit plus 2 min. Each job
+  is a root unit `flow-job-<id>` running `flowd job` (multi-call): it opens the log `layout.JobLog` with
+  `O_EXCL|O_NOFOLLOW` in `layout.JobDir` (root 0700, refused when it is a link or not root's), runs `bash
+  .flow/setup.sh` in the main checkout as uid/gid 65532 with the agent's supplementary groups (docker: a bare
+  uid/gid would drop them), its own process group, stdin `/dev/null`, a session's limits (`BACKEND_SESSION_*`,
+  `MemorySwapMax=0`, `OOMPolicy=continue`) and `BACKEND_SETUP_TIMEOUT` (default 20 min; SIGTERM, 10 s, SIGKILL to the
+  group; `RuntimeMaxSec` behind it). Environment (the spec says nothing about setup credentials; decided): what a
+  `subscription_login` terminal gets (`claude.Env`: PATH, the caches, Playwright, git identity, `GH_CONFIG_DIR`, so
+  git and gh reach GitHub through the helper and hosts file), never a Claude credential or the MCP token. Bash, not
+  the file's own shebang: no executable bit needed. The log keeps whole lines only, each cut at 4 KiB, and the first
+  4 MiB (a closing line counts what was dropped), so line numbers never move. At the end the runner writes
+  `layout.JobResult` (temp file + rename: repository, HEAD commit, script blob, exit status, timed out, lines). That
+  result is the marker: flowd never starts a job that has one, so a stop and start, Flow's or flowd's restart, or a
+  second bring-up find it (or the still running unit, which outlives both) instead of running the script twice. A
+  job whose unit ended without a result (the sandbox stopped under it) counts as cut off: that bring-up fails, the
+  next one runs it again from line 1. Exit status not 0 or time limit reached: the sandbox turns `failed` with
+  `sandbox_setup_failed`; a later start reports the same result without running the script (decided: retry is a
+  Rebuild). Main checkouts are only fetched, never moved, so a script changed on the default branch runs only after
+  a Rebuild (decided; this document's earlier "rerun when the hash changed" is dropped), and a repository added to
+  the project runs its script when its checkout is first cloned. A sandbox made before setup scripts existed runs
+  them once, at its next start. `getSetupLog` reads the jobs in project order without the project's lock (the
+  bring-up holds it): a header line per repository, numbered across all; 1000 lines per answer; for `setup`, `warm`
+  and `failed` only (`sandbox_unavailable` otherwise). Config sync, the other job kind, answers `not_implemented`.
 - Delete and rebuild never wait for a bring-up: a project lock still held after `LockWait` (2 s) answers
   `sandbox_busy` (`tryLock`). The short wait lets a `Warm` (session followers every 2 s, an environment push) pass.
   Under the lock both count the open sessions again, and the delete's transaction removes only archived sessions
@@ -535,6 +564,8 @@ after an archive. A stopped host restarts on the next message with resume and lo
 | sandbox stop | all units end | Flow sets a cut-off turn's row `failed` and keeps it open (`turn_started_at`); on start, only the hosts of those sessions start at once (two at a time, after the sandbox is warm), log the turn `lost` and `session.resumed {sandbox_start}`, leave queued messages queued and are stopped again; every other host starts when needed, and a message's start drains the queue |
 | host (machine) reboot | Incus starts nothing by default; Flow reconciles | sandboxes start on demand; `BootID` change tells Flow every unit is gone |
 | Incus restart | units survive (spike 11) | Flow holds no exec, so Incus restarts in about 2 s |
+| setup script fails or runs past its limit | the sandbox is `failed` (`sandbox_setup_failed`), its log kept | the owner reads `getSetupLog`, fixes the script, Rebuilds |
+| Flow or flowd restart during a setup script | the job's unit runs on; Flow's row turns `failed` at its start (`Reconcile`) | the next start finds the job and waits for it, never runs it twice |
 | host bridge `flowbr0` missing | the sandbox is `failed`, nothing created or started, no retry | host-setup.sh makes the network again; the next start brings the sandbox up |
 | bridge made again under running sandboxes | they run on, cut off (Incus never re-attaches a NIC) | the next bring-up restarts them onto the bridge |
 | host boot | Incus waits for Docker's bridge (drop-in, at most 120 s), else autostart fails and leaves sandboxes stopped; an API address still missing then is retried once after 30 s, then never | `flow-incus-listen.service` sets the listener again once Docker has made the bridge; sandboxes start on demand |
