@@ -47,7 +47,7 @@ func TestSessionServiceFeedsTheLedger(t *testing.T) {
 }
 
 func testConfig() config.Config {
-	return config.Config{SandboxMemory: 4 << 30, SandboxMemoryTotal: 14 << 30,
+	return config.Config{SandboxMemory: 4 << 30, SandboxMemoryTotal: 14 << 30, SandboxMemoryHeadroom: 3 << 30,
 		SandboxNetwork: sandbox.Network{Bridge: config.DefaultSandboxBridge,
 			Subnet: netip.MustParsePrefix(config.DefaultSandboxSubnet),
 			Range:  netip.MustParsePrefix(config.DefaultSandboxRange)}}
@@ -63,9 +63,10 @@ func TestSandboxManagerWiring(t *testing.T) {
 	if !ok || addrs.DB != db || addrs.Network.Range != cfg.SandboxNetwork.Range {
 		t.Errorf("Addresses = %#v, want SQLAddresses on the server's database and network", m.Addresses)
 	}
-	if m.MemoryTotal != cfg.SandboxMemoryTotal || m.Memory != cfg.SandboxMemory {
-		t.Errorf("memory %d of total %d, want %d of %d", m.Memory, m.MemoryTotal, cfg.SandboxMemory,
-			cfg.SandboxMemoryTotal)
+	if m.MemoryTotal != cfg.SandboxMemoryTotal || m.Memory != cfg.SandboxMemory ||
+		m.MemoryHeadroom != cfg.SandboxMemoryHeadroom {
+		t.Errorf("memory %d, total %d, headroom %d, want %d, %d, %d", m.Memory, m.MemoryTotal, m.MemoryHeadroom,
+			cfg.SandboxMemory, cfg.SandboxMemoryTotal, cfg.SandboxMemoryHeadroom)
 	}
 	if st, ok := m.Store.(sandboxes.SQL); !ok || st.DB != db {
 		t.Errorf("Store = %T, not the server's database", m.Store)

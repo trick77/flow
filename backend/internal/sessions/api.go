@@ -8,10 +8,13 @@ import (
 	"github.com/trick77/flow/internal/httpapi"
 )
 
-// API implements httpapi.Sessions: list, create, get, archive (the rest answer not_implemented).
+// API implements httpapi.Sessions: list, create, get, archive and the agent catalog (the rest answer
+// not_implemented).
 type API struct {
 	httpapi.NotImplemented
 	Service *Service
+	// Keys tells the catalog which Claude credential modes are stored; nil lists none.
+	Keys Keys
 }
 
 // ListSessions implements httpapi.Sessions.

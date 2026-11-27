@@ -682,7 +682,8 @@
           "provider": { "$ref": "#/components/schemas/Provider" },
           "available": { "type": "boolean", "description": "False without a sign-in or key." },
           "claudeAuths": { "type": "array", "items": { "$ref": "#/components/schemas/ClaudeAuth" }, "description": "For claude, the credential modes usable now: subscription_token when a token is stored, subscription_login when the home volume holds a login, api_key when a key is stored." },
-          "models": { "type": "array", "items": { "$ref": "#/components/schemas/ModelInfo" } }
+          "models": { "type": "array", "items": { "$ref": "#/components/schemas/ModelInfo" } },
+          "defaultModel": { "type": "string", "description": "Id of the model a new session gets unless the owner picks another; one of models." }
         }
       },
       "AgentCatalog": {

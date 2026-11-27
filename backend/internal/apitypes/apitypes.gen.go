@@ -388,6 +388,8 @@ type ProviderInfo struct {
 	// when the home volume holds a login, api_key when a key is stored.
 	ClaudeAuths []ClaudeAuth `json:"claudeAuths,omitempty"`
 	Models      []ModelInfo  `json:"models"`
+	// Id of the model a new session gets unless the owner picks another; one of models.
+	DefaultModel string `json:"defaultModel,omitempty"`
 }
 
 // AgentCatalog is part of the contract.

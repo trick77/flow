@@ -427,6 +427,61 @@ func (s *Service) Sweep(ctx context.Context, projectID string, api flowdproto.AP
 	}
 }
 
+// lostTurnHosts bounds the hosts CloseLostTurns starts at once, and lostTurnWait each start: a sandbox with many
+// cut-off sessions must not have all their agents booting together.
+const (
+	lostTurnHosts = 2
+	lostTurnWait  = time.Minute
+)
+
+// CloseLostTurns starts the hosts of the project's sessions whose log ends in an open turn (the row's
+// turn_started_at: a sandbox stop cut it off, turnCutOff), so each host logs that turn lost now (requests expired,
+// turn.ended lost) and an open timeline shows it closed without a message first. Every other host starts on demand.
+// Called after every bring-up, in the Warmed goroutine, so the sandbox turns warm without waiting for it. A host that
+// runs already (a reconnect) is left as it is. Failures are logged; the next message closes the turn then.
+func (s *Service) CloseLostTurns(ctx context.Context, projectID string, api flowdproto.API) {
+	list, err := s.Store.List(ctx, ListFilter{ProjectID: projectID})
+	if err != nil {
+		s.Log.Warn("sessions with a lost turn", "project", projectID, "err", err)
+		return
+	}
+	sem := make(chan struct{}, lostTurnHosts)
+	var wg sync.WaitGroup
+	for _, se := range list {
+		if se.TurnStartedAt == nil {
+			continue
+		}
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			s.closeLostTurn(ctx, api, se.ID)
+		})
+	}
+	wg.Wait()
+}
+
+// closeLostTurn starts one session's host under the session's lock, asking the row again: an archive or a message
+// may have come first.
+func (s *Service) closeLostTurn(ctx context.Context, api flowdproto.API, id string) {
+	defer s.Lock(id)()
+	ctx, cancel := context.WithTimeout(ctx, lostTurnWait)
+	defer cancel()
+	se, err := s.Store.Get(ctx, id)
+	if err != nil || se.ArchivedAt != nil || se.TurnStartedAt == nil {
+		return
+	}
+	spec, err := s.Spec(ctx, se)
+	if err == nil {
+		var st flowdproto.SessionState
+		if st, err = api.EnsureSession(ctx, spec); err == nil {
+			s.recordWorktrees(ctx, id, st.Worktrees)
+			s.Log.Info("host started to close a lost turn", "session", id)
+			return
+		}
+	}
+	s.Log.Warn("starting a host to close a lost turn", "session", id, "err", err)
+}
+
 func (s *Service) recordWorktrees(ctx context.Context, id string, states []flowdproto.WorktreeState) {
 	wts, err := s.Store.Worktrees(ctx, id)
 	if err != nil {
@@ -510,6 +565,9 @@ func (s *Service) Summary(ctx context.Context, se Session) (apitypes.SessionSumm
 		TurnStartedAt: se.TurnStartedAt, LastActivityAt: se.LastActivityAt, CreatedAt: se.CreatedAt}
 	if se.ParentID != nil {
 		sum.ParentID = *se.ParentID
+	}
+	if event.SessionStatus(se.Status) == event.SessionStatusFailed {
+		sum.TurnStartedAt = nil // a turn cut off by a sandbox stop: open in the log, running nowhere (turnCutOff)
 	}
 	for _, w := range wts {
 		sum.Repos = append(sum.Repos, path.Base(w.Path))
@@ -610,15 +668,19 @@ func (s *Service) follow(ctx context.Context, id string, f *follower) {
 // turnCutOff ends the mirrored turn of a session whose sandbox is proven stopped: a stop ends every unit without a
 // turn.ended in the log, so the row would show the session working (or waiting for the owner) until a message
 // restarts the host. The host logs that turn lost when it starts again (docs/events.md: failed); the row says so
-// now. Only ErrNotWarm proves the stop (never ErrMayRun).
+// now. The row keeps turn_started_at: the log still ends in that open turn until a host closes it, and the
+// sandbox's next bring-up starts the hosts of exactly those sessions (CloseLostTurns). Only ErrNotWarm proves the
+// stop (never ErrMayRun).
 func (s *Service) turnCutOff(ctx context.Context, se Session) {
 	switch event.SessionStatus(se.Status) {
-	case event.SessionStatusIdle, event.SessionStatusDone, event.SessionStatusFailed:
+	case event.SessionStatusFailed:
+		return // cut off already, or the turn failed
+	case event.SessionStatusIdle, event.SessionStatusDone:
 		if se.TurnStartedAt == nil {
 			return
 		}
 	}
-	if err := s.Store.ApplyMirror(ctx, se.ID, Mirror{Status: string(event.SessionStatusFailed), TurnEnded: true,
+	if err := s.Store.ApplyMirror(ctx, se.ID, Mirror{Status: string(event.SessionStatusFailed),
 		Unseen: true}); err != nil {
 		s.Log.Warn("follow: ending the turn of a stopped sandbox", "session", se.ID, "err", err)
 		return

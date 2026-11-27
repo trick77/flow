@@ -259,8 +259,9 @@ func TestFollow_stoppedSandboxEndsTheTurn(t *testing.T) {
 			t.Errorf("%v: status %s, want %s", tc.warmErr, se.Status, tc.want)
 		}
 		if tc.want == "failed" {
-			if se.TurnStartedAt != nil || !se.Unseen {
-				t.Errorf("turn still open or not unseen: %+v", se)
+			// The row keeps the turn open, as the log is, for CloseLostTurns; the summary shows none running.
+			if se.TurnStartedAt == nil || !se.Unseen {
+				t.Errorf("turn not kept open or not unseen: %+v", se)
 			}
 			if announced == nil || announced.Status != apitypes.SessionStatusFailed || announced.TurnStartedAt != nil {
 				t.Errorf("announced %+v", announced)
@@ -268,6 +269,58 @@ func TestFollow_stoppedSandboxEndsTheTurn(t *testing.T) {
 		} else if announced != nil || se.TurnStartedAt == nil {
 			t.Errorf("changed on ErrMayRun: %+v, announced %+v", se, announced)
 		}
+	}
+}
+
+// ensureCounter records the sessions whose host EnsureSession was asked to start.
+type ensureCounter struct {
+	flowdproto.API
+	mu  sync.Mutex
+	ids []string
+}
+
+func (e *ensureCounter) EnsureSession(ctx context.Context, s flowdproto.SessionSpec) (flowdproto.SessionState, error) {
+	e.mu.Lock()
+	e.ids = append(e.ids, s.ID)
+	e.mu.Unlock()
+	return e.API.EnsureSession(ctx, s)
+}
+
+// After a bring-up only the hosts of sessions whose log ends in a turn a sandbox stop cut off are started: not an
+// idle one, not one whose turn failed in its log, not an archived one.
+func TestCloseLostTurns(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	ids := map[string]string{}
+	for _, name := range []string{"cut", "idle", "failed", "archived"} {
+		w := create(t, r, `{"projectId":"p1","repoIds":["r1"],"provider":"claude","model":"m","mode":"ask","title":"`+name+`"}`)
+		var s apitypes.Session
+		_ = json.Unmarshal(w.Body.Bytes(), &s)
+		ids[name] = s.Summary.ID
+	}
+	for _, name := range []string{"cut", "failed", "archived"} {
+		if err := r.svc.Store.ApplyMirror(ctx, ids[name], Mirror{Status: "working", TurnStarted: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.svc.Store.ApplyMirror(ctx, ids["failed"], Mirror{Status: "failed", TurnEnded: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"cut", "archived"} {
+		se, _ := r.svc.Store.Get(ctx, ids[name])
+		r.svc.turnCutOff(ctx, se)
+	}
+	if err := r.svc.Store.Archive(ctx, ids["archived"], true); err != nil {
+		t.Fatal(err)
+	}
+	se, _ := r.svc.Store.Get(ctx, ids["cut"])
+	if sum, err := r.svc.Summary(ctx, se); err != nil || sum.Status != apitypes.SessionStatusFailed || sum.TurnStartedAt != nil {
+		t.Errorf("cut-off summary %+v, %v", sum, err)
+	}
+	api := &ensureCounter{API: r.sb.api}
+	r.svc.CloseLostTurns(ctx, "p1", api)
+	if !slices.Equal(api.ids, []string{ids["cut"]}) {
+		t.Errorf("hosts started for %v, want only %s", api.ids, ids["cut"])
 	}
 }
 
