@@ -205,6 +205,26 @@
   color: var(--color-danger);
   font-size: 0.75rem;
 }
+/* A failed setup's log (mock: .setup-log). */
+.setup-log {
+  max-height: 320px;
+  margin: 10px 0 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--color-code-border);
+  border-radius: 8px;
+  background: var(--color-code-bg);
+  color: var(--color-ink-warm);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  white-space: pre;
+}
+.setup-log-note {
+  margin: 10px 0 0;
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
 .pcard-foot {
   display: flex;
   flex-wrap: wrap;

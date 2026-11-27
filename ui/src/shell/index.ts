@@ -4,7 +4,10 @@
 export { AgentPill, useAgentName } from "./AgentPill";
 export { AccountContext, AuthGate, SignIn, type Account } from "./AuthGate";
 export { projectBadge } from "./badge";
+export { DrawerContext, MenuButton, type Drawer } from "./drawer";
 export { Header } from "./Header";
+export { readStored, STORAGE_KEYS, writeStored } from "./storage";
+export { NARROW, useMediaQuery } from "./useMediaQuery";
 export { Icon, type IconName } from "./Icon";
 export { Nav, type View } from "./Nav";
 export { SessionView } from "./SessionView";

@@ -40,6 +40,12 @@ export const projects = {
   start: "Start sandbox",
   stop: "Stop sandbox",
   rebuild: "Rebuild",
+  // The log of the last setup run, offered when a setup script failed.
+  setupLog: "Setup log",
+  hideSetupLog: "Hide setup log",
+  setupLogLoading: "Reading the setup log…",
+  setupLogFailed: "The setup log could not be read.",
+  setupLogEmpty: "The setup log is empty.",
   delete: "Delete",
   // Confirmations: what goes, in plain words.
   confirmRebuild:

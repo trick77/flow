@@ -1,6 +1,12 @@
-import type { SessionStatus, SessionSummary } from "../api/types.gen";
+import type { Project, SessionStatus, SessionSummary } from "../api/types.gen";
 import { SESSION_STATUS_VALUES } from "../api/types.gen";
-import { groupSessions, orderSessions, sectionOf } from "./group";
+import {
+  groupByProject,
+  groupSessions,
+  isGrouping,
+  orderSessions,
+  sectionOf,
+} from "./group";
 import { applyAnswer, applyAppEvent } from "./useSessions";
 
 function s(id: string, status: SessionStatus, at: string): SessionSummary {
@@ -21,11 +27,15 @@ function s(id: string, status: SessionStatus, at: string): SessionSummary {
 }
 
 describe("sidebar grouping", () => {
-  it("puts every status into its section", () => {
-    const got = Object.fromEntries(
-      SESSION_STATUS_VALUES.map((st) => [st, sectionOf(st)]),
-    );
-    expect(got).toEqual({
+  it("puts every status into its section, done and failed only while unseen", () => {
+    const of = (unseen: boolean) =>
+      Object.fromEntries(
+        SESSION_STATUS_VALUES.map((st) => [
+          st,
+          sectionOf({ status: st, unseen }),
+        ]),
+      );
+    expect(of(true)).toEqual({
       idle: "idle",
       working: "working",
       queued: "working",
@@ -35,17 +45,22 @@ describe("sidebar grouping", () => {
       done: "done",
       failed: "done",
     });
-    expect(sectionOf("future" as SessionStatus)).toBe("idle");
+    expect(of(false)).toEqual({ ...of(true), done: "idle", failed: "idle" });
+    expect(sectionOf({ status: "future" as SessionStatus, unseen: true })).toBe(
+      "idle",
+    );
   });
 
   it("sorts each section by latest activity and orders the sections", () => {
+    const unseen = (x: SessionSummary) => ({ ...x, unseen: true });
     const list = [
-      s("done-old", "done", "2026-11-26T10:00:00Z"),
+      unseen(s("done-old", "done", "2026-11-26T10:00:00Z")),
       s("idle", "idle", "2026-11-26T13:00:00Z"),
       s("ask", "approval", "2026-11-26T09:00:00Z"),
-      s("done-new", "failed", "2026-11-26T12:00:00Z"),
+      unseen(s("done-new", "failed", "2026-11-26T12:00:00Z")),
       s("run", "queued", "2026-11-26T08:00:00Z"),
       s("b-tie", "question", "2026-11-26T09:00:00Z"),
+      s("seen", "done", "2026-11-26T14:00:00Z"),
     ];
     const g = groupSessions(list);
     expect(g.needs.map((x) => x.id)).toEqual(["ask", "b-tie"]);
@@ -56,8 +71,46 @@ describe("sidebar grouping", () => {
       "run",
       "done-new",
       "done-old",
+      "seen",
       "idle",
     ]);
+  });
+
+  it("groups by project in the list's order, unknown projects last", () => {
+    const proj = (id: string, name: string): Project => ({
+      id,
+      name,
+      repos: [],
+      sandbox: { state: "warm" },
+      createdAt: "2026-11-26T10:00:00Z",
+    });
+    const at = (id: string, projectId: string, t: string) => ({
+      ...s(id, "idle", t),
+      projectId,
+    });
+    const got = groupByProject(
+      [
+        at("a1", "pa", "2026-11-26T10:00:00Z"),
+        at("x", "gone", "2026-11-26T10:00:00Z"),
+        at("b1", "pb", "2026-11-26T10:00:00Z"),
+        at("a2", "pa", "2026-11-26T12:00:00Z"),
+      ],
+      [proj("pb", "beta"), proj("pa", "alpha"), proj("pc", "empty")],
+    );
+    expect(
+      got.map((g) => [g.projectId, g.name, g.sessions.map((x) => x.id)]),
+    ).toEqual([
+      ["pb", "beta", ["b1"]],
+      ["pa", "alpha", ["a2", "a1"]],
+      [null, undefined, ["x"]],
+    ]);
+  });
+
+  it("accepts only the two groupings", () => {
+    expect(isGrouping("status")).toBe(true);
+    expect(isGrouping("project")).toBe(true);
+    expect(isGrouping("repo")).toBe(false);
+    expect(isGrouping(null)).toBe(false);
   });
 });
 

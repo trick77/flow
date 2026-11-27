@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Icon } from "../shell";
+import { Icon, MenuButton } from "../shell";
 import "./pages.css";
 
 // Page is the frame of Projects and Settings: a header with the way back to
@@ -26,6 +26,7 @@ export function Page({
   return (
     <section className="view" aria-label={title}>
       <header className="hdr">
+        <MenuButton />
         {onBack && (
           <button type="button" className="btn sm ghost" onClick={onBack}>
             <Icon name="back" />

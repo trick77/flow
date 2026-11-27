@@ -28,4 +28,6 @@ export const errors: Record<ErrorCode, string> = {
     "The running sandboxes use all the memory Flow may give them. Stop one first.",
   project_has_sessions:
     "Sessions of this project are still open. Archive them first.",
+  sandbox_setup_failed:
+    "A setup script failed. Read the setup log, fix the script and rebuild the sandbox.",
 };

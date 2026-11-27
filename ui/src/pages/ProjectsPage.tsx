@@ -18,6 +18,7 @@ import type {
 import { formatDate, formatDateTime } from "../i18n/format";
 import { Icon, projectBadge } from "../shell";
 import { Page } from "./Page";
+import { SetupLog } from "./SetupLog";
 
 // ProjectsPage lists the projects with their sandboxes and creates, starts,
 // stops, rebuilds and deletes them. The list is the app's (kept by the app
@@ -263,6 +264,9 @@ function ProjectCard({
   const [failed, setFailed] = useState<ErrorCode | null>(null);
   const sb = project.sandbox;
   const state = sb.state;
+  // A failed setup script: its log says why.
+  const setupFailed = sb.errorCode === "sandbox_setup_failed";
+  const [showLog, setShowLog] = useState(false);
   // setup and stopping are offered start, rebuild and delete as well: such a
   // state can outlive its operation, and while one really runs the server
   // answers sandbox_busy. Stop is not: it would wait for a whole bring-up. A
@@ -337,6 +341,7 @@ function ProjectCard({
       {sb.errorCode && state === "failed" && (
         <p className="pcard-err">{t(sb.errorCode, { ns: "errors" })}</p>
       )}
+      {setupFailed && showLog && <SetupLog projectId={project.id} />}
       {failed && (
         <p className="pcard-err" role="alert">
           {failed === "project_has_sessions" && open > 0
@@ -389,6 +394,17 @@ function ProjectCard({
               onClick={() => act("stop")}
             >
               {t("stop")}
+            </button>
+          )}
+          {setupFailed && (
+            <button
+              type="button"
+              className="btn sm ghost"
+              aria-expanded={showLog}
+              onClick={() => setShowLog((s) => !s)}
+            >
+              <Icon name="list" />
+              {showLog ? t("hideSetupLog") : t("setupLog")}
             </button>
           )}
           {state !== "deleting" && (

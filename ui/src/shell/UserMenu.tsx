@@ -1,68 +1,131 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import {
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import { AccountContext } from "./AuthGate";
 import { Icon } from "./Icon";
 
-// UserMenu is the sidebar's foot: the owner's name and a menu with sign-out.
-// Renders nothing outside AuthGate.
-export function UserMenu() {
+// Avatar is the owner's initial in a disc.
+function initial(name: string): string {
+  return [...name.trim()].slice(0, 1).join("").toLocaleUpperCase("en-CH");
+}
+
+// UserMenu is the sidebar's foot: the owner's avatar, name, role and the
+// host Flow runs on, and a menu with Settings and sign-out. In the rail
+// (compact) only the avatar shows; it opens Settings. Renders nothing
+// outside AuthGate.
+export function UserMenu({
+  onOpenSettings,
+  compact = false,
+}: {
+  onOpenSettings?: () => void;
+  compact?: boolean;
+}) {
   const account = useContext(AccountContext);
   const { t } = useTranslation("shell");
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
 
-  // Escape or a click elsewhere closes the menu.
+  // A click elsewhere closes the menu; opening it focuses the first item.
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
+    menu.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
     const onDown = (e: MouseEvent) => {
       if (!wrap.current?.contains(e.target as Node)) setOpen(false);
     };
-    document.addEventListener("keydown", onKey);
     document.addEventListener("mousedown", onDown);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("mousedown", onDown);
-    };
+    return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
 
   if (!account) return null;
+  const name = account.name;
+  const host = window.location.host;
+
+  if (compact) {
+    return (
+      <div className="rail-col rail-foot">
+        <button
+          type="button"
+          className="avatar"
+          aria-label={t("account", { name })}
+          title={t("settings")}
+          onClick={onOpenSettings}
+        >
+          {initial(name)}
+        </button>
+      </div>
+    );
+  }
+
+  // Escape closes only the menu (not a drawer around it); Up and Down move.
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+      button.current?.focus();
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const items = [
+      ...(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ??
+        []),
+    ];
+    if (items.length === 0) return;
+    e.preventDefault();
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    items[(i + step + items.length) % items.length].focus();
+  };
+
   return (
-    <div
-      className="relative flex-none border-t border-border-side px-2.5 pt-2 pb-2.5"
-      ref={wrap}
-    >
+    <div className="sb-foot user-wrap" ref={wrap} onKeyDown={onKeyDown}>
       <button
-        className="flex w-full items-center gap-2.5 rounded-lg p-1.5 transition-colors hover:bg-active aria-expanded:bg-active"
+        ref={button}
+        className="user-btn"
         type="button"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={t("account", { name: account.name })}
+        aria-label={t("account", { name })}
         onClick={() => setOpen((o) => !o)}
       >
-        <span
-          className="grid size-8 flex-none place-items-center rounded-full bg-ink-dim text-[0.8125rem] font-semibold text-bg"
-          aria-hidden="true"
-        >
-          {account.name.slice(0, 1).toUpperCase()}
+        <span className="avatar" aria-hidden="true">
+          {initial(name)}
         </span>
-        <span className="min-w-0 flex-1 text-left">
-          <span className="block truncate text-ink-bright">{account.name}</span>
-          <span className="block truncate text-xs text-faint">
-            {t("owner")}
+        <span className="user-meta">
+          <span className="nm">{name}</span>
+          <span className="sub">
+            {host ? t("ownerAt", { host }) : t("owner")}
           </span>
         </span>
+        <Icon name="chevDown" />
       </button>
       {open && (
-        <div
-          className="absolute right-2.5 bottom-[calc(100%+6px)] left-2.5 z-40 rounded-ui border border-border-strong bg-popover py-1 shadow-lg"
-          role="menu"
-        >
+        <div className="pop user-pop" role="menu" ref={menu}>
+          {onOpenSettings && (
+            <button
+              className="opt"
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onOpenSettings();
+              }}
+            >
+              <Icon name="sliders" />
+              <span className="grow">{t("settings")}</span>
+            </button>
+          )}
           <button
-            className="mx-1 flex w-[calc(100%-8px)] items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-ink-bright hover:bg-active"
+            className="opt"
             type="button"
             role="menuitem"
             onClick={() => {
@@ -71,7 +134,7 @@ export function UserMenu() {
             }}
           >
             <Icon name="signout" />
-            <span>{t("signOut")}</span>
+            <span className="grow">{t("signOut")}</span>
           </button>
         </div>
       )}

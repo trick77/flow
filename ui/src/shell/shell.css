@@ -51,11 +51,151 @@
   margin-top: 16px;
 }
 
-/* Narrow: the title needs the room more than the branch chip. */
-@media (max-width: 900px) {
-  .hdr .chip {
+/* The header's menu button: only rendered on narrow screens. */
+.menu-btn {
+  margin-left: -6px;
+}
+
+/* The sandbox chip (mock: .sbx-chip) and the repos menu (.repos-pop). */
+.hdr {
+  position: relative;
+}
+.chip-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--color-faint);
+}
+.sbx-chip.tone-warm {
+  color: var(--color-ink-warm);
+}
+.sbx-chip.tone-warm .chip-dot {
+  background: var(--color-success);
+}
+.sbx-chip.tone-busy .chip-dot {
+  background: var(--color-sun);
+}
+.repos-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+.chip-btn {
+  transition:
+    background-color 0.12s,
+    color 0.12s;
+}
+.chip-btn:hover,
+.chip-btn[aria-expanded="true"] {
+  background: var(--color-raised);
+  color: var(--color-ink-bright);
+}
+.pop.repos-pop {
+  width: 380px;
+}
+.pop.down.repos-pop {
+  left: auto;
+  right: 0;
+}
+.repos-pop .opt {
+  align-items: center;
+}
+.repos-pop .opt[aria-disabled="true"] {
+  cursor: default;
+}
+.repos-pop .opt .t {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.repos-pop .opt .t .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+.repos-pop .opt .d {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+.repos-pop .st {
+  flex: 0 0 auto;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+.repos-pop .pop-h .mono {
+  color: var(--color-ink-warm);
+}
+
+/* Tight headers keep the chips' icons and drop their words (mock). */
+@media (max-width: 1180px) {
+  .hdr .sbx-chip .txt,
+  .hdr .chip-btn .txt {
     display: none;
   }
+}
+@media (max-width: 1599px) {
+  .session-view.panel-open .hdr .branch-chip,
+  .session-view.panel-open .hdr .sbx-chip .txt,
+  .session-view.panel-open .hdr .chip-btn .txt {
+    display: none;
+  }
+}
+/* The crumb gives way to the chips and toggles, never under them. */
+.hdr .crumb {
+  /* Room for the title's focus ring inside the clip. */
+  margin: -4px;
+  padding: 4px;
+  overflow: hidden;
+}
+.hdr .crumb .proj {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Narrow: the title needs the room more than the branch chip. */
+@media (max-width: 900px) {
+  .hdr .branch-chip {
+    display: none;
+  }
+  .hdr .repos-wrap {
+    position: static;
+  }
+  .hdr .pop.down.repos-pop {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-width: none;
+  }
+}
+/* Phones: the title wins; the repositories stay in the panel's tabs. */
+@media (max-width: 420px) {
+  .hdr .sbx-chip,
+  .hdr .repos-wrap {
+    display: none;
+  }
+}
+
+/* A session and its review panel side by side; the panel overlays the
+   session on tighter screens (panel.css). */
+.view.session-view {
+  position: relative;
+  flex-direction: row;
+}
+.view-col {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 /* A session view kept mounted under a page (draft, terminal and stream
    stay): .view's display:flex would beat the hidden attribute. */

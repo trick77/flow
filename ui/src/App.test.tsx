@@ -54,6 +54,8 @@ interface Server {
   createGate?: Promise<void>;
   // patchCode refuses PATCH /api/sessions/{id}; else it answers the change.
   patchCode?: string;
+  // extra answers a call before the rest (a test's own routes).
+  extra?: (url: string, init?: RequestInit) => Response | undefined;
   calls: string[];
 }
 
@@ -62,6 +64,8 @@ function serve(server: Server) {
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       server.calls.push(init?.method === "DELETE" ? "DELETE " + url : url);
+      const own = server.extra?.(url, init);
+      if (own) return own;
       if (init?.method === "DELETE" && url.startsWith("/api/sessions/")) {
         const code = server.archive?.shift();
         return code
@@ -274,7 +278,8 @@ describe("App", () => {
   it("selects the most urgent session and renders its stream", async () => {
     const server: Server = {
       sessions: [
-        summary({}),
+        // Done while unseen: a seen done session sits in Idle.
+        summary({ unseen: true }),
         summary({
           id: "s-ask",
           title: "Fix the flaky migration test",
@@ -386,7 +391,7 @@ describe("App", () => {
     // A turn cut off by a sandbox stop: the row says failed up to seq 16, the
     // log still says working there.
     serve({
-      sessions: [summary({ status: "failed", lastSeq: 16 })],
+      sessions: [summary({ status: "failed", lastSeq: 16, unseen: true })],
       projects: [project],
       calls: [],
     });
@@ -584,8 +589,9 @@ describe("App", () => {
       screen.queryByRole("heading", { level: 1, name: en.projects.title }),
     ).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: en.shell.settings }));
+    // Seen done sessions sit in Idle.
     const sidebar = screen.getByRole("region", {
-      name: en.sidebar.sectionDone,
+      name: en.sidebar.sectionIdle,
     });
     fireEvent.click(within(sidebar).getByText("Second one"));
     expect(
@@ -785,7 +791,14 @@ describe("App", () => {
         ),
       { timeout: 3000 },
     );
-    await waitFor(() => expect(row).not.toHaveClass("unseen"));
+    // Seen, the done row moves from Done to Idle: a new element there.
+    await waitFor(() =>
+      expect(
+        within(
+          screen.getByRole("region", { name: en.sidebar.sectionIdle }),
+        ).getByRole("button", { name: /Persist the sidebar width/ }),
+      ).not.toHaveClass("unseen"),
+    );
     vi.restoreAllMocks();
   });
 
@@ -804,6 +817,7 @@ describe("App", () => {
     const row = await within(list).findByRole("button", {
       name: /Persist the sidebar width/,
     });
+    expect(row).toHaveClass("unseen");
     // The stream of a stopped sandbox delivers nothing.
     await waitFor(
       () =>
@@ -812,7 +826,218 @@ describe("App", () => {
         ),
       { timeout: 3000 },
     );
-    await waitFor(() => expect(row).not.toHaveClass("unseen"));
+    // Seen, the done row moves from Done to Idle: a new element there.
+    await waitFor(() =>
+      expect(
+        within(
+          screen.getByRole("region", { name: en.sidebar.sectionIdle }),
+        ).getByRole("button", { name: /Persist the sidebar width/ }),
+      ).not.toHaveClass("unseen"),
+    );
     vi.restoreAllMocks();
+  });
+
+  it("opens the review panel from the header and the repos menu, again after a turn", async () => {
+    const worktrees = [
+      {
+        repoId: "r1",
+        repo: "dev/scener",
+        branch: "b",
+        path: "/w/scener",
+        baseRef: "origin/master",
+      },
+      {
+        repoId: "r2",
+        repo: "dev/helpers",
+        branch: "b",
+        path: "/w/helpers",
+        baseRef: "origin/master",
+      },
+    ];
+    const diffBody = (repo: string) =>
+      JSON.stringify({
+        repo,
+        baseRef: "origin/master",
+        baseSha: "a",
+        files: [],
+      });
+    const server: Server = {
+      sessions: [summary({ status: "idle", repos: ["scener", "helpers"] })],
+      projects: [project],
+      calls: [],
+      extra: (url) => {
+        if (url === "/api/sessions/s-done") {
+          return new Response(
+            JSON.stringify({
+              summary: summary({}),
+              dir: "/w",
+              worktrees,
+              lastSeq: 0,
+            }),
+          );
+        }
+        const m = url.match(/^\/api\/sessions\/s-done\/repos\/(r\d)\/diff$/);
+        if (m)
+          return new Response(
+            diffBody(m[1] === "r1" ? "dev/scener" : "dev/helpers"),
+          );
+        return undefined;
+      },
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    expect(screen.getByTitle(en.shell.sandboxChipWarm)).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: en.shell.togglePanel });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    // Closed, the panel reads no diff.
+    expect(server.calls.some((c) => c.endsWith("/diff"))).toBe(false);
+
+    // The repos menu opens the panel on the chosen repository.
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "2 repositories in this session",
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: /dev\/helpers/ }),
+    );
+    expect(
+      await screen.findByText("No changes against origin/master yet."),
+    ).toBeInTheDocument();
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(
+        screen.getByRole("radiogroup", { name: en.panel.repository }),
+      ).getByRole("radio", { name: "helpers" }),
+    ).toHaveAttribute("aria-checked", "true");
+    const diffs = () =>
+      server.calls.filter((c) => c === "/api/sessions/s-done/repos/r2/diff")
+        .length;
+    const before = diffs();
+
+    // A turn that ends reads the diff again.
+    const es = FakeEventSource.forUrl("/api/sessions/s-done/events")[0];
+    emitDemo(es, 16);
+    act(() => {
+      fixtureLines("demo.jsonl")
+        .slice(16)
+        .forEach((line) => es.emit("flow", line));
+    });
+    await waitFor(() => expect(diffs()).toBeGreaterThan(before));
+
+    fireEvent.click(screen.getByRole("button", { name: en.panel.close }));
+    expect(
+      screen.queryByRole("complementary", { name: en.panel.label }),
+    ).toBeNull();
+    expect(toggle).toHaveFocus();
+    fireEvent.click(toggle);
+    expect(
+      screen.getByRole("complementary", { name: en.panel.label }),
+    ).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("groups as the profile says and reads it again on profile.updated", async () => {
+    window.localStorage.clear();
+    let grouping = "status";
+    const server: Server = {
+      sessions: [summary({})],
+      projects: [project],
+      calls: [],
+      extra: (url, init) =>
+        url === "/api/profile" && (init?.method ?? "GET") === "GET"
+          ? new Response(
+              JSON.stringify({
+                gitName: "",
+                gitEmail: "",
+                language: "en",
+                formatLocale: "en-CH",
+                timeZone: "Europe/Zurich",
+                sidebarGrouping: grouping,
+                configSync: { state: "never" },
+              }),
+            )
+          : undefined,
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    const byProject = screen.getByRole("radio", {
+      name: en.sidebar.groupByProject,
+    });
+    expect(byProject).toHaveAttribute("aria-checked", "false");
+    // Another tab changed it: the frame carries no profile, so it is read.
+    grouping = "project";
+    act(() => {
+      const app = FakeEventSource.forUrl("/api/events")[0];
+      app.open();
+      app.emit("app", { kind: "profile.updated" });
+    });
+    await waitFor(() =>
+      expect(byProject).toHaveAttribute("aria-checked", "true"),
+    );
+    expect(
+      screen.getByRole("region", { name: project.name }),
+    ).toBeInTheDocument();
+    expect(
+      server.calls.filter((c) => c === "/api/profile").length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("remembers the rail and makes the sidebar a drawer on narrow screens", async () => {
+    window.localStorage.clear();
+    serve({
+      sessions: [summary({}), summary({ id: "s2", title: "Second one" })],
+      projects: [project],
+      calls: [],
+    });
+    const { unmount } = render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    fireEvent.click(screen.getByRole("button", { name: en.sidebar.collapse }));
+    expect(
+      screen.getByRole("navigation", { name: en.sidebar.railLabel }),
+    ).toBeInTheDocument();
+    expect(window.localStorage.getItem("flow.sidebar.rail")).toBe("1");
+    unmount();
+
+    // Narrow: the rail does not apply, the menu button opens the drawer.
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: q === "(max-width: 900px)" || q === "(max-width: 1180px)",
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    const raf = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((fn) => {
+        fn(0);
+        return 0;
+      });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    expect(
+      screen.queryByRole("navigation", { name: en.sidebar.railLabel }),
+    ).toBeNull();
+    const menu = screen.getByRole("button", { name: en.shell.openSidebar });
+    fireEvent.click(menu);
+    const dialog = screen.getByRole("dialog", { name: en.sidebar.label });
+    expect(menu).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(
+      within(dialog).getByRole("button", { name: en.sidebar.closeSidebar }),
+      { key: "Escape" },
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The scrim closes it too; choosing a session closes it and shows it.
+    fireEvent.click(menu);
+    fireEvent.click(document.querySelector(".scrim") as Element);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(menu);
+    fireEvent.click(within(screen.getByRole("dialog")).getByText("Second one"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Second one" }),
+    ).toBeInTheDocument();
+    raf.mockRestore();
   });
 });

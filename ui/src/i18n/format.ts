@@ -45,3 +45,37 @@ export function formatTime(date: Date): string {
 export function formatDateTime(date: Date): string {
   return dateTimeFormat.format(date);
 }
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const WEEK = 7 * DAY;
+const YEAR = 365 * DAY;
+
+// Narrow units, no months: the narrow month ("3m") reads like minutes.
+const agoSteps: readonly [number, number, string][] = [
+  [HOUR, MINUTE, "minute"],
+  [DAY, HOUR, "hour"],
+  [WEEK, DAY, "day"],
+  [YEAR, WEEK, "week"],
+  [Infinity, YEAR, "year"],
+];
+const agoFormats = new Map(
+  agoSteps.map(([, , unit]) => [
+    unit,
+    new Intl.NumberFormat(LOCALE, {
+      style: "unit",
+      unit,
+      unitDisplay: "narrow",
+    }),
+  ]),
+);
+
+// formatAgo is how long ago something was, in the largest whole unit: "4m",
+// "2h", "3d", "5w", "1y". Under a minute (and a time in the future) it is
+// null: the caller says "now" in its own words.
+export function formatAgo(ms: number): string | null {
+  if (!(ms >= MINUTE)) return null;
+  const [, size, unit] = agoSteps.find(([limit]) => ms < limit)!;
+  return agoFormats.get(unit)!.format(Math.floor(ms / size));
+}

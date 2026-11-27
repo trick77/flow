@@ -17,6 +17,30 @@ export const shell = {
   signOut: "Sign out",
   account: "Account: {{name}}",
   owner: "Owner",
+  // Under the owner's name in the sidebar foot: the host Flow runs on.
+  ownerAt: "Owner · {{host}}",
+  // The header's menu button on narrow screens.
+  openSidebar: "Open sidebar",
+  // The header's sandbox chip, by Sandbox.state.
+  sandboxChipNone: "No sandbox",
+  sandboxChipSetup: "Sandbox setting up",
+  sandboxChipWarm: "Sandbox warm",
+  sandboxChipStopping: "Sandbox stopping",
+  sandboxChipStopped: "Sandbox stopped",
+  sandboxChipFailed: "Sandbox failed",
+  sandboxChipDeleting: "Sandbox deleting",
+  // The header's repositories menu of a session in several repositories.
+  repoCount_one: "{{n}} repo",
+  repoCount_other: "{{n}} repos",
+  reposLabel_one: "{{n}} repository in this session",
+  reposLabel_other: "{{n}} repositories in this session",
+  reposMenu: "Repositories in this session",
+  reposOnBranch: "Worktrees on",
+  reposHint: "Select a repository to open its diff",
+  repoNoWorktree: "worktree created with the first message",
+  // The toggle of the review panel beside the timeline.
+  togglePanel: "Toggle diff panel",
+  panelTitle: "Diff",
   projects: "Projects",
   settings: "Settings",
   backToSession: "Back to session",
