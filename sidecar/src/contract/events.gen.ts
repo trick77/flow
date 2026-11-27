@@ -135,6 +135,13 @@ export interface MessageDequeued {
 
 export interface TurnStarted {
   messageId: string;
+  /** The session's provider, written by the host. */
+  provider?: Provider;
+  /**
+   * The model the session is set to as the turn starts, written by the host. A session can change model
+   * between turns.
+   */
+  model?: string;
 }
 
 /** lost: the agent process ended mid-turn (crash, sandbox stop); the host writes it on its next start. */
@@ -152,9 +159,32 @@ export interface TurnEnded {
   outcome: TurnOutcome;
   durationMs: number;
   usage?: Usage;
+  /** The turn's cost as the provider reports it; absent when it reports none (not the same as 0). */
   costUsd?: number;
   /** A code, never a sentence: max_turns, budget, provider_error, ... */
   errorCode?: string;
+  provider?: Provider;
+  /**
+   * The model the provider reports for this turn: the one that carried most of its cost when it used
+   * several (subagents). Absent when the adapter cannot tell; readers fall back to turn.started.model.
+   */
+  model?: string;
+}
+
+/**
+ * A provider message the adapter does not know, passed through instead of dropped. Readers show it as
+ * a plain row: name plus collapsible raw content.
+ */
+export interface ProviderPassthrough {
+  provider: Provider;
+  /** The provider's own name for the message (Claude: type, or type/subtype; OpenCode: the event type). */
+  name: string;
+  /**
+   * The provider message as received. Over 16 KiB of encoded JSON: the first 16 KiB of that JSON as a
+   * string, and rawTruncated set.
+   */
+  raw: unknown;
+  rawTruncated?: boolean;
 }
 
 /** A complete assistant text block, Markdown. */
@@ -192,8 +222,16 @@ export interface ToolStarted {
   url?: string;
   /** The agent's own short description (subagent title, Bash description). */
   description?: string;
-  /** The raw tool input, for detail views. */
+  /**
+   * The raw tool input, for detail views; for a tool the adapter does not know (kind other), all Flow
+   * shows of the call besides its name.
+   */
   input?: unknown;
+  /**
+   * The writer shortened input to keep the event under the line limit: input is then the first part of
+   * its JSON, as a string.
+   */
+  inputTruncated?: boolean;
 }
 
 export interface ToolProgress {
@@ -232,6 +270,13 @@ export interface ToolFinished {
   output?: string;
   outputTruncated?: boolean;
   durationMs?: number;
+  /**
+   * The tool's result as the provider returned it when it is structured (not plain text): an unknown
+   * tool's or an MCP tool's result object. Over 16 KiB of encoded JSON: the first 16 KiB of that JSON as
+   * a string, and rawResultTruncated set.
+   */
+  rawResult?: unknown;
+  rawResultTruncated?: boolean;
 }
 
 export type PermissionKind = "command" | "edit" | "write" | "read" | "web" | "mcp" | "other";
@@ -640,6 +685,7 @@ export interface EventPayloads {
   "gate.finished": GateFinished;
   "notice": Notice;
   "live.snapshot": LiveSnapshot;
+  "provider.passthrough": ProviderPassthrough;
 }
 
 export type EventKind = keyof EventPayloads;
@@ -686,6 +732,7 @@ export const EVENT_KINDS: readonly EventKind[] = [
   "gate.finished",
   "notice",
   "live.snapshot",
+  "provider.passthrough",
 ];
 
 export const EPHEMERAL_EVENT_KINDS: readonly EventKind[] = [
