@@ -254,7 +254,7 @@
       },
       "delete": {
         "tags": ["sessions"], "operationId": "archiveSession", "x-flow-area": "sessions",
-        "summary": "Archive a session", "description": "Stops its agent and removes its worktrees; the log stays readable.",
+        "summary": "Archive a session", "description": "Closes its terminal, stops its agent and removes its worktrees; the log stays readable. A worktree with uncommitted or untracked changes is kept on disk with its branch. A stopped sandbox is not started: the session is archived at once and its cleanup runs at the sandbox's next start. A sandbox that may still run but cannot be reached fails the archive (sandbox_unavailable).",
         "responses": { "204": { "description": "Archived." }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
