@@ -820,6 +820,43 @@ func TestStderr_capped(t *testing.T) {
 	}
 }
 
+// The agent hears nothing about its worktrees when it works in the session's one worktree. Working in the session
+// directory, it gets a note naming each repository's directory; working in its first worktree after another was
+// added, also that one as an additional directory (it lies outside the working directory).
+func TestStartSpec_worktreeLayout(t *testing.T) {
+	const dir = "/home/flow/work/.sessions/fix"
+	api := event.WorktreeAdded{Repo: "acme/api", Branch: "flow/fix", Path: dir + "/api", BaseRef: "origin/main",
+		BaseSHA: "abc"}
+	web := event.WorktreeAdded{Repo: "acme/web", Branch: "flow/fix", Path: dir + "/web", BaseRef: "origin/master"}
+	note := "The session's repositories, each a git worktree in its own directory " +
+		"(run git commands inside the repository's directory):\n" +
+		"- " + dir + "/api: acme/api, branch flow/fix, based on origin/main\n" +
+		"- " + dir + "/web: acme/web, branch flow/fix, based on origin/master"
+	for _, tc := range []struct {
+		name    string
+		cwd     string
+		wts     []event.WorktreeAdded
+		outside []string
+		note    string
+	}{
+		{"one repository, cwd is its worktree", dir + "/api", []event.WorktreeAdded{api}, nil, ""},
+		{"no worktree", dir, nil, nil, ""},
+		{"several repositories, cwd is the session directory", dir, []event.WorktreeAdded{api, web}, nil, note},
+		{"a repository added to a one-repository session", dir + "/api", []event.WorktreeAdded{api, web},
+			[]string{dir + "/web"}, note},
+		{"one repository, cwd is the session directory (a session from before)", dir, []event.WorktreeAdded{api}, nil,
+			"The session's repositories, each a git worktree in its own directory " +
+				"(run git commands inside the repository's directory):\n" +
+				"- " + dir + "/api: acme/api, branch flow/fix, based on origin/main"},
+	} {
+		s := claude.NewStartSpec(claude.Session{ID: sid, Cwd: tc.cwd}, claude.State{Worktrees: tc.wts})
+		if !slices.Equal(s.AdditionalDirectories, tc.outside) || s.AppendSystemPrompt != tc.note {
+			t.Errorf("%s: additional %q, note\n%s\nwant %q\n%s", tc.name, s.AdditionalDirectories,
+				s.AppendSystemPrompt, tc.outside, tc.note)
+		}
+	}
+}
+
 // The real sidecar (sidecar/dist) accepts the start line and speaks the protocol. No message is sent, so the SDK's
 // query never runs and Claude Code is never started; claudeExecutable points nowhere besides.
 func TestRealSidecar_acceptsTheStartLine(t *testing.T) {
@@ -839,7 +876,12 @@ func TestRealSidecar_acceptsTheStartLine(t *testing.T) {
 	env, _ := claude.Env([]string{"PATH=" + filepath.Dir(node) + ":/usr/bin:/bin"}, event.ClaudeAuthSubscriptionLogin)
 	spec := claude.NewStartSpec(claude.Session{ID: sid, Cwd: t.TempDir(), ClaudeExecutable: "/nonexistent/claude",
 		SettingsPath: layout.Settings, Version: "test", MCPCommand: "/nonexistent/flowd", MCPToken: "x"},
-		claude.State{Resume: true, PriorCostUSD: 1.25, Model: "m", Mode: event.PermissionModeAsk})
+		claude.State{Resume: true, PriorCostUSD: 1.25, Model: "m", Mode: event.PermissionModeAsk,
+			Worktrees: []event.WorktreeAdded{{Repo: "a/api", Branch: "flow/x", Path: "/nonexistent/x/api",
+				BaseRef: "origin/main"}}})
+	if spec.AppendSystemPrompt == "" || len(spec.AdditionalDirectories) != 1 {
+		t.Fatalf("start spec without the layout: %+v", spec)
+	}
 	start, err := claude.StartLine("start-1", spec)
 	if err != nil {
 		t.Fatal(err)

@@ -333,7 +333,8 @@ type ToolStarted struct {
 	// The provider's tool name (Read, Bash, mcp__flow__create_session, ...).
 	Name string   `json:"name"`
 	Kind ToolKind `json:"kind"`
-	// File or directory the tool works on, relative to the session directory when inside it.
+	// File or directory the tool works on, relative to the agent's working directory (session.started.cwd) when
+	// inside it.
 	Path    string `json:"path,omitempty"`
 	Command string `json:"command,omitempty"`
 	Pattern string `json:"pattern,omitempty"`

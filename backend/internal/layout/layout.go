@@ -125,7 +125,8 @@ func RepoDir(fullName string) (dir string, ok bool) {
 	return dir, ValidName(dir)
 }
 
-// SessionDir is the agent's working directory: one sibling worktree per repository below it.
+// SessionDir holds one sibling worktree per repository; it is the agent's working directory when there are several
+// (host.Spec.Cwd says which).
 func SessionDir(name string) string { return path.Join(Sessions, name) }
 
 // Worktree is a repository's worktree in a session.

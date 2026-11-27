@@ -231,6 +231,8 @@ export interface ProviderInfo {
    */
   claudeAuths?: ClaudeAuth[];
   models: ModelInfo[];
+  /** Id of the model a new session gets unless the owner picks another; one of models. */
+  defaultModel?: string;
 }
 
 export interface AgentCatalog {

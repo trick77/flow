@@ -18,6 +18,7 @@ import (
 	"github.com/trick77/flow/internal/event"
 	"github.com/trick77/flow/internal/flowdclient"
 	"github.com/trick77/flow/internal/flowdproto"
+	"github.com/trick77/flow/internal/host"
 	"github.com/trick77/flow/internal/layout"
 	"github.com/trick77/flow/internal/terminals/term"
 )
@@ -415,6 +416,34 @@ func TestEnsureRestartsAnEndingTerminal(t *testing.T) {
 	_, _ = d.Write([]byte("echo fresh"))
 	readUntil(t, d, "fresh")
 	_ = d.Close()
+}
+
+// A session's terminal opens where the session's agent works: asked for the session directory, flowd starts it in
+// the worktree the spec names as the agent's working directory. Without a spec it stays where it was asked.
+func TestSessionTerminal_startsInTheAgentsDir(t *testing.T) {
+	r := newTermRig(t)
+	ctx := context.Background()
+	wt := layout.Worktree("demo", "toolkit")
+	if err := os.MkdirAll(filepath.Join(r.root, wt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(r.sv.p(layout.SessionSpecFile("s1"))), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.sv.writeSpec(host.Spec{Session: flowdproto.SessionSpec{ID: "s1", Name: "demo"},
+		Dir: layout.SessionDir("demo"), Cwd: wt}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := r.api.EnsureTerminal(ctx, flowdproto.TerminalSpec{ID: "t1", Session: "s1", Dir: layout.SessionDir("demo"),
+		Cols: 80, Rows: 24})
+	if err != nil || st.Dir != wt {
+		t.Fatalf("session terminal = %+v, %v; want dir %s", st, err, wt)
+	}
+	st, err = r.api.EnsureTerminal(ctx, flowdproto.TerminalSpec{ID: "t2", Session: "s2", Dir: layout.SessionDir("demo"),
+		Cols: 80, Rows: 24})
+	if err != nil || st.Dir != layout.SessionDir("demo") {
+		t.Fatalf("terminal of a session without a spec = %+v, %v", st, err)
+	}
 }
 
 func TestTerminalRefusals(t *testing.T) {

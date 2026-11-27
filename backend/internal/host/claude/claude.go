@@ -45,7 +45,7 @@ type Config struct {
 	// when RecordPath is set.
 	Argv       []string
 	RecordPath string
-	// Dir is the session directory, the sidecar's working directory.
+	// Dir is the agent's working directory (host.Spec.AgentDir), also the sidecar's.
 	Dir string
 	// Env is the sidecar's whole environment (see Env).
 	Env     []string

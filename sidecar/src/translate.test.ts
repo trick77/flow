@@ -28,7 +28,7 @@ import {
   type ToolRequest,
 } from "./requests.js";
 import { draftErrors, fixtureLines } from "./testing/schema.js";
-import { toolKind } from "./tools.js";
+import { displayPath, toolKind } from "./tools.js";
 import { Translator, type Turn } from "./translate.js";
 
 const CWD = "/home/flow/work/.sessions/flaky";
@@ -288,6 +288,14 @@ describe("tools", () => {
     };
     for (const [name, kind] of Object.entries(want))
       expect(toolKind(name), name).toBe(kind);
+  });
+
+  it("shows a path relative to the working directory, a sibling worktree's absolute", () => {
+    const cwd = "/home/flow/work/.sessions/s/api";
+    expect(displayPath(`${cwd}/main.go`, cwd)).toBe("main.go");
+    expect(displayPath("/home/flow/work/.sessions/s/web/a.ts", cwd)).toBe(
+      "/home/flow/work/.sessions/s/web/a.ts",
+    );
   });
 
   it("[docs only] times a call from tool_use to tool_result", () => {
