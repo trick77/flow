@@ -527,6 +527,7 @@ Go types:
 | `archived_at` | TEXT | yes |  |  |
 | `created_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
 | `updated_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+| `cleanup_pending` | INTEGER | no | `0` |  |
 
 Foreign keys:
 
@@ -548,6 +549,7 @@ Checks:
 - `CHECK (mode_cap IN ('', 'plan', 'ask', 'accept_edits', 'auto', 'full_access'))`
 - `CHECK (status IN ('idle', 'working', 'queued', 'approval', 'plan', 'question', 'done', 'failed'))`
 - `CHECK (unseen IN (0, 1))`
+- `CHECK (cleanup_pending IN (0, 1))`
 
 ## Diagram
 
@@ -824,6 +826,7 @@ erDiagram
         TEXT archived_at
         TEXT created_at
         TEXT updated_at
+        INTEGER cleanup_pending
     }
     project_repos }o--|| projects : "project_id"
     sandboxes |o--|| projects : "project_id"

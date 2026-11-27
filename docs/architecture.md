@@ -33,8 +33,11 @@ sandbox (Incus system container, one per project)
 ### 1. Process ownership and commands
 
 - **Decision.** Every long-lived process is a transient systemd unit started by flowd with `systemd-run`
-  (`--unit=flow-session-<id>`, `--uid=flow`, `-p MemoryMax= -p MemorySwapMax=0 -p CPUQuota=`, `-p Restart=no`,
-  `-p EnvironmentFile=`). One *session host* per session (`flowd host`, the release's flowd binary) is the only
+  (`--unit=flow-session-<id>`, `--uid=flow`, `-p MemoryMax= -p MemorySwapMax=0 -p CPUQuota= -p TasksMax=`,
+  `-p OOMPolicy=continue`, `-p Restart=no`, `-p EnvironmentFile=`). `OOMPolicy=continue` because systemd's default
+  for services (`stop`) ends the whole unit when the kernel kills one of its processes at `MemoryMax` (measured,
+  systemd 257): an agent's oversized build would take its session host with it; with `continue` only that process
+  dies (measured in a session unit: the build gets 137, host, other units and sandbox run on). One *session host* per session (`flowd host`, the release's flowd binary) is the only
   writer of the session's log and owns `layout.HostSocket`. For Claude it runs the Node sidecar as its child over
   stdio (stdin: `Command` lines, kinds marked sidecar; stdout: `EventDraft` lines); for OpenCode it drives the one
   `flow-opencode.service` per sandbox. Terminals: `flow-term-<id>` running `flowd term`.
@@ -50,9 +53,48 @@ sandbox (Incus system container, one per project)
   request slot and resolves requests itself on the owner's reply; the only resolution it takes from an adapter is
   `expired` for the open request (the provider withdrew it, e.g. the SDK aborted `canUseTool`), which frees the
   slot and sets the session working again. The sidecar shows no next request while a withdrawn one is still open on
-  the host. The walking skeleton's
-  adapter is a replay of `contract/fixtures/demo.jsonl` written in Go inside the host (the sandbox image has no Node
-  yet); the sidecar replaces it behind the same interface.
+  the host. The spec picks the adapter: `SessionSpec.replay` plays `contract/fixtures/demo.jsonl` (tests, demo
+  mode), else provider `claude` runs the sidecar (`internal/host/claude`) and `opencode` is refused with
+  `not_implemented` (flowd answers it before creating anything). The host forwards `host.shutdown` to the adapter in
+  its own mode. `BACKEND_SESSION_REPLAY` (default off) has Flow send `replay` in every spec, for demos and
+  machines without a Claude credential; read at each host start, so a session that ran replayed turns runs its
+  agent once the setting is off. `deploy/dev-flow.sh` turns it on unless the running Flow has a Claude credential.
+- **Claude sidecar** (`internal/host/claude`). Started on the first message as `node <release>/sidecar/dist/main.js
+  [--record <log dir>/sdk.jsonl]` (`layout.NodeBin`, the bundle beside the host's resolved flowd binary, recording
+  when `SessionSpec.record`), cwd = session directory, own process group. First stdin line `sidecar.start`
+  (`StartSpec`): `sessionId`, `resume`, `cwd`, current `model`/`mode`/`modeCap`, `claudeAuth`, `claudeExecutable` =
+  `layout.ClaudeCLI`, `settingsPath` = `layout.Settings`, `mcpServers.flow` = `{stdio, <flowd> mcp,
+  env BACKEND_MCP_TOKEN}` once `flowd mcp` exists (none until then), `version` (the sidecar sets
+  `CLAUDE_CODE_ENTRYPOINT=flow` and `CLAUDE_AGENT_SDK_CLIENT_APP=flow/<version>` from it), `priorCostUsd` on a
+  resume. All of it is read from the log at each sidecar start, never from the sidecar. `resume`: the first
+  `session.started` draft (the SDK's `system/init`) inside a turn is logged once as `notice {provider_session}`, the
+  only evidence the provider has the session (the host's own `session.started` proves nothing; the replay, also in
+  logs from before the marker, never reports an init). `priorCostUsd` = sum of the reported `turn.ended.costUsd` of
+  turns ended after the marker (turns without one add nothing, so their spend lands in the next reported turn, as
+  inside one SDK process). Model and modes from `session.settings` and approved plans, the mode held to the cap (a
+  lower cap pulls the mode in force down; the host logs and sends that mode). **Provisional:** what Claude Code does
+  with `sessionId` for a session it has (an init with no transcript written yet) and with `resume` for one it lacks
+  is not verified.
+- **Sidecar environment.** Built from an allow-list of the host unit's own environment (PATH, HOME, user, shell,
+  locale, TZ, TMPDIR, TERM, git identity, and the image's unit defaults GOMODCACHE, GOPATH, GOCACHE,
+  npm_config_cache, PLAYWRIGHT_BROWSERS_PATH, DISABLE_AUTOUPDATER, OPENCODE_DISABLE_AUTOUPDATE; layout values fill in
+  what the unit lacks), Flow's own locations set always (`CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+  `GH_CONFIG_DIR`), and the one credential variable of the session's mode. Nothing else passes: no other credential,
+  no cloud-provider switch, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `GH_TOKEN` or MCP token. The sidecar spreads
+  this environment into the SDK's `env`, which replaces Claude Code's, so it is also what every agent command sees.
+- **Sidecar supervision.** stdin and stdout each have their own goroutine and an unbounded queue: `Send` never blocks,
+  a sidecar flooding stdout while not reading stdin stalls nothing. Draft lines that are not JSON, name no contract
+  kind, carry no object `data`, do not decode into their kind's payload, or exceed `event.MaxLine` are dropped and
+  journalled by reason and size, never by content. stderr goes to the unit's journal line by line, at most 1 MiB per
+  sidecar process, drained beyond that. The sidecar exits or its pipe breaks during a turn: the rest of its output
+  is taken (stderr to its end, bounded), then the adapter logs `notice {message_may_not_have_run, messageId}` and ends
+  the turn `error` / `adapter_exited` (`interrupted` when an interrupt was pending); the host expires the open
+  request, and the next message starts a new sidecar that resumes. The message is never sent again by itself (owner
+  decision: it may have started work, and running it twice can repeat commands); the owner re-sends. Exit between
+  turns: restarted on the next message. Start failure: the turn ends `error` / `adapter`. A sidecar refusing its start
+  line is killed. Host stop: `host.shutdown` (the host's own, or an immediate one), stdin closed, 40 s (past the
+  sidecar's 30 s interrupt grace, so Claude Code closes in order), SIGTERM, 5 s, SIGKILL to the process group: at
+  most 45 s (`claude.StopLimit`), below systemd's 90 s stop timeout.
 - **Reattach.** On start flowd lists `flow-session-*`/`flow-term-*` units (`systemctl list-units`), connects to
   each socket, sends `hello` (`hostproto`). A host started from an older release keeps running it (versioned
   release dirs, `layout.Release`); flowd speaks `hostproto` from `MinProtocol` and asks old hosts to
@@ -71,8 +113,8 @@ sandbox (Incus system container, one per project)
   `env` replaces the CLI's environment instead of adding to it, so the sidecar passes its own environment plus
   Flow's variables. Never `--bare`.
 - **SDK reporting.** `result.total_cost_usd` and `modelUsage` are cumulative over the SDK process; the sidecar
-  emits per-turn differences (after a resume only once the host passes the session's earlier cost as
-  `priorCostUsd`, not built yet), so `turn.ended.costUsd` is one turn's (`docs/events.md`, "Model per turn"). Bash tool results carry no exit code.
+  emits per-turn differences (after a resume from the session's earlier cost, which the host passes as
+  `priorCostUsd`), so `turn.ended.costUsd` is one turn's (`docs/events.md`, "Model per turn"). Bash tool results carry no exit code.
 - **Mode mapping.** plan→`plan`, ask→`default`, accept_edits→`acceptEdits`, auto→`auto`,
   full_access→`bypassPermissions` ([permissions](https://code.claude.com/docs/en/agent-sdk/permissions)); the SDK
   refuses `bypassPermissions`, also as a later `setPermissionMode`, unless the query started with
@@ -119,6 +161,16 @@ sandbox (Incus system container, one per project)
 - **SSE framing** is Flow's own (`internal/ssewire`, both legs): kit/sse frames only `event:` and `data:`, and every
   durable event needs `id: <seq>`. The stream position is the larger of `?after` and `Last-Event-ID`: an EventSource
   that reconnects by itself keeps the `?after` it opened with.
+- **Terminal WebSocket** (`internal/terminals/wsterm`, the same on both legs): binary frames are terminal bytes,
+  text frames JSON, `{"resize":{"cols","rows"}}` towards the terminal (bounded 500×200 on every leg) and
+  `{"exit":{"code"}}` from it as its last frame. Close codes, because a browser cannot read a refused handshake:
+  1000 after an exit frame (the shell ended; restart is a new create); 4404 the terminal is gone (closed, never
+  made, archived session, sandbox restarted without an exit file); 4409 the sandbox is not running (an attach never
+  starts one); anything else (1001, 1011, 1012, a dropped connection) means Flow or flowd went away or could not be
+  reached while the terminal may run on: attach again, the ring is replayed. `flowd term` keeps no state in flowd:
+  its socket answers `info`, and its exit status waits in `layout.TerminalExitFile` until restart or close. Output
+  for a slow client is throttled (the PTY reader waits, up to 4 MiB queued per client); a client that takes nothing
+  for 5 s is dropped and re-attaches.
 - **Session stop:** `DELETE /v1/sessions/{id}?remove=true` also removes the worktrees and frees the session
   directory's claim (`layout.SessionClaim`): a directory belongs to one session id, and flowd never adopts another
   session's worktrees found there. It can be repeated after a partial run (a worktree already gone counts as
@@ -148,17 +200,24 @@ sandbox (Incus system container, one per project)
   untrusted and authorizes by *which sandbox connection* a request arrived on, never by ids inside it.
 - **Versioning.** `Flow-Protocol` header both ways; `Hello` reports `[minProtocol, protocol]`; outside Flow's range
   → `ErrProtocol` → Flow redeploys flowd. Within a version: additive only.
-- **Delivery and update of flowd** without a long exec: push `/opt/flow/releases/<version>/flowd` (and the sidecar
-  bundle unpacked by flowd from a pushed tar) and `/etc/systemd/system/flowd.service` with the Incus file API
-  (`POST /1.0/instances/{name}/files`, headers `X-Incus-uid/gid/mode/type/write`,
-  [rest-api.yaml](https://github.com/lxc/incus/blob/main/doc/rest-api.yaml)), then one bounded exec (≤ 15 s):
-  `ln -sfn` the release to `/opt/flow/bin`, `systemctl daemon-reload`, `systemctl restart flowd`. Releases are
-  never overwritten: running hosts and terminals keep their binary. The binary is pushed as `flowd.new` and moved
-  into place only when the release does not exist (Incus refuses to write onto a running executable: measured 500
-  "text file busy"). Skipped when `Hello.version` already matches; after a sandbox start Flow first waits for an
-  already delivered flowd to answer instead of delivering again. This needs a version that names one build: two
-  builds reporting the same version (an unstamped "dev") never get the newer flowd delivered, so dev builds stamp
-  `kit/version.Version` per build.
+- **Delivery and update of flowd** without a long exec: push `/opt/flow/releases/<release>/flowd.new`, the sidecar
+  bundle as one gzip'd tar `<release>/sidecar.tar.gz` (`layout.SidecarArchive`), `/etc/flow/flowd.json` (root 0600)
+  and `/etc/systemd/system/flowd.service` with the Incus file API (`POST /1.0/instances/{name}/files`, headers
+  `X-Incus-uid/gid/mode/type/write`, [rest-api.yaml](https://github.com/lxc/incus/blob/main/doc/rest-api.yaml)),
+  then one bounded exec (≤ 15 s): `ln -sfn` the release to `/opt/flow/bin`, `systemctl daemon-reload`,
+  `systemctl restart flowd`. flowd unpacks the tar at its start, before it answers, into a temporary directory
+  renamed to `<release>/sidecar/` (relative symlinks inside the bundle only, nothing else but files and
+  directories), and drops a tar pushed into a release that has its bundle. Why a tar: the bundle (`package.json`,
+  `dist/`, production `node_modules`) is 66 MB in 8,771 files, one file API request each plus their directories;
+  as one 8.8 MB request it is complete or absent. Measured in the lab: packing 0.25 s once per Flow process,
+  unpacking 0.18 s, the whole delivery (push, exec, flowd restart, unpack, `Hello`) 0.36 to 0.46 s. Releases are
+  never overwritten: running hosts and terminals keep their binary and bundle. The binary is moved into place only
+  when the release does not exist (Incus refuses to write onto a running executable: measured 500 "text file
+  busy"). The release name is the version plus a hash of the flowd binary and the bundle (`Hello.release`): a
+  rebuild reporting the same version (an unstamped `dev-<commit>-dirty`) is another release and is delivered,
+  the same build after a Flow restart is not (the tar is packed byte-identically). Skipped when `Hello.release`
+  matches; after a sandbox start Flow first waits for an already delivered flowd to answer instead of delivering
+  again. A sealed flowd token that no longer opens (a new `BACKEND_SEAL_KEY`) is made again and delivered.
 
 ### 4. Sandbox layout
 
@@ -171,20 +230,30 @@ sandbox (Incus system container, one per project)
 | root fs `/var/lib/flow/sessions/<id>/events.jsonl` | logs | outside work trees: no git noise, survives worktree removal |
 | root fs `/var/lib/flow/sessions/<id>/spec.json`, `/var/lib/flow/session-dirs/<name>` | host spec; which session id owns a session directory | the log is served with no host running; no session adopts another's worktrees |
 | root fs `/opt/flow/releases/<v>/`, `/etc/flow/` | flowd, sidecar, config, Claude settings layer | versioned, root-owned |
-| home volume `/srv/flow-home/` | `claude/` (`CLAUDE_CONFIG_DIR`), `config/` + `data/` (XDG for OpenCode), `agent-config/`, `cache/{go-mod,npm,ms-playwright}` | one volume, all sandboxes |
-| tmpfs `/run/flow/` | sockets, `credentials/` (gh hosts.yml, provider env) | gone at reboot, never on disk |
+| home volume `/srv/flow-home/` | `claude/` (`CLAUDE_CONFIG_DIR`), `config/` + `data/` (XDG for OpenCode), `agent-config/`, `cache/{go-mod,npm}` | one volume, all sandboxes |
+| image `/opt/ms-playwright` | Playwright's browsers | the volume is not mounted when the image is built |
+| tmpfs `/run/flow/` | sockets, `credentials/` (gh hosts.yml, provider env), `session-env/<id>.env` (root 0700: each host unit's EnvironmentFile) | gone at reboot, never on disk |
 
-- Agent user `flow`, uid/gid 65532 (not 1000: shifted volumes keep raw uids on the host, spike 6).
+- Agent user `flow`, uid/gid 65532 (not 1000, the host's first user).
+- **Home volume** `BACKEND_HOME_VOLUME` (default `flow-home`, pool `BACKEND_INCUS_POOL`): made by Flow when missing,
+  attached at every bring-up (an older sandbox gets it then, also while running). Not `security.shifted`: the
+  lab's dir pool refuses the idmapped mount ("Required idmapping abilities not available", measured). Instead
+  every sandbox of the project shares Incus' one idmap (never `security.idmap.isolated`), so Incus maps the
+  volume (its `volatile.idmap.last`) the same for all of them: files carry host uid 1000000 + 65532 and are 65532
+  in every sandbox (measured: a file written in one sandbox is the agent's in the other). An isolated idmap would
+  break this. A new volume's root is root 0711; flowd makes the agent-owned tree (`layout.HomeDirs`) at its start
+  and on every `PUT /v1/env`, never by running go or npm as root.
 - Home `/home/flow` stays on the root filesystem; the shared volume is mounted beside it and reached through
   environment variables, so no project's tree or log lands on the shared volume.
 - `CLAUDE_CONFIG_DIR` relocates "all settings, session history, and plugins"
-  ([env-vars](https://code.claude.com/docs/en/env-vars)); the hosting guide implies `~/.claude.json` moves with it
-  ([hosting](https://code.claude.com/docs/en/agent-sdk/hosting), **provisional** until checked in the image).
+  ([env-vars](https://code.claude.com/docs/en/env-vars)); `.claude.json` moves with it (measured: Claude Code
+  2.1.332 started by the sidecar wrote `.claude.json`, `projects/` and `backups/` below `CLAUDE_CONFIG_DIR`).
 - **Spec tension, reported:** the shared home volume makes Claude transcripts and logins of every project readable
   from every sandbox. The spec wants one volume; projects are therefore not isolated from each other's agent
   history. Mitigation option for the owner: per-project subdirectory for `claude/projects` via a symlink.
 - Flow settings layer `/etc/flow/claude-settings.json`: `{"sandbox": {"enabled": false}}` and nothing that
-  changes per session (stable tool lists keep the prompt cache). Passed as the SDK's `settings` option, which
+  changes per session (stable tool lists keep the prompt cache). flowd writes it at its start, root 0644, and keeps
+  `/etc/flow` 0755 (a minimal image ships it 0700), while it makes `flowd.json` root 0600 whatever it arrived with. Passed as the SDK's `settings` option, which
   outranks user and project files but not managed settings
   ([settings](https://code.claude.com/docs/en/settings)). The env adds `DISABLE_AUTOUPDATER=1` and
   `CLAUDE_AGENT_SDK_CLIENT_APP=flow/<version>` and `CLAUDE_CODE_ENTRYPOINT=flow` (owner's decision; the variable is
@@ -207,7 +276,13 @@ sandbox (Incus system container, one per project)
 - **Claude, per session** (owner decision): `claudeAuth` on the session (DB, API, `SessionSpec`, `session.started`),
   default `subscription_token`. flowd sets exactly one: `CLAUDE_CODE_OAUTH_TOKEN` (the one-year token from
   `claude setup-token`) for `subscription_token`, nothing for `subscription_login` (CLI login on the home volume),
-  `ANTHROPIC_API_KEY` for `api_key`. Documented precedence, highest first: cloud-provider variables,
+  `ANTHROPIC_API_KEY` for `api_key`. Delivery: flowd keeps the last `PUT /v1/env` in memory (a restart reports
+  revision 0) and starts no host or terminal unit before the first push: it answers `busy`, Flow forgets its
+  connection, and the bring-up that follows pushes the set (a unit can never start without its credential). At
+  every host start flowd writes the unit's `EnvironmentFile`
+  (`layout.SessionEnvFile`, tmpfs, root 0600; never `spec.json`, which is on disk) with that one variable, the git
+  identity and a fresh `BACKEND_MCP_TOKEN`; a stop removes it. The host passes on only the variable of the session's
+  mode ("Sidecar environment"). Documented precedence, highest first: cloud-provider variables,
   `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `apiKeyHelper`, `CLAUDE_CODE_OAUTH_TOKEN`, profile credentials,
   `/login` credentials ([authentication](https://code.claude.com/docs/en/authentication),
   [env-vars](https://code.claude.com/docs/en/env-vars)). So flowd also removes the cloud-provider variables and
@@ -223,9 +298,23 @@ sandbox (Incus system container, one per project)
 - **Refresh token invalid:** Flow marks the connection `disconnected` (API `GitHubConnection.state`), pushes
   `githubState: disconnected` with no token; helpers fail with `github_disconnected`; the owner reconnects with the
   device flow.
+- **Flow side** (`internal/credentials`): the API's `createApiKey` stores the subscription token (`claude_token`),
+  the Anthropic key (`anthropic`) or an OpenCode provider key (`opencode_provider`, `<PROVIDER>_API_KEY`) sealed,
+  one per kind and provider; a second replaces the first with a new id and `createdAt`, which is the status the
+  API reports (`getConnections`: kind, label, variable, since when, never the value; no schema addition was
+  needed). The subscription login stores nothing. The whole set is pushed at every bring-up (after a delivery's
+  restart) and, after a change, to every warm sandbox without starting one (one still in setup gets it once its
+  bring-up ends). `Env.revision` is the clock's
+  microseconds, taken before the store is read: it grows across Flow restarts and a push from an older read never
+  wins. A value with a control character or past 4 KiB is refused without echo; values reach no log, error, event
+  log, spec file or command line (tests scan the logs of a push; measured in the lab: only the session's
+  `EnvironmentFile` and its host's environment hold it).
 - Encryption at rest: `kit/secret` only compares secrets in constant time; it has no encryption. Flow seals with
-  AES-256-GCM (standard library) behind `credentials.Sealer`, key from `BACKEND_SEAL_KEY` (32 bytes, base64). Key
-  rotation is not built: a new key makes every sealed value unreadable (flowd tokens then need clearing, see 3).
+  AES-256-GCM (standard library) behind `credentials.Sealer`, key from `BACKEND_SEAL_KEY` (32 bytes, base64),
+  required in oidc mode; dev mode without it makes a key per start and says so loudly (stored credentials are lost
+  at the next restart). Key rotation is not built: a new key makes every sealed value unreadable; a stored
+  credential is then skipped with a warning and left out of `getConnections` (store it again), a flowd token is
+  made again (see 3).
 
 ### 6. Child-session tools
 
@@ -237,7 +326,8 @@ sandbox (Incus system container, one per project)
   Flow's). No tool answers permission requests or changes modes. Why stdio: survives flowd restarts (it reconnects
   to `flowd.sock` per call) and needs no port. Rejected: an HTTP MCP endpoint in flowd (a flowd restart breaks the
   MCP session).
-- **Caller identity.** The host gives its agent an env `FLOW_MCP_TOKEN` (random per host start); `flowd mcp` sends
+- **Caller identity.** flowd writes `BACKEND_MCP_TOKEN` (random per host start) into the host unit's environment file;
+  the host puts it only into the MCP server's `env`, not the agent's; `flowd mcp` sends
   it with each call; flowd maps it to the session and raises a control request. Spoofable inside the sandbox (see
   3), so it is a convenience, not a boundary.
 - **Rules, enforced by Flow** on every control request: same project as the sandbox the request came from; the
@@ -314,8 +404,14 @@ lab `flow-net` (report `flow-net-findings.md`, owner's plans), then end to end w
   itself; bridge back but the sandbox cut off (or on another address than its assignment, which is
   `sandbox_unavailable`) → the next bring-up restarts it onto the bridge (`Warm` only reports it). A cached flowd
   connection is handed out only while the instance runs, carries its address and is a port of the bridge.
+- **Limits.** Per sandbox `BACKEND_SANDBOX_MEMORY_MIB` 6144 (one project's full check peaks at about 4 GiB, page
+  cache included; 4 GiB was the floor) and `BACKEND_SANDBOX_CPUS` 4 (half the target host's threads), set at create
+  and again before every start, so the ceiling counts what the instance will run with (0 lifts the limit there). Per session unit (the host
+  and everything its agent runs): `BACKEND_SESSION_MEMORY_MIB` (default the sandbox's less 1 GiB: a check plus
+  Claude Code, with room for flowd, Docker's daemon and a terminal), `BACKEND_SESSION_CPU_PERCENT` (default all but
+  one of the sandbox's CPUs × 100), `BACKEND_SESSION_TASKS_MAX` 4096, `MemorySwapMax=0`; never above the sandbox's.
 - **Memory.** `BACKEND_SANDBOX_MEMORY_TOTAL_MIB` caps the memory limits of all running sandboxes together: a start
-  past it is refused (`sandbox_memory_full`). Incus' project `limits.memory` was rejected as the default: it counts stopped instances too
+  past it is refused (`sandbox_memory_full`); the default 14 GiB holds two 6 GiB sandboxes. Incus' project `limits.memory` was rejected as the default: it counts stopped instances too
   (measured) and would cap how many sandboxes exist; host-setup sets it only with `INCUS_PROJECT_MEMORY=1`.
 
 ## Lifecycles
@@ -330,8 +426,14 @@ turn ended more than the prompt-cache lifetime ago (5 minutes unless the 1-hour 
 [env-vars](https://code.claude.com/docs/en/env-vars); Flow never overrides it).
 
 **Session.** create (DB row, name, branch) → worktrees on fresh `origin/<default>` → `PUT /v1/sessions/{id}` starts the
-host → `session.started` → turns → idle with the host alive (token economy) → archive stops the host and removes
-worktrees; the log stays. A stopped host restarts on the next message with resume and logs `session.resumed`.
+host → `session.started` → turns → idle with the host alive (token economy) → archive (`DELETE /api/sessions/{id}`)
+closes the session's terminal (a shell would keep its credential), stops the host and removes worktrees, then
+publishes `session.removed` and ends the session's follower; the log stays. Archiving never starts a sandbox (owner
+decision): in a stopped one nothing of the session runs, so the row is marked archived with `cleanup_pending`, and
+the sandbox's next bring-up (start, or Flow's reconnect) removes host and worktrees (`sessions.Service.Sweep`). Only
+"not warm" or "no sandbox" counts as stopped; any other failure to reach the sandbox fails the archive. Archive and
+whatever starts the session's host or terminal hold one per-session lock, so a send in flight cannot recreate them
+after an archive. A stopped host restarts on the next message with resume and logs `session.resumed`.
 
 ## Failures
 
@@ -341,6 +443,7 @@ worktrees; the log stays. A stopped host restarts on the next message with resum
 | Flow restart or update | hosts keep running turns; control requests wait | Flow reads `last_seq` per session, re-dials flowd, re-follows from there; re-reads pending control requests |
 | flowd restart or update | no unit is its child; turns go on, logs keep growing | flowd reattaches by unit name and socket; Flow's streams reconnect |
 | host crash | sidecar dies with it; turn lost | flowd restarts it on the next message: `turn.ended {lost}`, open requests `expired`, `session.resumed` |
+| sidecar exit or broken pipe | during a turn: `notice {message_may_not_have_run}`, `turn.ended {error, adapter_exited}`, open request `expired`; between turns: nothing | the host lives on; the owner re-sends if needed; the next message starts a sidecar with `resume` |
 | opencode serve restart | the host's event stream breaks | host reconnects, resyncs from the message list (OpenCode's `/api/event` has no replay, [openapi.json](https://github.com/anomalyco/opencode/blob/dev/packages/protocol/openapi.json)) |
 | sandbox stop | all units end | on start, hosts are not started until needed; logs show `lost` turns |
 | host (machine) reboot | Incus starts nothing by default; Flow reconciles | sandboxes start on demand; `BootID` change tells Flow every unit is gone |

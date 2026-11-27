@@ -63,8 +63,9 @@ A session can change model between turns (`settings.set` → `session.settings`)
 grew most since the previous `result`, so subagents on a cheaper model do not take the turn; OpenCode: the steps'
 model, **provisional**). Claude's `total_cost_usd` and `modelUsage` are cumulative over the SDK process, not per
 turn: the sidecar emits the difference to the previous `result` (a total that drops, `/clear`, counts from zero).
-After a resume it needs the session's earlier cost as `priorCostUsd` in its start spec; without it (the host does
-not send one yet) the first turn after the resume reports no `costUsd`. Readers take `turn.ended.model`, else `turn.started.model`, else the last `session.settings` /
+After a resume the host passes the session's earlier cost as `priorCostUsd` in the start spec (the sum of the
+reported `turn.ended.costUsd` after the `notice {provider_session}` marker), so the first turn after a resume
+reports its own cost, not the session's. Readers take `turn.ended.model`, else `turn.started.model`, else the last `session.settings` /
 `session.started` model. `usage`, `costUsd` and `durationMs` stay as they are; an absent `costUsd` means the
 provider reported none, not a free turn (the generator binds optional numbers as Go pointers for this).
 
@@ -173,6 +174,8 @@ no sentence depends on them. Codes in use:
 | `sidecar_busy` | error | sidecar | a `message.send` while a turn runs: the host's queue should have held it (`messageId`) |
 | `sidecar_reply_not_pending` | warning | sidecar | a reply to a request the sidecar no longer holds (`requestId`, `reason`: `answered`, `unknown`, or `withdrawn` for one the SDK withdrew while it was shown) |
 | `github_token_expired` | not built yet | flowd | git or gh ran with an expired token (docs/architecture.md, credentials) |
+| `message_may_not_have_run` | error | host (Claude adapter) | the sidecar exited or its pipe broke during a turn; the message is never re-sent by itself (`messageId`) |
+| `provider_session` | info | host (Claude adapter) | the provider has the session (the first `system/init` of a turn): the marker resume and `priorCostUsd` are read from; readers show no row for it |
 
 ## OpenCode (V2 API) → Flow
 
