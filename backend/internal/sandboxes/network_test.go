@@ -303,6 +303,62 @@ func TestEnsure_bridgeRecreated(t *testing.T) {
 	}
 }
 
+// A running sandbox restarted onto a re-made bridge is not admitted again: with the memory now full it would stay
+// stopped, its turns gone.
+func TestEnsure_relocationRestartIsNotRefused(t *testing.T) {
+	r := newRig(t)
+	r.secondProject(t)
+	ctx := t.Context()
+	for _, p := range []string{pid, pid2} {
+		if _, err := r.m.Ensure(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.m.MemoryTotal, r.m.MemoryHeadroom = 4<<30, 1<<30
+	r.rt.InUse = map[string]int64{InstanceName(pid2): 3<<30 + 1} // a new start would be refused
+	r.rt.RemoveBridge("flowbr0")
+	r.rt.AddBridge("flowbr0")
+	r.m.Forget(pid)
+	if _, err := r.m.Ensure(ctx, pid); err != nil {
+		t.Fatalf("relocation restart: %v", err)
+	}
+	if in, _ := r.rt.Instance(InstanceName(pid)); in.Status != sandbox.StatusRunning || !r.rt.Reachable(InstanceName(pid)) {
+		t.Errorf("after the relocation: %s", in.Status)
+	}
+}
+
+// Admitted creates and starts in flight each hold a headroom of their own until released: two at once cannot share
+// the one that fits.
+func TestAdmit_reservesHeadroomInFlight(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	r.m.MemoryTotal, r.m.MemoryHeadroom = 3<<30-1, 1<<30 // room for two headrooms, not three
+	releaseA, err := r.m.admit(ctx, "a", "create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseB, err := r.m.admit(ctx, "b", "create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.m.admit(ctx, "c", "create"); !errors.Is(err, ErrMemoryCeiling) {
+		t.Fatalf("third in flight: %v", err)
+	}
+	// An instance's own reservation (its create) does not count against its start.
+	releaseA2, err := r.m.admit(ctx, "a", "start")
+	if err != nil {
+		t.Fatalf("a's start behind its own create: %v", err)
+	}
+	releaseA2()
+	releaseA()
+	releaseB()
+	if release, err := r.m.admit(ctx, "c", "create"); err != nil {
+		t.Errorf("after the others finished: %v", err)
+	} else {
+		release()
+	}
+}
+
 // deliveredFlowd answers only once this build's flowd was pushed into the instance.
 type deliveredFlowd struct {
 	reachable

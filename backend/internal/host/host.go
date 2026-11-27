@@ -837,9 +837,13 @@ func (h *Host) Pump(ctx context.Context) error {
 	out := make(chan event.EventDraft, 64)
 	errc := make(chan error, 1)
 	go func() { errc <- h.cfg.Adapter.Run(ctx, out) }()
-	// Messages queued when the previous host died run first, in their order; a newer one queues behind them.
+	// Messages queued when the previous host died run first, in their order; a newer one queues behind them. Not
+	// for a host started only to log a lost turn after a sandbox start: nobody asked for a turn, so they wait for
+	// the owner (Flow stops that host again at once; the next start drains).
 	h.mu.Lock()
-	h.drain()
+	if h.cfg.ResumeReason != event.ResumeReasonSandboxStart {
+		h.drain()
+	}
 	h.mu.Unlock()
 	for {
 		select {

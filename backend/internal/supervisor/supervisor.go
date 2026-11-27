@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -525,6 +526,9 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 	if err := checkProvider(sp); err != nil {
 		return flowdproto.SessionState{}, err
 	}
+	if sp.ResumeReason != "" && !slices.Contains(event.ResumeReasonValues, sp.ResumeReason) {
+		return flowdproto.SessionState{}, invalid("resume reason %q", sp.ResumeReason)
+	}
 	unit := layout.HostUnit(sp.ID)
 	defer s.lock(unit)()
 	st, err := s.o.Units.State(ctx, unit)
@@ -592,6 +596,9 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 	specFile := s.p(layout.SessionSpecFile(sp.ID))
 	argv := append([]string{s.o.Exe, "host", "--session", sp.ID, "--spec", specFile, "--log",
 		s.p(layout.EventLog(sp.ID)), "--socket", s.p(layout.HostSocket(sp.ID))}, s.o.HostArgs...)
+	if sp.ResumeReason != "" {
+		argv = append(argv, "--resume", string(sp.ResumeReason))
+	}
 	var props []string
 	if sp.Limits.MemoryMaxBytes > 0 {
 		props = append(props, fmt.Sprintf("MemoryMax=%d", sp.Limits.MemoryMaxBytes))
@@ -632,7 +639,9 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 			}
 		}
 	}
-	return s.Session(ctx, sp.ID)
+	state, err := s.Session(ctx, sp.ID)
+	state.Started = err == nil
+	return state, err
 }
 
 // announceWorktree has the host log worktree.added; the command id is the worktree's, so a repeat is a duplicate.

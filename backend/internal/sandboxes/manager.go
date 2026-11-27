@@ -101,10 +101,14 @@ type Manager struct {
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
 	apis  map[string]cachedAPI
-	// addrMu guards setting up Addresses (addrReady); startMu makes the memory check and the start one step, so
-	// two projects starting at once cannot both take the same headroom.
-	addrMu, startMu sync.Mutex
-	addrReady       bool
+	// addrMu guards setting up Addresses (addrReady).
+	addrMu    sync.Mutex
+	addrReady bool
+	// admitMu makes each memory check and its reservation one step. reserved counts, per instance, the creates and
+	// starts admitted and not finished yet: each holds MemoryHeadroom of its own (a sandbox just started measures
+	// almost nothing), so concurrent ones cannot all take the same headroom.
+	admitMu  sync.Mutex
+	reserved map[string]int
 	// volMu guards volReady: the home volume exists.
 	volMu    sync.Mutex
 	volReady bool
@@ -241,17 +245,20 @@ func (m *Manager) instanceAddresses(ctx context.Context) (map[string]netip.Addr,
 }
 
 // admit checks that the instance name may be created or started (step): the working sets of all other instances
-// that are not stopped (Runtime.MemoryInUse), plus MemoryHeadroom, fit under MemoryTotal. An instance the metrics
-// do not measure (they failed, or it is missing from them) counts with its cgroup usage page cache included
-// (State.MemoryBytes): too much rather than nothing, so a broken measurement neither admits everything nor blocks
-// for good. An instance list that fails refuses the start (sandbox_unavailable); the next start asks again.
-func (m *Manager) admit(ctx context.Context, name, step string) error {
+// that are not stopped (Runtime.MemoryInUse), plus MemoryHeadroom for it and for every other create or start in
+// flight (reserved), fit under MemoryTotal. An instance the metrics do not measure (they failed, or it is missing
+// from them) counts with its cgroup usage page cache included (State.MemoryBytes): too much rather than nothing, so
+// a broken measurement neither admits everything nor blocks for good. An instance list that fails refuses the start
+// (sandbox_unavailable); the next start asks again. Admitted, it holds its headroom until release is called.
+func (m *Manager) admit(ctx context.Context, name, step string) (release func(), err error) {
 	if m.MemoryTotal <= 0 {
-		return nil
+		return func() {}, nil
 	}
+	m.admitMu.Lock()
+	defer m.admitMu.Unlock()
 	list, err := m.Runtime.List(ctx)
 	if err != nil {
-		return fmt.Errorf("measuring sandbox memory: %w", err)
+		return nil, fmt.Errorf("measuring sandbox memory: %w", err)
 	}
 	inUse, err := m.Runtime.MemoryInUse(ctx)
 	used := int64(0)
@@ -276,15 +283,32 @@ func (m *Manager) admit(ctx context.Context, name, step string) error {
 		m.Log.Info("sandbox memory: not in the metrics yet, counting usage with page cache", "sandbox", name,
 			"unmeasured", unmeasured)
 	}
-	attrs := []any{"sandbox", name, "step", step, "measured_mib", used >> 20, "headroom_mib", m.MemoryHeadroom >> 20,
-		"total_mib", m.MemoryTotal >> 20}
-	if used+m.MemoryHeadroom > m.MemoryTotal {
+	inFlight := 0
+	for n := range m.reserved {
+		if n != name {
+			inFlight++
+		}
+	}
+	headroom := m.MemoryHeadroom * int64(inFlight+1)
+	attrs := []any{"sandbox", name, "step", step, "measured_mib", used >> 20, "headroom_mib", headroom >> 20,
+		"in_flight", inFlight, "total_mib", m.MemoryTotal >> 20}
+	if used+headroom > m.MemoryTotal {
 		m.Log.Warn("sandbox refused: memory full", attrs...)
-		return fmt.Errorf("%w: running sandboxes use %d MiB, with %d MiB headroom past %d MiB", ErrMemoryCeiling,
-			used>>20, m.MemoryHeadroom>>20, m.MemoryTotal>>20)
+		return nil, fmt.Errorf("%w: running sandboxes use %d MiB, with %d MiB headroom past %d MiB", ErrMemoryCeiling,
+			used>>20, headroom>>20, m.MemoryTotal>>20)
 	}
 	m.Log.Info("sandbox admitted", attrs...)
-	return nil
+	if m.reserved == nil {
+		m.reserved = map[string]int{}
+	}
+	m.reserved[name]++
+	return sync.OnceFunc(func() {
+		m.admitMu.Lock()
+		defer m.admitMu.Unlock()
+		if m.reserved[name]--; m.reserved[name] <= 0 {
+			delete(m.reserved, name)
+		}
+	}), nil
 }
 
 func (m *Manager) projectLock(projectID string) *sync.Mutex {
@@ -498,12 +522,16 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 		return cachedAPI{}, fmt.Errorf("bridge %s: %w", nic.Bridge, err)
 	}
 	st, err := m.Runtime.State(ctx, sb.Instance)
+	releaseCreate := func() {}
 	if errors.Is(err, sandbox.ErrNotFound) {
-		// Before the create (about 40 s): a start refused afterwards would leave a whole instance behind. start
-		// checks again, the authoritative one.
-		if err := m.admit(ctx, sb.Instance, "create"); err != nil {
-			return cachedAPI{}, err
+		// Before the create (about 40 s): a start refused afterwards would leave a whole instance behind. Its headroom
+		// stays reserved until the start below returned; start checks again, the authoritative one.
+		release, aerr := m.admit(ctx, sb.Instance, "create")
+		if aerr != nil {
+			return cachedAPI{}, aerr
 		}
+		defer release()
+		releaseCreate = release
 		err = m.Runtime.Create(ctx, sandbox.Spec{Name: sb.Instance, Image: m.Image, NIC: nic, Nesting: true,
 			Limits: m.limits()})
 		if err != nil {
@@ -530,6 +558,9 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 	if err := m.homeVolume(ctx, sb.Instance); err != nil {
 		return cachedAPI{}, fmt.Errorf("home volume: %w", err)
 	}
+	// restart: a running instance stopped here to move it onto its bridge or address. Its start is not admitted
+	// again: it ran a moment ago, and a refusal would leave it stopped with its turns gone.
+	restart := false
 	if st.Status == sandbox.StatusRunning {
 		if why := m.misplaced(ctx, st, addr); why != nil {
 			if !relocate(why) {
@@ -548,6 +579,7 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 				return cachedAPI{}, fmt.Errorf("stop: %w", err)
 			}
 			st.Status = sandbox.StatusStopped
+			restart = true
 		}
 	}
 	started := false
@@ -556,10 +588,11 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 			return cachedAPI{}, ErrNotWarm
 		}
 		started = true
-		if err := m.start(ctx, st, nic); err != nil {
+		if err := m.start(ctx, st, nic, !restart); err != nil {
 			return cachedAPI{}, err
 		}
 	}
+	releaseCreate()
 	api, err := m.greet(ctx, sb, addr, started, t0)
 	return cachedAPI{api: api, addr: addr}, err
 }
@@ -627,12 +660,14 @@ func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, start
 }
 
 // start sets the NIC (the assigned address, also for an instance cloned or made before) and starts the instance,
-// when the measured memory admits it.
-func (m *Manager) start(ctx context.Context, st sandbox.State, nic sandbox.NIC) error {
-	m.startMu.Lock()
-	defer m.startMu.Unlock()
-	if err := m.admit(ctx, st.Name, "start"); err != nil {
-		return err
+// when the measured memory admits it (admit false: a restart of an instance that was running, see bring).
+func (m *Manager) start(ctx context.Context, st sandbox.State, nic sandbox.NIC, admit bool) error {
+	if admit {
+		release, err := m.admit(ctx, st.Name, "start")
+		if err != nil {
+			return err
+		}
+		defer release()
 	}
 	// The configured limits, also for an instance made under other settings.
 	if err := m.Runtime.SetLimits(ctx, st.Name, m.limits()); err != nil {

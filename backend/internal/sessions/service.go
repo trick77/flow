@@ -436,9 +436,11 @@ const (
 
 // CloseLostTurns starts the hosts of the project's sessions whose log ends in an open turn (the row's
 // turn_started_at: a sandbox stop cut it off, turnCutOff), so each host logs that turn lost now (requests expired,
-// turn.ended lost) and an open timeline shows it closed without a message first. Every other host starts on demand.
-// Called after every bring-up, in the Warmed goroutine, so the sandbox turns warm without waiting for it. A host that
-// runs already (a reconnect) is left as it is. Failures are logged; the next message closes the turn then.
+// turn.ended lost, session.resumed sandbox_start) and an open timeline shows it closed without a message first.
+// Such a host leaves queued messages queued (nobody asked for a turn) and is stopped again right after: no idle host
+// stays, and the owner's next message starts one that drains the queue. Every other host starts on demand. Called
+// after every bring-up, in the Warmed goroutine, so the sandbox turns warm without waiting for it. A host that runs
+// already (a reconnect) is left as it is. Failures are logged; the next message closes the turn then.
 func (s *Service) CloseLostTurns(ctx context.Context, projectID string, api flowdproto.API) {
 	list, err := s.Store.List(ctx, ListFilter{ProjectID: projectID})
 	if err != nil {
@@ -461,7 +463,7 @@ func (s *Service) CloseLostTurns(ctx context.Context, projectID string, api flow
 }
 
 // closeLostTurn starts one session's host under the session's lock, asking the row again: an archive or a message
-// may have come first.
+// may have come first. Only a host this call started is stopped again: one that ran already belongs to a message.
 func (s *Service) closeLostTurn(ctx context.Context, api flowdproto.API, id string) {
 	defer s.Lock(id)()
 	ctx, cancel := context.WithTimeout(ctx, lostTurnWait)
@@ -471,15 +473,25 @@ func (s *Service) closeLostTurn(ctx context.Context, api flowdproto.API, id stri
 		return
 	}
 	spec, err := s.Spec(ctx, se)
-	if err == nil {
-		var st flowdproto.SessionState
-		if st, err = api.EnsureSession(ctx, spec); err == nil {
-			s.recordWorktrees(ctx, id, st.Worktrees)
-			s.Log.Info("host started to close a lost turn", "session", id)
-			return
-		}
+	if err != nil {
+		s.Log.Warn("starting a host to close a lost turn", "session", id, "err", err)
+		return
 	}
-	s.Log.Warn("starting a host to close a lost turn", "session", id, "err", err)
+	spec.ResumeReason = event.ResumeReasonSandboxStart
+	st, err := api.EnsureSession(ctx, spec)
+	if err != nil {
+		s.Log.Warn("starting a host to close a lost turn", "session", id, "err", err)
+		return
+	}
+	s.recordWorktrees(ctx, id, st.Worktrees)
+	if !st.Started {
+		return
+	}
+	if err := api.StopSession(ctx, id, false); err != nil && !errors.Is(err, flowdproto.ErrNotFound) {
+		s.Log.Warn("stopping the host that closed a lost turn", "session", id, "err", err)
+		return
+	}
+	s.Log.Info("host started and stopped to close a lost turn", "session", id)
 }
 
 func (s *Service) recordWorktrees(ctx context.Context, id string, states []flowdproto.WorktreeState) {
