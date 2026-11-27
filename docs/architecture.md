@@ -482,8 +482,9 @@ decision): in a stopped one nothing of the session runs, so the row is marked ar
 the sandbox's next bring-up (start, or Flow's reconnect) removes host and worktrees (`sessions.Service.Sweep`). Only
 "not warm" with the instance stopped or gone, or "no sandbox", counts as stopped; a sandbox not warm by the records
 (`failed`, say) whose instance may run, and any other failure to reach the sandbox, fails the archive. A reconnect
-without a start that fails (a fetch, flowd briefly away) leaves a warm sandbox warm for the next try; only one cut
-off from its bridge or on another address is recorded `failed`. Archive and
+to a running warm sandbox that fails (a fetch, flowd briefly away) leaves it warm for the next try, whether the call
+may start the sandbox or not; `failed` is recorded only when it was not warm before, the call had to create, start
+or move its instance, or it is cut off from its bridge or on another address. Archive and
 whatever starts the session's host or terminal hold one per-session lock, so a send in flight cannot recreate them
 after an archive. A stopped host restarts on the next message with resume and logs `session.resumed`.
 
@@ -530,10 +531,13 @@ after an archive. A stopped host restarts on the next message with resume and lo
   a Rebuild (decided; this document's earlier "rerun when the hash changed" is dropped), and a repository added to
   the project runs its script when its checkout is first cloned. A sandbox made before setup scripts existed runs
   them once, at its next start. `getSetupLog` reads the jobs in project order without the project's lock (the
-  bring-up holds it): a header line per repository, numbered across all; 1000 lines per answer; for `setup`, `warm`
+  bring-up holds it): a header line per repository, numbered across all; 1000 lines per answer, from `after` or the
+  last `tail` lines (the UI reads the end first: a failed script's error is there); for `setup`, `warm`
   and `failed` only (`sandbox_unavailable` otherwise). Config sync, the other job kind, answers `not_implemented`.
 - Delete and rebuild never wait for a bring-up: a project lock still held after `LockWait` (2 s) answers
   `sandbox_busy` (`tryLock`). The short wait lets a `Warm` (session followers every 2 s, an environment push) pass.
+  `Warm` never waits behind a bring-up that may start the sandbox: it answers "not warm, may run" at once (the
+  environment push alone waits, to follow the bring-up); every other wait for the lock ends when its caller leaves.
   Under the lock both count the open sessions again, and the delete's transaction removes only archived sessions
   and fails with `project_has_sessions` while another is left: a session made after the API's count is never lost.
 - `Manager.Setup` records `setup` before its bring-up starts (a new row, or a stopped or failed one; skipped while a
