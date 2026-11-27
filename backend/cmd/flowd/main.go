@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/trick77/flow/internal/host"
 	"github.com/trick77/flow/internal/supervisor"
+	"github.com/trick77/flow/internal/terminals/term"
 )
 
 func main() {
@@ -31,6 +33,14 @@ func start() error {
 	defer stop()
 	if len(os.Args) > 1 && os.Args[1] == "host" {
 		return host.Run(ctx, os.Args[2:], version.String(), slog.Default())
+	}
+	if len(os.Args) > 1 && os.Args[1] == "term" {
+		return term.Run(ctx, os.Args[2:], slog.Default())
+	}
+	if len(os.Args) > 1 {
+		// Never the supervisor by accident (flowd.service runs it without arguments): an agent starting "flowd mcp"
+		// before it exists must fail as that, not try to become a second flowd.
+		return fmt.Errorf("flowd: unknown subcommand %q", os.Args[1])
 	}
 	return supervisor.Run(ctx, slog.Default(), version.String())
 }

@@ -28,6 +28,11 @@ func Run(ctx context.Context, args []string, version string, log *slog.Logger) e
 	socket := fs.String("socket", "", "command socket (default layout.HostSocket)")
 	pace := fs.Float64("pace", DefaultPace.Factor, "replay pace factor; 0 plays without waiting")
 	resume := fs.String("resume", string(event.ResumeReasonMessage), "session.resumed reason after the first start")
+	var paths Paths
+	fs.StringVar(&paths.Node, "node", layout.NodeBin, "node binary for the sidecar")
+	fs.StringVar(&paths.Sidecar, "sidecar", "", "sidecar bundle directory (default: beside this binary)")
+	fs.StringVar(&paths.Claude, "claude", layout.ClaudeCLI, "Claude Code executable")
+	fs.StringVar(&paths.Settings, "settings", layout.Settings, "Flow settings layer for Claude Code")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -60,11 +65,12 @@ func Run(ctx context.Context, args []string, version string, log *slog.Logger) e
 	} else {
 		p.Factor = *pace
 	}
-	adapter, err := NewDemoReplay(p)
+	var h *Host
+	adapter, err := newAdapter(spec, p, paths, *logPath, version, os.Environ(), func() AgentState { return h.AgentState() }, log)
 	if err != nil {
 		return err
 	}
-	h, err := New(Config{Spec: spec, LogPath: *logPath, Adapter: adapter, Version: version,
+	h, err = New(Config{Spec: spec, LogPath: *logPath, Adapter: adapter, Version: version,
 		ResumeReason: event.ResumeReason(*resume), Log: log})
 	if err != nil {
 		return err
