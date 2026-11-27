@@ -7,6 +7,7 @@ import (
 	"errors"
 	"slices"
 
+	"github.com/trick77/flow/internal/event"
 	"github.com/trick77/flow/internal/store"
 )
 
@@ -24,19 +25,27 @@ func (s SQL) insert(ctx context.Context, q string, args ...any) error {
 
 // RecordTurnStart implements Store.
 func (s SQL) RecordTurnStart(ctx context.Context, t TurnStart) error {
-	return s.insert(ctx, `INSERT INTO metering_turn_starts (id, session_id, project_id, seq, turn, provider, model, at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, t.ID, t.SessionID, t.ProjectID, t.Seq, t.Turn, t.Provider, t.Model,
-		store.Format(t.At))
+	return s.insert(ctx, `INSERT INTO metering_turn_starts (id, session_id, project_id, seq, turn, provider, model, effort,
+		at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, t.ID, t.SessionID, t.ProjectID, t.Seq, t.Turn, t.Provider, t.Model,
+		effortOr(t.Effort), store.Format(t.At))
 }
 
-const turnStartCols = `id, session_id, project_id, seq, turn, provider, model, at, recorded_at`
+// effortOr is e, or default for a row recorded without one.
+func effortOr(e string) string {
+	if e == "" {
+		return string(event.EffortDefault)
+	}
+	return e
+}
+
+const turnStartCols = `id, session_id, project_id, seq, turn, provider, model, effort, at, recorded_at`
 
 func (s SQL) turnStart(ctx context.Context, q string, args ...any) (TurnStart, bool, error) {
 	var t TurnStart
 	var at, recorded string
 	err := s.DB.QueryRowContext(ctx, `SELECT `+turnStartCols+` FROM metering_turn_starts WHERE `+q+ //nolint:gosec // constant fragments
 		` ORDER BY seq DESC LIMIT 1`, args...).Scan(&t.ID, &t.SessionID, &t.ProjectID, &t.Seq, &t.Turn, &t.Provider,
-		&t.Model, &at, &recorded)
+		&t.Model, &t.Effort, &at, &recorded)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TurnStart{}, false, nil
 	}
@@ -89,11 +98,11 @@ func (s SQL) RecordTurn(ctx context.Context, t Turn) error {
 		repos = []byte("[]")
 	}
 	return s.insert(ctx, `INSERT INTO metering_turns (id, session_id, project_id, parent_session_id, seq, turn, repos,
-		provider, model, credential_mode, started_at, ended_at, duration_ms, outcome, error_code, input_tokens,
+		provider, model, effort, credential_mode, started_at, ended_at, duration_ms, outcome, error_code, input_tokens,
 		output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, api_equivalent_usd)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.SessionID, t.ProjectID, t.ParentSessionID, t.Seq, t.Turn, string(repos), t.Provider, t.Model,
-		t.CredentialMode, store.Format(t.StartedAt), store.Format(t.EndedAt), t.DurationMs, t.Outcome, t.ErrorCode,
+		effortOr(t.Effort), t.CredentialMode, store.Format(t.StartedAt), store.Format(t.EndedAt), t.DurationMs, t.Outcome, t.ErrorCode,
 		t.InputTokens, t.OutputTokens, t.CacheReadTokens, t.CacheWriteTokens, t.CostUSD, t.APIEquivalentUSD)
 }
 

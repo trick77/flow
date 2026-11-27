@@ -9,8 +9,10 @@ import type {
 
 import {
   CLAUDE_AUTH_VALUES,
+  EFFORT_VALUES,
   PERMISSION_MODE_VALUES,
   type ClaudeAuth,
+  type Effort,
   type PermissionMode,
 } from "./contract/events.gen.js";
 import { allowsFullAccess, toSDKMode } from "./modes.js";
@@ -32,6 +34,8 @@ export interface StartSpec {
   mode: PermissionMode;
   modeCap?: PermissionMode;
   model?: string;
+  // effort: default (or absent) passes none, so Claude Code uses its own.
+  effort?: Effort;
   // claudeAuth only goes into session.started; flowd sets the credential.
   claudeAuth?: ClaudeAuth;
   // claudeExecutable is the image's Claude Code CLI.
@@ -79,6 +83,9 @@ export function parseStartSpec(v: unknown): StartSpec | string {
     return "modeCap";
   }
   if (s.model !== undefined && typeof s.model !== "string") return "model";
+  if (s.effort !== undefined && !EFFORT_VALUES.includes(s.effort as Effort)) {
+    return "effort";
+  }
   if (
     s.claudeAuth !== undefined &&
     !CLAUDE_AUTH_VALUES.includes(s.claudeAuth as ClaudeAuth)
@@ -129,6 +136,7 @@ export interface QueryState {
   modeCap?: PermissionMode;
   mode: PermissionMode;
   model?: string;
+  effort?: Effort;
   canUseTool: CanUseTool;
   // env is the sidecar's own environment, credentials included (flowd set
   // exactly one); it is passed on and never logged.
@@ -165,6 +173,11 @@ export function buildOptions(spec: StartSpec, st: QueryState): Options {
     stderr: st.stderr,
   };
   if (st.model !== undefined) o.model = st.model;
+  // The SDK's effort option; thinking and maxThinkingTokens stay Claude
+  // Code's (adaptive where the model has it).
+  if (st.effort !== undefined && st.effort !== "default") {
+    o.effort = st.effort;
+  }
   if (spec.mcpServers !== undefined) o.mcpServers = spec.mcpServers;
   if (spec.additionalDirectories !== undefined) {
     o.additionalDirectories = spec.additionalDirectories;

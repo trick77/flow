@@ -22,11 +22,13 @@ const StartKind = "sidecar.start"
 type StartSpec struct {
 	SessionID string `json:"sessionId"`
 	// Resume: the provider has the session already; the sidecar then passes resume instead of sessionId.
-	Resume           bool                 `json:"resume"`
-	Cwd              string               `json:"cwd"`
-	Mode             event.PermissionMode `json:"mode"`
-	ModeCap          event.PermissionMode `json:"modeCap,omitempty"`
-	Model            string               `json:"model,omitempty"`
+	Resume  bool                 `json:"resume"`
+	Cwd     string               `json:"cwd"`
+	Mode    event.PermissionMode `json:"mode"`
+	ModeCap event.PermissionMode `json:"modeCap,omitempty"`
+	Model   string               `json:"model,omitempty"`
+	// Effort: the session's effort; default (or absent) has the sidecar pass none, so Claude Code uses its own.
+	Effort           event.Effort         `json:"effort,omitempty"`
 	ClaudeAuth       event.ClaudeAuth     `json:"claudeAuth,omitempty"`
 	ClaudeExecutable string               `json:"claudeExecutable"`
 	SettingsPath     string               `json:"settingsPath"`
@@ -73,6 +75,7 @@ type State struct {
 	Resume       bool
 	PriorCostUSD float64
 	Model        string
+	Effort       event.Effort
 	Mode         event.PermissionMode
 	ModeCap      event.PermissionMode
 	// Worktrees are the session's worktrees as logged, in the order they were added.
@@ -106,7 +109,7 @@ func NewStartSpec(s Session, st State) StartSpec {
 		mode = event.PermissionModeAsk // the sidecar refuses a start without a mode
 	}
 	spec := StartSpec{SessionID: s.ID, Resume: st.Resume, Cwd: s.Cwd, Mode: mode, ModeCap: st.ModeCap, Model: st.Model,
-		ClaudeAuth: s.ClaudeAuth, ClaudeExecutable: s.ClaudeExecutable, SettingsPath: s.SettingsPath, Version: s.Version}
+		Effort: st.Effort, ClaudeAuth: s.ClaudeAuth, ClaudeExecutable: s.ClaudeExecutable, SettingsPath: s.SettingsPath, Version: s.Version}
 	spec.AdditionalDirectories, spec.AppendSystemPrompt = worktreeLayout(s.Cwd, st.Worktrees)
 	if s.MCPCommand != "" {
 		srv := MCPServer{Type: "stdio", Command: s.MCPCommand, Args: []string{"mcp"}}

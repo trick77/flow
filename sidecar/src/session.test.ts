@@ -80,6 +80,8 @@ interface Ctx {
   interrupted(): Promise<void>;
   modes: string[];
   models: string[];
+  // efforts: each applyFlagSettings effortLevel (null: the model's own).
+  efforts: (string | null)[];
   closed: boolean;
 }
 
@@ -94,6 +96,7 @@ function fakeSDK(scripts: ((ctx: Ctx) => Promise<void>)[]) {
       options,
       modes: [],
       models: [],
+      efforts: [],
       closed: false,
       next: async () => (await it.next()).value as SDKUserMessage | undefined,
       emit: (m) => out.push(m),
@@ -138,6 +141,9 @@ function fakeSDK(scripts: ((ctx: Ctx) => Promise<void>)[]) {
       },
       setModel: async (model?: string) => {
         ctx.models.push(String(model));
+      },
+      applyFlagSettings: async (s: { effortLevel?: string | null }) => {
+        if ("effortLevel" in s) ctx.efforts.push(s.effortLevel ?? null);
       },
       close: () => {
         ctx.closed = true;
@@ -832,6 +838,8 @@ describe("stdio loop against a stand-in SDK", () => {
     expect(parseStartSpec({ ...data, appendSystemPrompt: 1 })).toBe(
       "appendSystemPrompt",
     );
+    expect(typeof parseStartSpec({ ...data, effort: "xhigh" })).toBe("object");
+    expect(parseStartSpec({ ...data, effort: "huge" })).toBe("effort");
   });
 
   it("[docs only] host.shutdown while a permission waits: the request is denied, the turn interrupted, the process ends", async () => {
@@ -1221,6 +1229,78 @@ describe("stdio loop against a stand-in SDK", () => {
     await h.kind("turn.ended");
     await h.close();
     expect(sdk.calls[1].options.model).toBe("claude-opus-5-5");
+  });
+
+  it("an effort starts the query, changes a running one, and default passes none", async () => {
+    const sdk = fakeSDK([
+      async (ctx) => {
+        ctx.emit(result(await ctx.next()));
+        await ctx.next();
+        throw new Error("exited");
+      },
+      async (ctx) => {
+        ctx.emit(result(await ctx.next()));
+        await ctx.next();
+      },
+    ]);
+    const h = harness(sdk.query);
+    h.start({ effort: "high" });
+    h.send("message.send", { messageId: "m1", text: "a", origin: "user" });
+    await h.kind("turn.ended");
+    h.send("settings.set", { effort: "max" });
+    h.send("settings.set", { effort: "default" });
+    await new Promise((r) => setTimeout(r, 20));
+    // Back to default: the query after a restart passes no effort.
+    h.send("message.send", { messageId: "m2", text: "b", origin: "user" });
+    await h.kind("turn.ended");
+    h.send("message.send", { messageId: "m3", text: "c", origin: "user" });
+    await h.kind("turn.ended");
+    await h.close();
+    expect(sdk.calls[0].options.effort).toBe("high");
+    expect(sdk.calls[0].efforts).toEqual(["max", null]);
+    expect(sdk.calls[1].options).not.toHaveProperty("effort");
+  });
+
+  it("a refused effort is put back on record, default included", async () => {
+    const sdk = fakeSDK([
+      async (ctx) => {
+        const u = await ctx.next();
+        ctx.emit(result(u));
+        await ctx.next();
+        throw new Error("exited");
+      },
+      async (ctx) => {
+        const u = await ctx.next();
+        ctx.emit(result(u));
+        await ctx.next();
+      },
+    ]);
+    const query: QueryFn = (params) =>
+      Object.assign(sdk.query(params), {
+        applyFlagSettings: async () => {
+          throw new Error("flag settings refused");
+        },
+      });
+    const h = harness(query);
+    h.start(); // no effort: Claude Code's own
+    h.send("message.send", { messageId: "m1", text: "a", origin: "user" });
+    await h.kind("turn.ended");
+    const cmd = h.send("settings.set", { effort: "low" });
+    expect(await h.kind("notice")).toMatchObject({
+      cmd,
+      data: { code: "effort_change_failed", params: { effort: "low" } },
+    });
+    expect(await h.kind("session.settings")).toMatchObject({
+      cmd,
+      data: { effort: "default" },
+    });
+    h.send("message.send", { messageId: "m2", text: "b", origin: "user" });
+    await h.kind("turn.ended");
+    h.send("message.send", { messageId: "m3", text: "c", origin: "user" });
+    await h.kind("turn.ended");
+    await h.close();
+    expect(sdk.calls[0].options).not.toHaveProperty("effort");
+    expect(sdk.calls[1].options).not.toHaveProperty("effort");
   });
 
   it("review 10: a request too large to show is denied, not left waiting", async () => {

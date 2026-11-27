@@ -2,18 +2,20 @@ package metering
 
 import "time"
 
-// TurnStart is a turn as it started: the provider and model it runs on, fixed then so a model change during the
+// TurnStart is a turn as it started: the provider, model and effort it runs on, fixed then so a change during the
 // turn does not move it.
 //
 // Table: metering_turn_starts
 type TurnStart struct {
-	ID         string
-	SessionID  string
-	ProjectID  string
-	Seq        int64
-	Turn       string
-	Provider   string
-	Model      string
+	ID        string
+	SessionID string
+	ProjectID string
+	Seq       int64
+	Turn      string
+	Provider  string
+	Model     string
+	// Effort is the effort Flow asked for (default: the agent's own), not one the agent may have lowered it to.
+	Effort     string
 	At         time.Time
 	RecordedAt time.Time
 }
@@ -34,6 +36,8 @@ type Turn struct {
 	Provider string
 	// Model is the model used for this turn, not the session's current one.
 	Model string
+	// Effort is the turn's effort as it started (TurnStart.Effort).
+	Effort string
 	// CredentialMode is subscription_token, subscription_login, api_key or provider_key.
 	CredentialMode   string
 	StartedAt        time.Time

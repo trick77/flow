@@ -15,6 +15,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 
 import type {
+  Effort,
   EventDraft,
   PermissionMode,
   PermissionResolved,
@@ -132,6 +133,8 @@ export class Session {
   private mode: PermissionMode;
   private modeCap: PermissionMode | undefined;
   private model: string | undefined;
+  // effort: default (Claude Code's own) when the start named none.
+  private effort: Effort;
   private resumeNext: boolean;
   private q: Query | undefined;
   private input: Channel<SDKUserMessage> | undefined;
@@ -160,6 +163,7 @@ export class Session {
     this.mode = spec.mode;
     this.modeCap = spec.modeCap;
     this.model = spec.model;
+    this.effort = spec.effort ?? "default";
     this.resumeNext = spec.resume;
     this.translator = new Translator({
       cwd: spec.cwd,
@@ -220,7 +224,7 @@ export class Session {
         return;
       case "settings.set":
         if (c.data.modeCap !== undefined) this.modeCap = c.data.modeCap;
-        void this.settings(c.id, c.data.mode, c.data.model);
+        void this.settings(c.id, c.data.mode, c.data.model, c.data.effort);
         return;
       case "host.shutdown":
         void this.shutdown(c.data.whenIdle === true);
@@ -270,6 +274,7 @@ export class Session {
       mode: this.mode,
       ...(this.modeCap !== undefined && { modeCap: this.modeCap }),
       ...(this.model !== undefined && { model: this.model }),
+      effort: this.effort,
       canUseTool,
       env: this.deps.env,
       stderr: this.deps.stderr,
@@ -404,6 +409,7 @@ export class Session {
     cmd: string,
     mode?: PermissionMode,
     model?: string,
+    effort?: Effort,
   ): Promise<void> {
     if (mode !== undefined) {
       const before = this.mode;
@@ -452,6 +458,32 @@ export class Session {
               cmd,
             );
           }
+        }
+      }
+    }
+    if (effort !== undefined) {
+      const before = this.effort;
+      this.effort = effort;
+      if (this.q !== undefined) {
+        try {
+          // No setter for effort: the flag settings layer takes it mid
+          // session, null goes back to the model's own (sdk.d.ts,
+          // applyFlagSettings). It holds from the next request.
+          await this.q.applyFlagSettings({
+            effortLevel: effort === "default" ? null : effort,
+          });
+        } catch (err) {
+          // As for the model, but always put back: default is a value too.
+          this.deps.log(`applyFlagSettings failed: ${errorText(err)}`);
+          this.effort = before;
+          await this.emit(
+            notice("effort_change_failed", "error", { effort }),
+            cmd,
+          );
+          await this.emit(
+            { kind: "session.settings", data: { effort: before } },
+            cmd,
+          );
         }
       }
     }

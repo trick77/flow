@@ -36,8 +36,10 @@ type Mirror struct {
 	ProviderSessionID string
 	TurnStarted       bool
 	TurnEnded         bool
-	// Model, Mode and ModeCap: the settings the log changed (session.settings, an approved plan's mode); "" keeps.
+	// Model, Effort, Mode and ModeCap: the settings the log changed (session.settings, an approved plan's mode); ""
+	// keeps (the agent's own effort is "default", never "").
 	Model   string
+	Effort  string
 	Mode    string
 	ModeCap string
 }

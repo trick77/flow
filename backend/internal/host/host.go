@@ -79,6 +79,9 @@ type Host struct {
 	// model is what the session is set to: the spec's, then the log's last settings change; each turn.started
 	// carries it, so metering attributes a turn to the model it ran on.
 	model string
+	// effort likewise, default (the agent's own) included: each turn.started carries it explicitly, so a turn on the
+	// agent's own effort is never read as the last turn's level.
+	effort event.Effort
 	// mode and modeCap are the session's now (spec, then session.settings and approved plans): what a restarted
 	// agent is started with.
 	mode, modeCap event.PermissionMode
@@ -142,7 +145,10 @@ func New(cfg Config) (*Host, error) {
 	}
 	h := &Host{cfg: cfg, w: w, seen: map[string]bool{}, status: event.SessionStatusIdle, blocks: map[string]string{},
 		subs: map[chan hostproto.Frame]struct{}{}, stop: make(chan struct{}), model: cfg.Spec.Session.Model,
-		mode: cfg.Spec.Session.Mode, modeCap: cfg.Spec.Session.ModeCap}
+		effort: cfg.Spec.Session.Effort, mode: cfg.Spec.Session.Mode, modeCap: cfg.Spec.Session.ModeCap}
+	if h.effort == "" {
+		h.effort = event.EffortDefault // a spec from a Flow before efforts
+	}
 	h.recover(events)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -153,7 +159,8 @@ func New(cfg Config) (*Host, error) {
 	if !h.started {
 		h.started = true
 		h.append(event.KindSessionStarted, "", event.SessionStarted{Provider: s.Session.Provider,
-			ClaudeAuth: s.Session.ClaudeAuth, Model: s.Session.Model, Mode: s.Session.Mode, ModeCap: s.Session.ModeCap,
+			ClaudeAuth: s.Session.ClaudeAuth, Model: s.Session.Model, Effort: h.effort, Mode: s.Session.Mode,
+			ModeCap:           s.Session.ModeCap,
 			ProviderSessionID: s.Session.ID, Cwd: s.AgentDir()})
 		for _, wt := range s.Worktrees {
 			h.append(event.KindWorktreeAdded, "", event.WorktreeAdded{Repo: wt.Repo, Branch: wt.Branch, Path: wt.Path,
@@ -297,6 +304,9 @@ func (h *Host) observe(_ event.EventKind, turn string, p any) {
 		if p.Model != "" {
 			h.model = p.Model
 		}
+		if p.Effort != "" {
+			h.effort = p.Effort
+		}
 		if p.Mode != "" {
 			h.mode = p.Mode
 		}
@@ -341,6 +351,7 @@ type AgentState struct {
 	// spend lands in the next reported turn, as within one agent process.
 	PriorCostUSD float64
 	Model        string
+	Effort       event.Effort
 	// Mode is held to ModeCap.
 	Mode    event.PermissionMode
 	ModeCap event.PermissionMode
@@ -353,7 +364,7 @@ func (h *Host) AgentState() AgentState {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return AgentState{Resume: h.provider, PriorCostUSD: math.Round(h.costUSD*1e9) / 1e9, Model: h.model,
-		Mode: capped(h.mode, h.modeCap), ModeCap: h.modeCap, Worktrees: slices.Clone(h.worktrees)}
+		Effort: h.effort, Mode: capped(h.mode, h.modeCap), ModeCap: h.modeCap, Worktrees: slices.Clone(h.worktrees)}
 }
 
 func (h *Host) broadcast(f hostproto.Frame) {
@@ -551,7 +562,7 @@ func (h *Host) apply(c event.Command, p any) error {
 		}
 		// Written first: a change the log does not hold must not reach the agent either.
 		if err := h.tryAppend(event.KindSessionSettings, cmd, h.turn, event.SessionSettings{Model: p.Model,
-			Mode: p.Mode, ModeCap: p.ModeCap}); err != nil {
+			Effort: p.Effort, Mode: p.Mode, ModeCap: p.ModeCap}); err != nil {
 			return &CommandError{Code: hostproto.CodeInvalid, Detail: err.Error()}
 		}
 		if b, err := json.Marshal(p); err == nil {
@@ -677,7 +688,7 @@ func (h *Host) startTurn(cmd string, m event.MessageSend) error {
 	h.turn, h.gateFailed = turn, false
 	h.turnStart = h.cfg.Now()
 	h.append(event.KindTurnStarted, cmd, event.TurnStarted{MessageID: m.MessageID, Provider: h.cfg.Spec.Session.Provider,
-		Model: h.model})
+		Model: h.model, Effort: h.effort})
 	h.setStatus(event.SessionStatusWorking)
 	id := cmd
 	if id == "" {
