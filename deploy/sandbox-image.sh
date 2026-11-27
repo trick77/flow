@@ -67,7 +67,7 @@ trap 'exit 143' TERM
 # A builder left by a killed run (SIGKILL skips the trap).
 incus delete --force "$BUILDER" </dev/null >/dev/null 2>&1 || true
 log "creating $BUILDER from $SOURCE at $BUILDER_ADDRESS"
-incus init -q "$SOURCE" "$BUILDER" --storage default --no-profiles </dev/null
+incus init -q "$SOURCE" "$BUILDER" --storage "$POOL" --no-profiles </dev/null
 incus config device add "$BUILDER" eth0 nic nictype=bridged parent="$BRIDGE" name=eth0 \
 	security.port_isolation=true security.mac_filtering=true security.ipv4_filtering=true \
 	ipv4.address="$BUILDER_ADDRESS" </dev/null >/dev/null

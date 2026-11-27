@@ -10,12 +10,15 @@
 # Every step checks first, so a teardown that stopped half way can simply be run again. Verification compares
 # with a snapshot taken at the start of this run, not with the setup's old baseline: only Flow's own lines may
 # disappear and nothing may appear, so firewall changes the host made since the setup (a container, a ban) are
-# neither reported nor undone. Then nothing of Flow's may be left, the ban chain must be first in FORWARD again and
-# DOCKER-USER before DOCKER-FORWARD.
+# neither reported nor undone (OTHER_CHURN as in host-setup.sh). Then nothing of Flow's may be left, the ban chain
+# (when the host has one; detected and required as in host-setup.sh, and always when the setup recorded it) must be
+# first in FORWARD again and DOCKER-USER before DOCKER-FORWARD.
 #
 # Refuses while a Docker container is attached to the Docker network (Flow's own: `docker network disconnect`
-# it first). Left in place on purpose: anything the manifest does not list (an Incus that was there before, its
-# pool), firewalld's own *.xml.old backups other than those of Flow's policies.
+# it first), and when the project or pool settings differ from those the manifest records. Sandboxes and volumes
+# are looked for on every pool the setups made or used. Left in place on purpose: anything the manifest does not
+# list (an Incus that was there before, its pool, a project it did not make; the root device the setup added to
+# that project's default profile goes), firewalld's own *.xml.old backups other than those of Flow's policies.
 set -eu
 
 SCRIPT=host-teardown
@@ -34,16 +37,32 @@ for arg in "$@"; do
 done
 [ "$(id -u)" -eq 0 ] || die "run as root"
 [ -f "$MANIFEST" ] || die "no manifest at $MANIFEST: nothing host-setup.sh created is known"
+# With other project or pool settings the teardown would look for sandboxes in the wrong place and then fail half
+# way.
+manifest_settings
+ban_from_manifest
 preflight
 
 has_incus=0
 command -v incus >/dev/null 2>&1 && has_incus=1
 instances=""
 volumes=""
+# Every pool the project may have volumes on: those the setups made or used, and the configured one.
+pools="$({
+	sed -n -e 's/^pool //p' -e 's/^uses pool //p' -e 's/^root-device [^ ]* //p' "$MANIFEST"
+	printf '%s\n' "$POOL"
+} | sort -u)"
 if [ "$has_incus" = 1 ] && incus project show "$PROJECT" </dev/null >/dev/null 2>&1; then
 	instances="$(incus list --project "$PROJECT" --format csv -c n </dev/null | tr '\n' ' ')"
-	volumes="$(incus storage volume list default --project "$PROJECT" --format csv -c tn </dev/null |
-		awk -F, '$1 == "custom" { print $2 }' | tr '\n' ' ')"
+	# Without features.storage.volumes a project lists the default project's volumes: those are not Flow's.
+	if [ "$(incus project get "$PROJECT" features.storage.volumes </dev/null)" = true ]; then
+		for pl in $pools; do
+			incus storage show "$pl" </dev/null >/dev/null 2>&1 || continue
+			list="$(incus storage volume list "$pl" --project "$PROJECT" --format csv -c tn </dev/null)" ||
+				die "cannot list project $PROJECT's volumes on pool $pl"
+			volumes="$volumes$(printf '%s\n' "$list" | awk -F, -v pl="$pl" '$1 == "custom" { printf "%s/%s ", pl, $2 }')"
+		done
+	fi
 fi
 if [ -n "$instances$volumes" ] && [ "$DELETE_SANDBOXES" = 0 ]; then
 	die "project $PROJECT still has sandboxes ($instances) or volumes ($volumes): --delete-sandboxes removes them"
@@ -64,8 +83,8 @@ for i in $instances; do
 	run incus delete --force --project "$PROJECT" "$i" </dev/null
 done
 for v in $volumes; do
-	log "deleting volume $v"
-	run incus storage volume delete default "custom/$v" --project "$PROJECT" </dev/null
+	log "deleting volume ${v#*/} on pool ${v%%/*}"
+	run incus storage volume delete "${v%%/*}" "custom/${v#*/}" --project "$PROJECT" </dev/null
 done
 
 if recorded "unit $RULE_UNIT"; then
@@ -123,9 +142,21 @@ if [ "$has_incus" = 1 ]; then
 			run incus config trust remove "$fp" </dev/null
 		fi
 	fi
+	# The root device a setup added to the project's default profile, also in a project it did not make: no pool
+	# can be deleted while a profile uses it. Only while it is still on the pool the setup put it on.
+	rd_pools="$(sed -n "s/^root-device $PROJECT //p" "$MANIFEST")"
+	if [ -n "$rd_pools" ] && incus project show "$PROJECT" </dev/null >/dev/null 2>&1; then
+		rd_pool="$(incus profile device get default root pool --project "$PROJECT" </dev/null 2>/dev/null || true)"
+		if [ -n "$rd_pool" ] && printf '%s\n' "$rd_pools" | grep -qxF "$rd_pool"; then
+			log "removing the root device (pool $rd_pool) from project $PROJECT's default profile"
+			run incus profile device remove default root --project "$PROJECT" </dev/null
+		fi
+	fi
 	if recorded "project $PROJECT" && incus project show "$PROJECT" </dev/null >/dev/null 2>&1; then
 		log "deleting project $PROJECT"
-		run incus profile device remove default root --project "$PROJECT" </dev/null || true
+		if incus profile device get default root pool --project "$PROJECT" </dev/null >/dev/null 2>&1; then
+			run incus profile device remove default root --project "$PROJECT" </dev/null
+		fi
 		run incus project delete "$PROJECT" </dev/null
 	fi
 	# The listen address Incus had before the first setup: the first one recorded (older manifests wrote
@@ -142,9 +173,12 @@ if [ "$has_incus" = 1 ]; then
 			fi
 		fi
 	fi
-	if recorded "pool default" && incus storage show default </dev/null >/dev/null 2>&1; then
-		run incus storage delete default </dev/null
-	fi
+	# Every pool a setup made (BACKEND_INCUS_POOL may have changed between runs).
+	sed -n 's/^pool //p' "$MANIFEST" | while IFS= read -r pool; do
+		if incus storage show "$pool" </dev/null >/dev/null 2>&1; then
+			run incus storage delete "$pool" </dev/null
+		fi
+	done
 	# Incus keeps an empty `table bridge incus` after its last filtered NIC; remove it only when empty and absent
 	# from the baseline.
 	if nft list table bridge incus >/dev/null 2>&1 && ! nft list table bridge incus | grep -q chain &&
