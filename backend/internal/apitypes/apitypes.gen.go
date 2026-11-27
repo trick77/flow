@@ -139,10 +139,12 @@ type ProfileUpdate struct {
 	ConfigRepo string `json:"configRepo,omitempty"`
 }
 
-// GitHubState: disconnected: no connection (in a poll answer: the code was denied or Flow holds none). pending:
-// a device code is out (in a poll answer: not confirmed yet). connected: Flow holds a renewable authorization.
-// expired: the authorization can no longer be renewed, the owner connects again (in a poll answer: the device
-// code expired).
+// GitHubState: disconnected: no connection (in a poll answer: the code was denied, or Flow holds no code and no
+// connection). pending: a device code is out (in a poll answer: not confirmed yet, or confirmed and the account
+// not read yet). connected: Flow holds a renewable authorization (in a poll answer: also when Flow holds no code
+// but the connection exists, e.g. another tab's poll completed it). expired: the authorization can no longer be
+// renewed, the owner connects again (in a poll answer: the device code expired, or Flow holds no code and the
+// stored authorization is expired).
 type GitHubState string
 
 // GitHubState values.
@@ -225,7 +227,10 @@ type DeviceFlow struct {
 	UserCode        string    `json:"userCode"`
 	VerificationURI string    `json:"verificationUri"`
 	ExpiresAt       time.Time `json:"expiresAt"`
-	IntervalSeconds int       `json:"intervalSeconds"`
+	// Seconds the code has left when this answer was made: a client counts its deadline from it with its own clock,
+	// never from expiresAt (the clocks may differ). The poll's expired answer is the authority.
+	ExpiresInSeconds int `json:"expiresInSeconds"`
+	IntervalSeconds  int `json:"intervalSeconds"`
 }
 
 // GitHubRepo is part of the contract.
@@ -363,6 +368,23 @@ const (
 // PermissionModeValues lists every PermissionMode.
 var PermissionModeValues = []PermissionMode{PermissionModePlan, PermissionModeAsk, PermissionModeAcceptEdits, PermissionModeAuto, PermissionModeFullAccess}
 
+// Effort: The agent's reasoning effort, least to most: low, medium, high, xhigh, max. default: Flow passes none
+// and the agent uses its own (per model). An absent effort reads as default.
+type Effort string
+
+// Effort values.
+const (
+	EffortDefault Effort = "default"
+	EffortLow     Effort = "low"
+	EffortMedium  Effort = "medium"
+	EffortHigh    Effort = "high"
+	EffortXhigh   Effort = "xhigh"
+	EffortMax     Effort = "max"
+)
+
+// EffortValues lists every Effort.
+var EffortValues = []Effort{EffortDefault, EffortLow, EffortMedium, EffortHigh, EffortXhigh, EffortMax}
+
 // SessionStatus is part of the contract.
 type SessionStatus string
 
@@ -402,6 +424,11 @@ type ProviderInfo struct {
 	Models      []ModelInfo  `json:"models"`
 	// Id of the model a new session gets unless the owner picks another; one of models.
 	DefaultModel string `json:"defaultModel,omitempty"`
+	// The effort levels the agent takes, least to most, without default (always offered). Absent: the agent takes no
+	// effort. A model without a level runs it lowered (Claude Code downgrades it).
+	Efforts []Effort `json:"efforts,omitempty"`
+	// The effort a new session gets unless the owner picks another.
+	DefaultEffort Effort `json:"defaultEffort,omitempty"`
 }
 
 // AgentCatalog is part of the contract.
@@ -421,6 +448,7 @@ type SessionSummary struct {
 	Provider   Provider       `json:"provider"`
 	ClaudeAuth ClaudeAuth     `json:"claudeAuth,omitempty"`
 	Model      string         `json:"model"`
+	Effort     Effort         `json:"effort,omitempty"`
 	Mode       PermissionMode `json:"mode"`
 	ModeCap    PermissionMode `json:"modeCap,omitempty"`
 	Status     SessionStatus  `json:"status"`
@@ -497,9 +525,11 @@ type SessionCreate struct {
 	RepoIds   []string `json:"repoIds"`
 	Provider  Provider `json:"provider"`
 	// For provider claude; default subscription_token. Never inferred from which credentials exist.
-	ClaudeAuth ClaudeAuth     `json:"claudeAuth,omitempty"`
-	Model      string         `json:"model"`
-	Mode       PermissionMode `json:"mode"`
+	ClaudeAuth ClaudeAuth `json:"claudeAuth,omitempty"`
+	Model      string     `json:"model"`
+	// Absent: default.
+	Effort Effort         `json:"effort,omitempty"`
+	Mode   PermissionMode `json:"mode"`
 	// Else derived from the first message.
 	Title   string         `json:"title,omitempty"`
 	Message *MessageCreate `json:"message,omitempty"`
@@ -507,9 +537,10 @@ type SessionCreate struct {
 
 // SessionUpdate is part of the contract.
 type SessionUpdate struct {
-	Title string         `json:"title,omitempty"`
-	Model string         `json:"model,omitempty"`
-	Mode  PermissionMode `json:"mode,omitempty"`
+	Title  string         `json:"title,omitempty"`
+	Model  string         `json:"model,omitempty"`
+	Effort Effort         `json:"effort,omitempty"`
+	Mode   PermissionMode `json:"mode,omitempty"`
 }
 
 // SeenMark is part of the contract.

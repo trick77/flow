@@ -66,6 +66,13 @@ export const CLAUDE_AUTH_VALUES: readonly ClaudeAuth[] = ["subscription_token", 
 export type PermissionMode = "plan" | "ask" | "accept_edits" | "auto" | "full_access";
 export const PERMISSION_MODE_VALUES: readonly PermissionMode[] = ["plan", "ask", "accept_edits", "auto", "full_access"];
 
+/**
+ * The agent's reasoning effort, least to most: low, medium, high, xhigh, max. default: Flow passes
+ * none and the agent uses its own (per model). An absent effort reads as default.
+ */
+export type Effort = "default" | "low" | "medium" | "high" | "xhigh" | "max";
+export const EFFORT_VALUES: readonly Effort[] = ["default", "low", "medium", "high", "xhigh", "max"];
+
 export type SessionStatus = "idle" | "working" | "queued" | "approval" | "plan" | "question" | "done" | "failed";
 export const SESSION_STATUS_VALUES: readonly SessionStatus[] = ["idle", "working", "queued", "approval", "plan", "question", "done", "failed"];
 
@@ -73,6 +80,7 @@ export interface SessionStarted {
   provider: Provider;
   claudeAuth?: ClaudeAuth;
   model: string;
+  effort?: Effort;
   mode: PermissionMode;
   modeCap?: PermissionMode;
   providerSessionId?: string;
@@ -90,6 +98,7 @@ export interface SessionResumed {
 /** The session's settings after a change; absent fields did not change. */
 export interface SessionSettings {
   model?: string;
+  effort?: Effort;
   mode?: PermissionMode;
   modeCap?: PermissionMode;
 }
@@ -147,6 +156,11 @@ export interface TurnStarted {
    * between turns.
    */
   model?: string;
+  /**
+   * The effort the session is set to as the turn starts, written by the host (default included), as
+   * model.
+   */
+  effort?: Effort;
 }
 
 /** lost: the agent process ended mid-turn (crash, sandbox stop); the host writes it on its next start. */
@@ -540,6 +554,8 @@ export interface PlanReply {
 
 export interface SettingsSet {
   model?: string;
+  /** default puts the agent back on its own effort; absent keeps the effort. */
+  effort?: Effort;
   mode?: PermissionMode;
   modeCap?: PermissionMode;
 }

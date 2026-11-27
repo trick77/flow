@@ -265,7 +265,7 @@ Indexes:
 
 Go types:
 
-- `metering.TurnStart` (internal/metering): TurnStart is a turn as it started: the provider and model it runs on, fixed then so a model change during the turn does not move it.
+- `metering.TurnStart` (internal/metering): TurnStart is a turn as it started: the provider, model and effort it runs on, fixed then so a change during the turn does not move it.
 
 | Column | Type | Null | Default | PK |
 | --- | --- | --- | --- | --- |
@@ -278,6 +278,7 @@ Go types:
 | `model` | TEXT | no | `''` |  |
 | `at` | TEXT | no |  |  |
 | `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+| `effort` | TEXT | no | `'default'` |  |
 
 Indexes:
 
@@ -314,6 +315,7 @@ Go types:
 | `cost_usd` | REAL | yes |  |  |
 | `api_equivalent_usd` | REAL | yes |  |  |
 | `recorded_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
+| `effort` | TEXT | no | `'default'` |  |
 
 Indexes:
 
@@ -529,6 +531,7 @@ Go types:
 | `updated_at` | TEXT | no | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` |  |
 | `cleanup_pending` | INTEGER | no | `0` |  |
 | `client_id` | TEXT | yes |  |  |
+| `effort` | TEXT | no | `'default'` |  |
 
 Foreign keys:
 
@@ -552,6 +555,7 @@ Checks:
 - `CHECK (status IN ('idle', 'working', 'queued', 'approval', 'plan', 'question', 'done', 'failed'))`
 - `CHECK (unseen IN (0, 1))`
 - `CHECK (cleanup_pending IN (0, 1))`
+- `CHECK (effort IN ('default', 'low', 'medium', 'high', 'xhigh', 'max'))`
 
 ## Diagram
 
@@ -700,6 +704,7 @@ erDiagram
         TEXT model
         TEXT at
         TEXT recorded_at
+        TEXT effort
     }
     metering_turns {
         TEXT id PK
@@ -724,6 +729,7 @@ erDiagram
         REAL cost_usd
         REAL api_equivalent_usd
         TEXT recorded_at
+        TEXT effort
     }
     metering_waits {
         TEXT id PK
@@ -830,6 +836,7 @@ erDiagram
         TEXT updated_at
         INTEGER cleanup_pending
         TEXT client_id
+        TEXT effort
     }
     project_repos }o--|| projects : "project_id"
     sandboxes |o--|| projects : "project_id"
