@@ -23,6 +23,11 @@ import (
 // ErrLocked is Open's refusal when another writer holds the log.
 var ErrLocked = errors.New("eventlog: held by another writer")
 
+// ErrCorrupt is Open's refusal of a log with an unreadable line before its last one: cutting there would drop the
+// valid events after it, skipping it would break the gapless seqs every reader relies on. The log stays untouched for
+// the owner to look at.
+var ErrCorrupt = errors.New("eventlog: unreadable line inside the log")
+
 // SyncInterval bounds how long an appended line may wait for its fsync while a turn runs.
 const SyncInterval = time.Second
 
@@ -86,7 +91,9 @@ func Open(path string) (*Writer, []event.Event, error) {
 	return w, events, nil
 }
 
-// scan reads complete lines from the start; good is the offset after the last complete, parseable line.
+// scan reads complete lines from the start; good is the offset after the last complete, parseable line. An
+// unparseable line is cut (Open truncates to good) only when nothing complete follows it: that is a torn tail. One
+// with complete lines after it is ErrCorrupt.
 func scan(r io.ReadSeeker) ([]event.Event, int64, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return nil, 0, err
@@ -94,16 +101,20 @@ func scan(r io.ReadSeeker) ([]event.Event, int64, error) {
 	br := bufio.NewReaderSize(r, 64<<10)
 	var events []event.Event
 	var good int64
-	for {
+	bad := -1 // number of the first unparseable line, -1 for none
+	for n := 1; ; n++ {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 && line[len(line)-1] == '\n' {
+			if bad >= 0 {
+				return nil, 0, fmt.Errorf("%w: line %d", ErrCorrupt, bad)
+			}
 			e, perr := event.ParseLine(line)
 			if perr != nil {
-				// Garbage from a crash is cut, not an error: Open truncates to good.
-				return events, good, nil //nolint:nilerr // see above
+				bad = n
+			} else {
+				events = append(events, e)
+				good += int64(len(line))
 			}
-			events = append(events, e)
-			good += int64(len(line))
 		}
 		if err == io.EOF {
 			return events, good, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +133,28 @@ func TestOpen_cutsGarbage(t *testing.T) {
 	_ = w.Close()
 	if _, _, err := Open(filepath.Join(path, "x")); err == nil {
 		t.Error("opened a log below a file")
+	}
+}
+
+// Damage in the middle of a log is refused, never repaired by cutting: the valid events after it stay on disk.
+func TestOpen_refusesDamageInTheMiddle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	w, _, _ := Open(path)
+	for range 3 {
+		_, _ = w.Append(ev(t, event.KindSessionStatus, event.SessionStatusChanged{Status: "working"}))
+	}
+	_ = w.Close()
+	b, _ := os.ReadFile(path)
+	lines := strings.SplitAfter(string(b), "\n")
+	damaged := lines[0] + strings.Repeat("x", len(lines[1])-1) + "\n" + lines[2]
+	if err := os.WriteFile(path, []byte(damaged), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Open(path); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("Open over damage in the middle: %v, want ErrCorrupt", err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != damaged {
+		t.Error("Open changed a log with damage in the middle")
 	}
 }
 

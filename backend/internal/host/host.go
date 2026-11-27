@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/trick77/flow/internal/event"
@@ -60,7 +61,10 @@ type Host struct {
 	mu   sync.Mutex
 	seen map[string]bool
 
-	status       event.SessionStatus
+	status event.SessionStatus
+	// model is what the session is set to: the spec's, then the log's last settings change; each turn.started
+	// carries it, so metering attributes a turn to the model it ran on.
+	model        string
 	started      bool
 	turn         string
 	turns        int
@@ -75,6 +79,23 @@ type Host struct {
 	shutdownIdle bool
 	stop         chan struct{}
 	stopped      bool
+	// replying counts command replies not yet written: a stop waits for them, so a host.shutdown's own reply is
+	// not cut off by the connection closing.
+	replying atomic.Int64
+}
+
+// beginReply marks a command reply as in flight; call the result once it is written.
+func (h *Host) beginReply() func() {
+	h.replying.Add(1)
+	return func() { h.replying.Add(-1) }
+}
+
+// waitReplies waits (at most a few seconds: a client that stopped reading must not hold the stop) until every
+// command reply in flight is written.
+func (h *Host) waitReplies() {
+	for deadline := time.Now().Add(3 * time.Second); h.replying.Load() > 0 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // New opens the log, rebuilds the state from it, closes a turn that died with the previous host and announces the
@@ -94,7 +115,7 @@ func New(cfg Config) (*Host, error) {
 		return nil, err
 	}
 	h := &Host{cfg: cfg, w: w, seen: map[string]bool{}, status: event.SessionStatusIdle, blocks: map[string]string{},
-		subs: map[chan hostproto.Frame]struct{}{}, stop: make(chan struct{})}
+		subs: map[chan hostproto.Frame]struct{}{}, stop: make(chan struct{}), model: cfg.Spec.Session.Model}
 	h.recover(events)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -133,6 +154,10 @@ func (h *Host) recover(events []event.Event) {
 			h.started = true
 		case *event.SessionStatusChanged:
 			h.status = p.Status
+		case *event.SessionSettings:
+			if p.Model != "" {
+				h.model = p.Model
+			}
 		case *event.TurnStarted:
 			h.turns++
 			h.turn, h.turnStart = e.Turn, e.TS
@@ -292,6 +317,14 @@ func (h *Host) Command(c event.Command) (duplicate bool, err error) {
 	return false, nil
 }
 
+// Queued reports whether the message with this id waits in the queue: what a message.send's reply tells the sender
+// (also for a duplicate, as long as it waits).
+func (h *Host) Queued(messageID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.ContainsFunc(h.queue, func(m event.MessageSend) bool { return m.MessageID == messageID })
+}
+
 func (h *Host) apply(c event.Command, p any) error {
 	cmd := c.ID
 	switch p := p.(type) {
@@ -357,6 +390,9 @@ func (h *Host) apply(c event.Command, p any) error {
 		h.send(c)
 	case *event.SettingsSet:
 		h.append(event.KindSessionSettings, cmd, event.SessionSettings{Model: p.Model, Mode: p.Mode, ModeCap: p.ModeCap})
+		if p.Model != "" {
+			h.model = p.Model
+		}
 		h.send(c)
 	case *event.WorktreeAdd:
 		h.append(event.KindWorktreeAdded, cmd, event.WorktreeAdded(*p))
@@ -376,7 +412,11 @@ func (h *Host) apply(c event.Command, p any) error {
 			return nil
 		}
 		if h.turn != "" {
+			// The agent is told to stop, and the host records the end now: the adapter's own turn.ended would
+			// arrive after the host is gone, and the next start would call the turn lost (failed, with the
+			// downtime in its duration).
 			h.interrupt(cmd)
+			h.endTurn(event.TurnEnded{Outcome: event.TurnOutcomeInterrupted}, cmd)
 		}
 		h.requestStop()
 	default:
@@ -434,7 +474,8 @@ func (h *Host) startTurn(cmd string, m event.MessageSend) error {
 	h.turns++
 	h.turn = turn
 	h.turnStart = h.cfg.Now()
-	h.append(event.KindTurnStarted, cmd, event.TurnStarted{MessageID: m.MessageID})
+	h.append(event.KindTurnStarted, cmd, event.TurnStarted{MessageID: m.MessageID, Provider: h.cfg.Spec.Session.Provider,
+		Model: h.model})
 	h.setStatus(event.SessionStatusWorking)
 	id := cmd
 	if id == "" {
@@ -548,18 +589,90 @@ func (h *Host) Draft(d event.EventDraft) {
 			delete(h.blocks, p.BlockID)
 			h.blockOrder = slices.DeleteFunc(h.blockOrder, func(id string) bool { return id == p.BlockID })
 		}
+	case event.KindPermissionResolved, event.KindQuestionResolved, event.KindPlanResolved:
+		if !h.withdraw(d) {
+			return
+		}
+	case event.KindPermissionRequested, event.KindQuestionAsked, event.KindPlanProposed:
+		h.request(d)
+		return
 	}
 	h.write(event.Event{V: event.Version, TS: h.cfg.Now().UTC(), Session: h.cfg.Spec.Session.ID, Kind: d.Kind,
 		Turn: h.turn, ParentTool: d.ParentTool, Cmd: d.Cmd, Data: d.Data})
+	if _, ok := resolvedOf[d.Kind]; ok && h.turn != "" {
+		h.setStatus(event.SessionStatusWorking) // a withdrawn request: the turn goes on
+	}
+}
+
+// request takes a permission, question or plan request from the adapter; callers hold mu. It waits for the owner
+// only when it is in the log inside a turn: a request nobody can see (its event not written) or that nothing would
+// ever expire (no turn open) would leave the session waiting for good, so the adapter is told no at once instead.
+func (h *Host) request(d event.EventDraft) {
 	var req struct {
 		RequestID string `json:"requestId"`
 	}
-	status := map[event.EventKind]event.SessionStatus{event.KindPermissionRequested: event.SessionStatusApproval,
-		event.KindQuestionAsked: event.SessionStatusQuestion, event.KindPlanProposed: event.SessionStatusPlan}
-	if s, ok := status[d.Kind]; ok && json.Unmarshal(d.Data, &req) == nil {
-		h.pendingID, h.pendingKind = req.RequestID, d.Kind
-		h.setStatus(s)
+	_ = json.Unmarshal(d.Data, &req)
+	if h.turn == "" || req.RequestID == "" {
+		h.cfg.Log.Warn("adapter request outside a turn denied", "kind", d.Kind, "request", req.RequestID)
+		h.refuse(d.Kind, req.RequestID)
+		return
 	}
+	err := h.tryWrite(event.Event{V: event.Version, TS: h.cfg.Now().UTC(), Session: h.cfg.Spec.Session.ID, Kind: d.Kind,
+		Turn: h.turn, ParentTool: d.ParentTool, Cmd: d.Cmd, Data: d.Data})
+	if err != nil {
+		h.cfg.Log.Error("adapter request not logged, denied", "kind", d.Kind, "request", req.RequestID, "err", err)
+		h.refuse(d.Kind, req.RequestID)
+		return
+	}
+	h.pendingID, h.pendingKind = req.RequestID, d.Kind
+	h.setStatus(map[event.EventKind]event.SessionStatus{event.KindPermissionRequested: event.SessionStatusApproval,
+		event.KindQuestionAsked: event.SessionStatusQuestion, event.KindPlanProposed: event.SessionStatusPlan}[d.Kind])
+}
+
+// refuse answers a request for the owner, who never saw it: deny, reject, or an empty answer that says so.
+func (h *Host) refuse(kind event.EventKind, requestID string) {
+	const why = "This request could not be shown to the owner."
+	var c event.Command
+	var err error
+	id := "refuse-" + requestID
+	switch kind {
+	case event.KindPermissionRequested:
+		c, err = event.NewCommand(id, h.cfg.Spec.Session.ID, event.CmdPermissionReply,
+			event.PermissionReply{RequestID: requestID, Decision: event.ReplyDecisionDeny, Message: why})
+	case event.KindQuestionAsked:
+		c, err = event.NewCommand(id, h.cfg.Spec.Session.ID, event.CmdQuestionReply,
+			event.QuestionReply{RequestID: requestID, Text: why})
+	default:
+		c, err = event.NewCommand(id, h.cfg.Spec.Session.ID, event.CmdPlanReply,
+			event.PlanReply{RequestID: requestID, Decision: event.PlanReplyDecisionRejected, Feedback: why})
+	}
+	if err == nil {
+		h.send(c)
+	}
+}
+
+// resolvedOf is the request kind each resolution closes.
+var resolvedOf = map[event.EventKind]event.EventKind{event.KindPermissionResolved: event.KindPermissionRequested,
+	event.KindQuestionResolved: event.KindQuestionAsked, event.KindPlanResolved: event.KindPlanProposed}
+
+// withdraw takes an adapter's resolution of a request: only "expired" for the request the host holds open (the
+// provider withdrew it, e.g. the SDK aborted its canUseTool). It frees the slot, so the next request can be shown
+// and the session works again; callers hold mu. Anything else is dropped: the host alone resolves requests on the
+// owner's reply, and a second resolution of one request would contradict the first.
+func (h *Host) withdraw(d event.EventDraft) bool {
+	var r struct {
+		RequestID string `json:"requestId"`
+		Decision  string `json:"decision"`
+		Outcome   string `json:"outcome"`
+	}
+	expired := json.Unmarshal(d.Data, &r) == nil &&
+		(r.Decision == string(event.PermissionDecisionExpired) || r.Outcome == string(event.QuestionOutcomeExpired))
+	if !expired || r.RequestID == "" || h.pendingID != r.RequestID || h.pendingKind != resolvedOf[d.Kind] {
+		h.cfg.Log.Warn("adapter resolution dropped", "kind", d.Kind, "request", r.RequestID)
+		return false
+	}
+	h.pendingID, h.pendingKind = "", ""
+	return true
 }
 
 func (h *Host) live(d event.EventDraft) {

@@ -124,7 +124,11 @@ func (s Systemd) List(ctx context.Context, glob string) ([]string, error) {
 }
 
 // Stop implements Units.
+// A unit that is not loaded (never started, or collected after it ended) is stopped already.
 func (s Systemd) Stop(ctx context.Context, unit string) error {
 	_, err := s.Run.Run(ctx, Cmd{Name: "systemctl", Args: []string{"stop", unit}})
+	if err != nil && strings.Contains(err.Error(), "not loaded") {
+		return nil
+	}
 	return err
 }

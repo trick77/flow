@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -309,10 +310,7 @@ func (s *Supervisor) addWorktree(ctx context.Context, session string, w flowdpro
 		}
 		checkout := s.p(layout.Checkout(name))
 		unlock := s.lock(checkout)
-		_, err := s.git(ctx, checkout, "worktree", "add", "--quiet", "-b", w.Branch, dir, w.BaseRef)
-		if err != nil && strings.Contains(err.Error(), "already exists") {
-			_, err = s.git(ctx, checkout, "worktree", "add", "--quiet", dir, w.Branch)
-		}
+		err := s.newWorktree(ctx, checkout, dir, w)
 		unlock()
 		if err != nil {
 			return st, err
@@ -326,8 +324,43 @@ func (s *Supervisor) addWorktree(ctx context.Context, session string, w flowdpro
 	return st, nil
 }
 
+// readSpec reads a session's spec. Every route that takes a session id comes through here (or dialHost), so this is
+// where an id that is no layout name (an encoded "../" arrives unescaped in the path value) is refused before it
+// becomes a file path.
+// newWorktree makes a worktree on a new branch from the freshly fetched base; callers hold the checkout's lock. A
+// branch of that name left by an earlier session is never taken over as it is: it would put the new session on a
+// stale commit while its recorded base says otherwise. One without commits of its own (all reachable from the base)
+// is reset to the base; one with commits of its own is refused and kept, since only the owner may drop work.
+func (s *Supervisor) newWorktree(ctx context.Context, checkout, dir string, w flowdproto.WorktreeSpec) error {
+	_, err := s.git(ctx, checkout, "worktree", "add", "--quiet", "-b", w.Branch, dir, w.BaseRef)
+	if err == nil || !strings.Contains(err.Error(), "a branch named '"+w.Branch+"' already exists") {
+		return err
+	}
+	own, err := s.ownCommits(ctx, checkout, w.BaseRef, w.Branch)
+	if err != nil {
+		return err
+	}
+	if own > 0 {
+		return invalid("branch %s holds %d commits not in %s: left for the owner, not reused", w.Branch, own, w.BaseRef)
+	}
+	_, err = s.git(ctx, checkout, "worktree", "add", "--quiet", "-B", w.Branch, dir, w.BaseRef)
+	return err
+}
+
+// ownCommits counts the commits on branch that its base does not reach.
+func (s *Supervisor) ownCommits(ctx context.Context, checkout, base, branch string) (int, error) {
+	out, err := s.git(ctx, checkout, "rev-list", "--count", base+".."+"refs/heads/"+branch)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(out)
+}
+
 func (s *Supervisor) readSpec(id string) (host.Spec, error) {
 	var sp host.Spec
+	if !layout.ValidName(id) {
+		return sp, invalid("session id %q", id)
+	}
 	b, err := os.ReadFile(s.p(layout.SessionSpecFile(id)))
 	if errors.Is(err, os.ErrNotExist) {
 		return sp, fmt.Errorf("%w: session %s", flowdproto.ErrNotFound, id)
@@ -355,15 +388,27 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 	if old, err := s.readSpec(sp.ID); err == nil {
 		spec.Worktrees = old.Worktrees
 	}
-	if err := s.claim(sp.Name, sp.ID); err != nil {
-		return flowdproto.SessionState{}, err
-	}
 	for _, dir := range []string{s.p(layout.SessionDir(sp.Name)), filepath.Dir(s.p(layout.EventLog(sp.ID))),
 		filepath.Dir(s.p(layout.HostSocket(sp.ID)))} {
 		if err := s.mkdirAgent(dir); err != nil {
 			return flowdproto.SessionState{}, err
 		}
 	}
+	// The spec is written before the claim and again after every worktree, so whatever this call made is in it when
+	// a later step fails: stop-with-remove works from the spec and undoes it all.
+	if err := s.writeSpec(spec); err != nil {
+		return flowdproto.SessionState{}, err
+	}
+	if err := s.claim(sp.Name, sp.ID); err != nil {
+		return flowdproto.SessionState{}, err
+	}
+	// A host that resumes an existing log logs no worktree.added for its spec (only a first start does): worktrees
+	// added now while it was down get theirs as commands once it runs.
+	resumed := false
+	if fi, err := os.Stat(s.p(layout.EventLog(sp.ID))); err == nil && fi.Size() > 0 {
+		resumed = true
+	}
+	var added []flowdproto.WorktreeState
 	for _, w := range sp.Worktrees {
 		if hasWorktree(spec.Worktrees, w.Repo) {
 			continue
@@ -373,9 +418,10 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 			return flowdproto.SessionState{}, err
 		}
 		spec.Worktrees = append(spec.Worktrees, st)
-	}
-	if err := s.writeSpec(spec); err != nil {
-		return flowdproto.SessionState{}, err
+		added = append(added, st)
+		if err := s.writeSpec(spec); err != nil {
+			return flowdproto.SessionState{}, err
+		}
 	}
 	specFile := s.p(layout.SessionSpecFile(sp.ID))
 	argv := append([]string{s.o.Exe, "host", "--session", sp.ID, "--spec", specFile, "--log",
@@ -405,7 +451,24 @@ func (s *Supervisor) EnsureSession(ctx context.Context, sp flowdproto.SessionSpe
 		}
 	}
 	s.o.Log.Info("host started", "session", sp.ID, "unit", unit)
+	if resumed {
+		for _, st := range added {
+			if err := s.announceWorktree(ctx, sp.ID, st); err != nil {
+				return flowdproto.SessionState{}, err
+			}
+		}
+	}
 	return s.Session(ctx, sp.ID)
+}
+
+// announceWorktree has the host log worktree.added; the command id is the worktree's, so a repeat is a duplicate.
+func (s *Supervisor) announceWorktree(ctx context.Context, id string, st flowdproto.WorktreeState) error {
+	c, err := event.NewCommand("wt-"+id+"-"+strings.ReplaceAll(st.Repo, "/", "-"), id, event.CmdWorktreeAdd,
+		event.WorktreeAdd{Repo: st.Repo, Branch: st.Branch, Path: st.Path, BaseRef: st.BaseRef, BaseSHA: st.BaseSHA})
+	if err == nil {
+		_, err = s.Command(ctx, c)
+	}
+	return err
 }
 
 func hasWorktree(ws []flowdproto.WorktreeState, repo string) bool {
@@ -463,18 +526,52 @@ func (s *Supervisor) StopSession(ctx context.Context, id string, remove bool) er
 	if !remove {
 		return nil
 	}
+	// Safe to run again after any partial run: a worktree already gone counts as removed.
 	for _, w := range sp.Worktrees {
 		dir, _ := repoDir(w.Repo)
 		checkout := s.p(layout.Checkout(dir))
-		if _, err := s.git(ctx, checkout, "worktree", "remove", "--force", s.p(w.Path)); err != nil {
+		unlock := s.lock(checkout)
+		err := s.removeWorktree(ctx, checkout, s.p(w.Path), w)
+		unlock()
+		if err != nil {
 			return err
 		}
 	}
-	// The worktrees are gone: the directory's name may serve another session.
-	if err := os.Remove(s.p(layout.SessionClaim(sp.Session.Name))); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	_ = os.Remove(s.p(sp.Dir)) // only when empty
+	// The worktrees are gone: the directory's name may serve another session. Only this session's claim is freed.
+	claim := s.p(layout.SessionClaim(sp.Session.Name))
+	if b, err := os.ReadFile(claim); err == nil && strings.TrimSpace(string(b)) == id { //nolint:gosec // layout path
+		if err := os.Remove(claim); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
+}
+
+// removeWorktree removes one worktree of a session and its branch; callers hold the checkout's lock. The branch is
+// deleted only when every commit on it is reachable from its base (nothing of its own, or merged since): a branch
+// with commits of its own stays, pushed or not, for the owner to decide.
+func (s *Supervisor) removeWorktree(ctx context.Context, checkout, dir string, w flowdproto.WorktreeState) error {
+	if _, err := os.Stat(dir); err == nil {
+		if _, err := s.git(ctx, checkout, "worktree", "remove", "--force", dir); err != nil {
+			return err
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		if _, err := s.git(ctx, checkout, "worktree", "prune"); err != nil {
+			return err
+		}
+	} else {
+		return err
+	}
+	if _, err := s.git(ctx, checkout, "rev-parse", "--verify", "--quiet", "refs/heads/"+w.Branch); err != nil {
+		return nil //nolint:nilerr // no such branch (removed before): done
+	}
+	own, err := s.ownCommits(ctx, checkout, w.BaseRef, w.Branch)
+	if err != nil || own > 0 {
+		return err
+	}
+	_, err = s.git(ctx, checkout, "branch", "-D", w.Branch)
+	return err
 }
 
 // claim makes session id the owner of the session directory name, or refuses when another id owns it: worktrees
@@ -505,16 +602,13 @@ func (s *Supervisor) AddWorktree(ctx context.Context, id string, w flowdproto.Wo
 	if err != nil || hasWorktree(sp.Worktrees, w.Repo) {
 		return st, err
 	}
-	sp.Worktrees = append(sp.Worktrees, st)
-	if err := s.writeSpec(sp); err != nil {
+	// The spec records the worktree only once the host has logged it: with the host down the call fails and a retry
+	// sends the event again (its command id is the worktree's, so a repeat is a duplicate).
+	if err := s.announceWorktree(ctx, id, st); err != nil {
 		return st, err
 	}
-	c, err := event.NewCommand("wt-"+id+"-"+strings.ReplaceAll(w.Repo, "/", "-"), id, event.CmdWorktreeAdd,
-		event.WorktreeAdd{Repo: st.Repo, Branch: st.Branch, Path: st.Path, BaseRef: st.BaseRef, BaseSHA: st.BaseSHA})
-	if err == nil {
-		_, err = s.Command(ctx, c)
-	}
-	return st, err
+	sp.Worktrees = append(sp.Worktrees, st)
+	return st, s.writeSpec(sp)
 }
 
 // Command implements flowdproto.API: relayed to the session's host.
@@ -530,7 +624,7 @@ func (s *Supervisor) Command(ctx context.Context, c event.Command) (flowdproto.C
 	}
 	switch resp.Error {
 	case "":
-		return flowdproto.CommandResult{ID: c.ID, Duplicate: resp.Duplicate}, nil
+		return flowdproto.CommandResult{ID: c.ID, Duplicate: resp.Duplicate, Queued: resp.Queued}, nil
 	case hostproto.CodeNotPending:
 		return flowdproto.CommandResult{}, fmt.Errorf("%w: %s", flowdproto.ErrNotPending, c.ID)
 	case hostproto.CodeShutdown:

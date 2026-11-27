@@ -61,12 +61,25 @@ func (h *Host) serveConn(ctx context.Context, conn net.Conn) {
 				resp.Error = hostproto.CodeInvalid
 				break
 			}
+			replied := h.beginReply() // before the command: a host.shutdown waits for this reply
 			dup, err := h.Command(*req.Command)
 			resp.Duplicate = dup
 			var ce *CommandError
 			if errors.As(err, &ce) {
 				resp.Error = ce.Code
 			}
+			if req.Command.Kind == event.CmdMessageSend && resp.Error == "" {
+				var m event.MessageSend
+				if json.Unmarshal(req.Command.Data, &m) == nil {
+					resp.Queued = h.Queued(m.MessageID)
+				}
+			}
+			werr := enc.Encode(resp)
+			replied()
+			if werr != nil {
+				return
+			}
+			continue
 		case hostproto.OpSubscribe:
 			if enc.Encode(resp) != nil {
 				return

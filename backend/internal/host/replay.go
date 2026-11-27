@@ -141,7 +141,7 @@ func (r *Replay) play(ctx context.Context, turn string, out chan<- event.EventDr
 		if usage != nil {
 			var rec event.TurnEnded
 			if json.Unmarshal(usage, &rec) == nil {
-				t.Usage, t.CostUSD = rec.Usage, rec.CostUSD
+				t.Usage, t.CostUSD, t.Provider, t.Model = rec.Usage, rec.CostUSD, rec.Provider, rec.Model
 			}
 		}
 		return emit(draft(event.KindTurnEnded, t))
