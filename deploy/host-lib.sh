@@ -8,13 +8,25 @@ SUBNET="${BACKEND_SANDBOX_SUBNET:-172.30.0.0/16}"
 RANGE="${BACKEND_SANDBOX_RANGE:-172.30.128.0/17}"
 GATEWAY="${BACKEND_SANDBOX_GATEWAY:-$(printf '%s\n' "$SUBNET" | awk -F'[./]' '{print $1"."$2"."$3"."$4+1}')}"
 MEMORY_TOTAL_MIB="${BACKEND_SANDBOX_MEMORY_TOTAL_MIB:-14336}"
+PROJECT="${PROJECT:-${BACKEND_INCUS_PROJECT:-flow}}"
+POOL="${BACKEND_INCUS_POOL:-default}"
 # Host-side settings.
 DOCKER_NETWORK="${DOCKER_NETWORK:-flow}"
 DOCKER_RANGE="${DOCKER_RANGE:-172.30.0.0/24}" # Docker's own allocations (Flow's container); the rest is RANGE's
-BAN_CHAIN="${BAN_CHAIN-MAILCOW}"              # must stay first in FORWARD; empty: there is none
-BAN_WAIT="${BAN_WAIT:-60}"                    # seconds its owner gets to put it first again
-PROJECT="${PROJECT:-flow}"
+# A third party's iptables chain that keeps its jump first in FORWARD (mailcow's netfilter container: MAILCOW). If it
+# exists, it must be first before and after every change. If the default does not exist, its checks are skipped and
+# the output says so; a name set explicitly, or recorded by an earlier setup, must exist (a typo or a chain that is
+# being restarted never switches the checks off). BAN_REQUIRE=1: the default is required too. Empty BAN_CHAIN: none.
+BAN_CHAIN_SET="${BAN_CHAIN+1}"
+BAN_CHAIN="${BAN_CHAIN-MAILCOW}"
+BAN_REQUIRE="${BAN_REQUIRE:-0}"
+BAN_WAIT="${BAN_WAIT:-60}" # seconds its owner gets to put it first again
+# An extended regular expression for snapshot lines that others change at any time (fail2ban's or CrowdSec's bans,
+# containers starting): a difference it matches is shown, never counted. Never excuses a line of Flow's own. Empty
+# (the default): every difference outside Flow's and the ban chain's counts. Example: 'f2b-|crowdsec'.
+OTHER_CHURN="${OTHER_CHURN:-}"
 INCUS_LISTEN="${INCUS_LISTEN:-127.0.0.1:8443}"
+INCUS_DIR="${INCUS_DIR:-/var/lib/incus}" # Incus' own variable: where its server.crt lies
 CERT_DIR="${CERT_DIR:-/etc/flow-host/incus}"
 POOL_DRIVER="${POOL_DRIVER:-btrfs}"
 POOL_SIZE="${POOL_SIZE:-40GiB}"
@@ -58,11 +70,13 @@ run() {
 	fi
 }
 
-# put_file PATH MODE CONTENT writes a file unless it already holds CONTENT; status 0 when it wrote (or would).
+# put_file PATH MODE CONTENT RECORD writes a file unless it already holds CONTENT, recording RECORD before it writes;
+# status 0 when it wrote (or would).
 put_file() {
 	if [ -f "$1" ] && [ "$(cat "$1")" = "$3" ]; then
 		return 1
 	fi
+	record "$4"
 	if [ "$DRY_RUN" = 1 ]; then
 		printf 'would write %s (mode %s):\n%s\n' "$1" "$2" "$3"
 		return 0
@@ -157,6 +171,11 @@ check_settings() {
 	ip_in "$GATEWAY" "$SUBNET" || die "gateway $GATEWAY is not in $SUBNET"
 	! ip_in "$GATEWAY" "$RANGE" || die "gateway $GATEWAY lies in the sandbox range $RANGE"
 	[ "${#BRIDGE}" -le 15 ] || die "bridge name $BRIDGE is longer than 15 characters"
+	if [ -n "$OTHER_CHURN" ]; then
+		rc=0
+		printf 'x\n' | grep -Eq -- "$OTHER_CHURN" || rc=$?
+		[ "$rc" -ne 2 ] || die "OTHER_CHURN is not an extended regular expression: $OTHER_CHURN"
+	fi
 }
 
 # --- state of the firewall managers ---
@@ -167,7 +186,7 @@ ban_first() {
 }
 
 # wait_ban_first gives the ban chain's owner BAN_WAIT seconds to put it first in FORWARD again (Docker and
-# firewalld reloads move it; the mail stack re-inserts it). It only looks: it never moves a rule it did not make.
+# firewalld reloads move it; its owner re-inserts it). It only looks: it never moves a rule it did not make.
 wait_ban_first() {
 	[ -z "$BAN_CHAIN" ] && return 0
 	[ "$DRY_RUN" = 1 ] && return 0
@@ -193,16 +212,81 @@ user_first() {
 		END { exit !user }'
 }
 
-# preflight refuses unless the firewall managers are in the state the setup was measured against: firewalld on
-# nftables, Docker on iptables-nft with its zone and DOCKER-USER chain, FORWARD dropping, the ban chain first, and
-# Incus (when installed) without a managed network.
+# other_jumps prints the chains FORWARD jumps to unconditionally that are not Docker's: a hint when BAN_CHAIN does
+# not exist. Never taken as the ban chain by itself: a VPN's or hypervisor's chain may sit first just as well.
+other_jumps() {
+	iptables -S FORWARD 2>/dev/null | awk '$1 == "-A" && NF == 4 && $3 == "-j" && $4 !~ /^(DOCKER|ACCEPT$|DROP$|REJECT$|RETURN$|LOG$)/ { print $4 }' |
+		tr '\n' ' ' | sed 's/ $//'
+}
+
+# manifest_settings refuses a PROJECT or POOL other than the one an earlier setup worked with (manifest lines
+# `project`, `uses project`, `root-device`; `uses pool`): a setup re-run would leave the old one behind, and the
+# teardown would look for sandboxes in the wrong place. Lines a manifest lacks (older setups) are not compared.
+manifest_settings() {
+	[ -f "$MANIFEST" ] || return 0
+	used_projects="$(sed -n -e 's/^project //p' -e 's/^uses project //p' -e 's/^root-device \([^ ]*\) .*/\1/p' "$MANIFEST" | sort -u)"
+	for mp in $used_projects; do
+		[ "$mp" = "$PROJECT" ] ||
+			die "the setup worked with Incus project $mp (manifest $MANIFEST), the settings say $PROJECT: run with BACKEND_INCUS_PROJECT=$mp"
+	done
+	used_pools="$(sed -n 's/^uses pool //p' "$MANIFEST" | sort -u)"
+	if [ -n "$used_pools" ] && ! printf '%s\n' "$used_pools" | grep -qxF "$POOL"; then
+		die "the setup worked with pool $(printf '%s' "$used_pools" | tr '\n' ' ' | sed 's/ $//') (manifest $MANIFEST), the settings say $POOL: run with BACKEND_INCUS_POOL set as for the setup"
+	fi
+}
+
+# ban_from_manifest: a ban chain an earlier setup found (manifest line `ban-chain NAME`) is required from then on, by
+# setup re-runs and the teardown alike; a BAN_CHAIN that names another one (empty included) is refused.
+ban_from_manifest() {
+	seen="$(sed -n 's/^ban-chain //p' "$MANIFEST" 2>/dev/null | tail -n 1)"
+	[ -n "$seen" ] || return 0
+	if [ -z "$BAN_CHAIN_SET" ]; then
+		BAN_CHAIN="$seen"
+		BAN_CHAIN_SET=1
+	elif [ "$BAN_CHAIN" != "$seen" ]; then
+		die "the setup found ban chain $seen (manifest $MANIFEST), BAN_CHAIN says '$BAN_CHAIN': run with BAN_CHAIN=$seen, or, if the host no longer has it, delete the line 'ban-chain $seen' from the manifest"
+	fi
+}
+
+# resolve_ban decides once per run whether the host has the ban chain: it exists → it must be first now (and again
+# after each change); it does not → refused when it was named explicitly, recorded or BAN_REQUIRE=1, else BAN_CHAIN
+# is emptied, which skips every ban-chain step. Never re-decided later: a chain that vanishes during the run fails
+# the verification instead. BAN_SEEN=1: it exists (host-setup.sh records that).
+BAN_SEEN=0
+resolve_ban() {
+	case "$BAN_REQUIRE" in
+	0) ;;
+	1) [ -n "$BAN_CHAIN" ] || die "BAN_REQUIRE=1 needs the chain's name in BAN_CHAIN" ;;
+	*) die "BAN_REQUIRE must be 0 or 1" ;;
+	esac
+	if [ -n "$BAN_CHAIN" ] && iptables -S "$BAN_CHAIN" >/dev/null 2>&1; then
+		ban_first || die "$BAN_CHAIN is not first in FORWARD now: wait for its owner to restore it"
+		log "ban chain $BAN_CHAIN is first in FORWARD; it must be again after the changes"
+		BAN_SEEN=1
+		return 0
+	fi
+	if [ "$BAN_REQUIRE" = 1 ]; then
+		die "ban chain $BAN_CHAIN does not exist, and BAN_REQUIRE=1 says this host has one"
+	fi
+	if [ -n "$BAN_CHAIN_SET" ] && [ -n "$BAN_CHAIN" ]; then
+		die "ban chain $BAN_CHAIN does not exist (named in BAN_CHAIN or found by an earlier setup): fix the name or wait for its owner to restore it; a host without one: BAN_CHAIN= (and, if the manifest $MANIFEST has a line 'ban-chain $BAN_CHAIN', delete that line)"
+	fi
+	jumps="$(other_jumps)"
+	log "no ban chain${BAN_CHAIN:+ ($BAN_CHAIN does not exist)}: its checks are skipped${jumps:+; FORWARD also jumps to $jumps (BAN_CHAIN=<name> if one of them must stay first)}"
+	BAN_CHAIN=""
+}
+
+# preflight refuses unless the host has what the isolation design was measured with: firewalld on nftables, Docker
+# on iptables-nft with its firewalld zone `docker` and DOCKER-USER chain, FORWARD dropping and jumping to DOCKER-USER
+# before DOCKER-FORWARD, the units docker.service and (when Incus is installed) incus.service, and Incus without a
+# managed network. A ban chain is checked when the host has one (resolve_ban).
 preflight() {
 	for c in docker firewall-cmd iptables nft ip systemctl awk comm sort; do
 		command -v "$c" >/dev/null 2>&1 || die "$c not found"
 	done
 	[ "$(firewall-cmd --state 2>/dev/null)" = running ] || die "firewalld is not running"
-	backend="$(awk -F= '/^FirewallBackend=/ { print $2 }' /etc/firewalld/firewalld.conf 2>/dev/null)"
-	[ "${backend:-nftables}" = nftables ] || die "firewalld's backend is $backend, not nftables"
+	# Its nftables backend owns `table inet firewalld`; the iptables backend makes none.
+	nft list table inet firewalld >/dev/null 2>&1 || die "firewalld does not run on nftables (no table inet firewalld): set FirewallBackend=nftables"
 	iptables -V 2>/dev/null | grep -q nf_tables || die "iptables is not the nf_tables variant: $(iptables -V 2>&1)"
 	docker info >/dev/null 2>&1 || die "Docker is not running"
 	dfw="$(docker info --format '{{.FirewallBackend.Driver}}' 2>/dev/null || true)"
@@ -211,20 +295,23 @@ preflight() {
 	"") warn "Docker does not report its firewall backend; assuming iptables" ;;
 	*) die "Docker's firewall backend is $dfw, not iptables" ;;
 	esac
-	firewall-cmd --get-zones | tr ' ' '\n' | grep -qx docker || die "firewalld has no zone docker"
+	# Docker's names, fixed in Docker: the zone its bridges join and the chain left to the admin.
+	firewall-cmd --get-zones | tr ' ' '\n' | grep -qx docker || die "firewalld has no zone docker: Docker's firewalld integration is off"
 	iptables -S DOCKER-USER >/dev/null 2>&1 || die "iptables has no DOCKER-USER chain"
-	[ "$(iptables -S FORWARD 2>/dev/null | head -n 1)" = "-P FORWARD DROP" ] || die "FORWARD's policy is not DROP"
+	[ "$(iptables -S FORWARD 2>/dev/null | head -n 1)" = "-P FORWARD DROP" ] ||
+		die "FORWARD's policy is not DROP (the isolation was measured with DROP; Docker leaves ACCEPT when IP forwarding was on before it)"
 	user_first || die "FORWARD jumps to DOCKER-FORWARD before DOCKER-USER: restart Docker to restore its order"
-	if [ -n "$BAN_CHAIN" ]; then
-		iptables -S "$BAN_CHAIN" >/dev/null 2>&1 || die "ban chain $BAN_CHAIN does not exist (BAN_CHAIN= for none)"
-		ban_first || die "$BAN_CHAIN is not first in FORWARD now: wait for its owner to restore it"
-	fi
+	# The DOCKER-USER rule's unit is bound to docker.service, Incus' drop-in names incus.service.
+	systemctl cat docker.service >/dev/null 2>&1 || die "Docker does not run as docker.service"
 	if command -v incus >/dev/null 2>&1; then
+		systemctl cat incus.service >/dev/null 2>&1 || die "Incus does not run as incus.service"
 		managed="$(incus network list --format csv -c nm </dev/null | awk -F, '$2 == "YES" { print $1 }' | tr '\n' ' ')"
 		[ -z "$managed" ] || die "Incus manages networks ($managed): Flow's sandboxes use Docker's bridge only"
 	fi
+	resolve_ban
+	[ -z "$OTHER_CHURN" ] || log "differences matching OTHER_CHURN ($OTHER_CHURN) are shown, not counted"
 	if [ "$(sysctl -n net.bridge.bridge-nf-call-iptables 2>/dev/null)" = 1 ]; then
-		warn "br_netfilter is active: bridged traffic passes iptables, unlike the production host measured"
+		warn "br_netfilter is active: bridged traffic passes iptables, so same-bridge results differ from a host without it"
 	fi
 	for n in $(docker network ls -q --filter driver=bridge); do
 		if [ "$(docker network inspect -f '{{.EnableIPv6}}' "$n")" = true ]; then
@@ -299,6 +386,13 @@ others() {
 	return 1
 }
 
+# churn LINE: a change OTHER_CHURN names, never one of Flow's own lines.
+churn() {
+	[ -n "$OTHER_CHURN" ] || return 1
+	explained "$1" && return 1
+	printf '%s\n' "$1" | grep -Eq -- "$OTHER_CHURN"
+}
+
 # allowed MODE LINE: whether a difference is Flow's doing. setup: anything explained appears or disappears.
 # teardown: only explained lines and Incus' per-NIC chains (`table bridge incus`) disappear; nothing appears.
 allowed() {
@@ -316,24 +410,27 @@ allowed() {
 }
 
 # compare FROM TO MODE prints the difference of two snapshots and fails on any line MODE does not allow (see
-# allowed). Ban-chain churn is shown, never counted.
+# allowed). Ban-chain churn and what OTHER_CHURN names are shown, never counted.
 compare() {
 	LC_ALL=C comm -13 "$1/rules" "$2/rules" | sed 's/^/+ /' >"$2/diff"
 	LC_ALL=C comm -23 "$1/rules" "$2/rules" | sed 's/^/- /' >>"$2/diff"
 	: >"$2/unexpected"
 	: >"$2/expected"
+	: >"$2/churn"
 	while IFS= read -r line; do
-		if others "$line"; then
+		if allowed "$3" "$line" || others "$line"; then
 			printf '%s\n' "$line" >>"$2/expected"
-		elif allowed "$3" "$line"; then
-			printf '%s\n' "$line" >>"$2/expected"
+		elif churn "$line"; then
+			printf '%s\n' "$line" >>"$2/churn"
 		else
 			printf '%s\n' "$line" >>"$2/unexpected"
 		fi
 	done <"$2/diff"
-	printf '=== differences %s -> %s: %s expected, %s unexpected\n' "$1" "$2" \
-		"$(wc -l <"$2/expected" | tr -d ' ')" "$(wc -l <"$2/unexpected" | tr -d ' ')"
+	printf '=== differences %s -> %s: %s expected, %s churn of others (OTHER_CHURN, not counted), %s unexpected\n' \
+		"$1" "$2" "$(wc -l <"$2/expected" | tr -d ' ')" "$(wc -l <"$2/churn" | tr -d ' ')" \
+		"$(wc -l <"$2/unexpected" | tr -d ' ')"
 	sed 's/^/  ok  /' "$2/expected"
+	sed 's/^/  churn  /' "$2/churn"
 	if [ -s "$2/unexpected" ]; then
 		sed 's/^/  UNEXPECTED  /' "$2/unexpected"
 		fail "the ruleset changed in ways the $3 does not explain (above, also $2/unexpected)"

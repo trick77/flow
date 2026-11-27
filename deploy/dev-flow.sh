@@ -69,6 +69,7 @@ if [ ! -f "$ENV_FILE" ]; then
 		echo "BACKEND_SEAL_KEY=$(openssl rand -base64 32)"
 		echo "BACKEND_INCUS_URL=$INCUS_URL"
 		echo "BACKEND_INCUS_PROJECT=$PROJECT"
+		echo "BACKEND_INCUS_POOL=$POOL"
 		echo "BACKEND_INCUS_CERT=$CERT_DIR/client.crt"
 		echo "BACKEND_INCUS_KEY=$CERT_DIR/client.key"
 		echo "BACKEND_INCUS_SERVER_CERT=$CERT_DIR/server.crt"
