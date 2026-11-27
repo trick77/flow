@@ -3,8 +3,15 @@
 // (docs/ownership.md).
 export {
   ApiError,
+  archiveSession,
+  createApiKey,
+  createProject,
+  deleteApiKey,
+  deleteProject,
   errorCode,
   getAuthSession,
+  getConnections,
+  getProfile,
   getSession,
   interruptTurn,
   listProjects,
@@ -14,7 +21,10 @@ export {
   onUnauthenticated,
   replyPermission,
   request,
+  sandboxAction,
   sendMessage,
+  updateProfile,
+  type SandboxAction,
 } from "./client";
 export {
   onStreamGaveUp,

@@ -47,6 +47,36 @@ export function applyAppEvent(lists: Lists, e: AppEvent): Lists {
         ...lists,
         projects: lists.projects.filter((p) => p.id !== e.projectId),
       };
+    case "sandbox.updated": {
+      const sandbox = e.sandbox;
+      return sandbox
+        ? {
+            ...lists,
+            projects: lists.projects.map((p) =>
+              p.id === e.projectId ? { ...p, sandbox } : p,
+            ),
+          }
+        : lists;
+    }
+    default:
+      return lists;
+  }
+}
+
+// applyAnswer changes the lists by the answer to the owner's own request.
+// An answer is no event: one that comes back after the stream has shown a
+// newer state must not set it back. So a project already known is left as
+// the stream keeps it (a created project's answer only adds it), and removals
+// are applied as they are (they cannot be stale).
+export function applyAnswer(lists: Lists, e: AppEvent): Lists {
+  switch (e.kind) {
+    case "project.updated":
+      return lists.projects.some((p) => p.id === e.projectId)
+        ? lists
+        : applyAppEvent(lists, e);
+    case "project.removed":
+    case "session.removed":
+      return applyAppEvent(lists, e);
     default:
       return lists;
   }
@@ -55,12 +85,25 @@ export function applyAppEvent(lists: Lists, e: AppEvent): Lists {
 export interface SessionsState extends Lists {
   // The first load has answered (with lists or an error).
   loaded: boolean;
+  // error is the session list's load failure, projectsError the project
+  // list's: the sidebar works without projects, the Projects page does not.
   error: ErrorCode | null;
+  projectsError: ErrorCode | null;
   // setStatus applies a session.status from the session's own stream.
   setStatus: (sessionId: string, status: SessionStatus) => void;
+  // apply changes the lists by an answer of the owner's own request, without
+  // waiting for the stream to echo it (applyAnswer).
+  apply: (e: AppEvent) => void;
 }
 
 const empty: Lists = { sessions: [], projects: [] };
+
+// A change made while a load is under way, applied again on top of its
+// answer: a stream event, or an answer of the owner's own request.
+type Change = { e: AppEvent; answer: boolean };
+
+const replayChange = (lists: Lists, c: Change) =>
+  c.answer ? applyAnswer(lists, c.e) : applyAppEvent(lists, c.e);
 
 // useSessions keeps the session and project lists: loaded on mount and on
 // every (re)open of /api/events (it has no replay), changed by its events in
@@ -70,17 +113,23 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
   const [lists, setLists] = useState<Lists>(empty);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<ErrorCode | null>(null);
+  const [projectsError, setProjectsError] = useState<ErrorCode | null>(null);
   const generation = useRef(0);
-  // Events since the newest load started; null while no load is under way.
-  const during = useRef<AppEvent[] | null>(null);
+  // Changes since the newest load started; null while no load is under way.
+  const during = useRef<Change[] | null>(null);
 
   const reload = useCallback(() => {
     const gen = ++generation.current;
     during.current = [];
-    // Project names are decoration: without them the rows still work.
+    // The sidebar works without project names; the failure is kept for the
+    // Projects page, which must not show "no projects" for it.
+    let projectsFailed: ErrorCode | null = null;
     const projects = listProjects().then(
       (list) => list.items,
-      () => null,
+      (err: unknown) => {
+        projectsFailed = errorCode(err);
+        return null;
+      },
     );
     Promise.all([listSessions(), projects]).then(
       ([sessions, projectItems]) => {
@@ -88,12 +137,13 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
         const replay = during.current ?? [];
         during.current = null;
         setLists((prev) =>
-          replay.reduce(applyAppEvent, {
+          replay.reduce(replayChange, {
             sessions: sessions.items,
             projects: projectItems ?? prev.projects,
           }),
         );
         setError(null);
+        setProjectsError(projectsFailed);
         setLoaded(true);
       },
       (err: unknown) => {
@@ -111,7 +161,7 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
       EventSource,
       onOpen: reload,
       onEvent: (e) => {
-        during.current?.push(e);
+        during.current?.push({ e, answer: false });
         setLists((prev) => applyAppEvent(prev, e));
       },
     });
@@ -128,5 +178,10 @@ export function useSessions(EventSource?: EventSourceCtor): SessionsState {
     [],
   );
 
-  return { ...lists, loaded, error, setStatus };
+  const apply = useCallback((e: AppEvent) => {
+    during.current?.push({ e, answer: true });
+    setLists((prev) => applyAnswer(prev, e));
+  }, []);
+
+  return { ...lists, loaded, error, projectsError, setStatus, apply };
 }

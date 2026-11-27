@@ -26,4 +26,6 @@ export const errors: Record<ErrorCode, string> = {
     "The sandbox network is missing on the server. Run the host setup again.",
   sandbox_memory_full:
     "The running sandboxes use all the memory Flow may give them. Stop one first.",
+  project_has_sessions:
+    "Sessions of this project are still open. Archive them first.",
 };

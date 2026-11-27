@@ -1,7 +1,7 @@
 import type { SessionStatus, SessionSummary } from "../api/types.gen";
 import { SESSION_STATUS_VALUES } from "../api/types.gen";
 import { groupSessions, orderSessions, sectionOf } from "./group";
-import { applyAppEvent } from "./useSessions";
+import { applyAnswer, applyAppEvent } from "./useSessions";
 
 function s(id: string, status: SessionStatus, at: string): SessionSummary {
   return {
@@ -80,5 +80,76 @@ describe("applyAppEvent", () => {
     });
     expect(next.sessions).toHaveLength(1);
     expect(next.sessions[0].title).toBe("renamed");
+  });
+
+  it("puts a sandbox's new state on its project", () => {
+    const p = (id: string) => ({
+      id,
+      name: id,
+      repos: [],
+      sandbox: { state: "setup" as const },
+      createdAt: "2026-11-26T10:00:00Z",
+    });
+    const lists = { sessions: [], projects: [p("p1"), p("p2")] };
+    expect(
+      applyAppEvent(lists, { kind: "sandbox.updated", projectId: "p1" }),
+    ).toBe(lists);
+    const next = applyAppEvent(lists, {
+      kind: "sandbox.updated",
+      projectId: "p1",
+      sandbox: { state: "warm" },
+    });
+    expect(next.projects.map((x) => x.sandbox.state)).toEqual([
+      "warm",
+      "setup",
+    ]);
+  });
+});
+
+describe("applyAnswer", () => {
+  const p = (state: "setup" | "failed") => ({
+    id: "p1",
+    name: "apps",
+    repos: [],
+    sandbox: { state },
+    createdAt: "2026-11-26T10:00:00Z",
+  });
+
+  it("never sets a project back to an answer's older state", () => {
+    // The stream showed failed before the creation's answer (setup) came back.
+    const lists = { sessions: [], projects: [p("failed")] };
+    expect(
+      applyAnswer(lists, {
+        kind: "project.updated",
+        projectId: "p1",
+        project: p("setup"),
+      }),
+    ).toBe(lists);
+    expect(
+      applyAnswer(lists, {
+        kind: "sandbox.updated",
+        projectId: "p1",
+        sandbox: { state: "setup" },
+      }),
+    ).toBe(lists);
+  });
+
+  it("adds a created project and applies removals", () => {
+    const empty = {
+      sessions: [s("a", "idle", "2026-11-26T10:00:00Z")],
+      projects: [],
+    };
+    const added = applyAnswer(empty, {
+      kind: "project.updated",
+      projectId: "p1",
+      project: p("setup"),
+    });
+    expect(added.projects.map((x) => x.id)).toEqual(["p1"]);
+    expect(
+      applyAnswer(added, { kind: "project.removed", projectId: "p1" }).projects,
+    ).toEqual([]);
+    expect(
+      applyAnswer(added, { kind: "session.removed", sessionId: "a" }).sessions,
+    ).toEqual([]);
   });
 });

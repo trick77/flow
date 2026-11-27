@@ -87,6 +87,42 @@ const paths = {
   signout: (
     <path d="M14.5 4H18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3.5M10 16l-4-4 4-4M6 12h10" />
   ),
+  folder: (
+    <path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.2h7a2 2 0 0 1 2 2v8.3a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+  ),
+  sliders: (
+    <>
+      <path d="M4 7h9M17 7h3M4 17h3M11 17h9" />
+      <circle cx="15" cy="7" r="2" />
+      <circle cx="9" cy="17" r="2" />
+    </>
+  ),
+  back: <path d="M14.5 6l-6 6 6 6" />,
+  plus: <path d="M12 5v14M5 12h14" />,
+  key: (
+    <>
+      <circle cx="8" cy="15" r="4" />
+      <path d="M11 12l8.5-8.5M16 7l2.5 2.5" />
+    </>
+  ),
+  repo: (
+    <path d="M5.5 18.5V5a2 2 0 0 1 2-2h11v15h-11a2 2 0 0 0-2 2 2 2 0 0 0 2 2h11" />
+  ),
+  reload: (
+    <>
+      <path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />
+      <path d="M19.5 4.5v4.5H15" />
+    </>
+  ),
+  archive: (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="4" rx="1" />
+      <path d="M5 8.5v10a1.5 1.5 0 0 0 1.5 1.5h11a1.5 1.5 0 0 0 1.5-1.5v-10M10 12.5h4" />
+    </>
+  ),
+  trash: (
+    <path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 12.5h9l1-12.5M10.5 10.5v6M13.5 10.5v6" />
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof paths;
