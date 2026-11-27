@@ -16,7 +16,7 @@ import type {
   SandboxState,
 } from "../api/types.gen";
 import { formatDate, formatDateTime } from "../i18n/format";
-import { Icon } from "../shell";
+import { Icon, projectBadge } from "../shell";
 import { Page } from "./Page";
 
 // ProjectsPage lists the projects with their sandboxes and creates, starts,
@@ -295,7 +295,7 @@ function ProjectCard({
       ),
     );
 
-  const badge = project.name.slice(0, 2);
+  const badge = projectBadge(project.name);
   return (
     <article className="pcard" aria-label={project.name}>
       <div className="pcard-h">

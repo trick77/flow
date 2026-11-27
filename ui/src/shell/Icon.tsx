@@ -98,6 +98,7 @@ const paths = {
     </>
   ),
   back: <path d="M14.5 6l-6 6 6 6" />,
+  chevDown: <path d="M6.5 9.5l5.5 5.5 5.5-5.5" />,
   plus: <path d="M12 5v14M5 12h14" />,
   key: (
     <>

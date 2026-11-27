@@ -3,8 +3,9 @@ import { useTranslation } from "react-i18next";
 import { Icon } from "./Icon";
 import "./shell.css";
 
-// View is what the centre column shows: a session, or one of the two pages.
-export type View = "session" | "projects" | "settings";
+// View is what the centre column shows: a session, the start of a new one,
+// or one of the two pages.
+export type View = "session" | "new" | "projects" | "settings";
 
 // Nav is the header's right end: a divider, then Projects and Settings. The
 // button of the page shown is marked current; pressing it again goes back.

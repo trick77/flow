@@ -1,5 +1,6 @@
 import {
   ERROR_CODE_VALUES,
+  type AgentCatalog,
   type ApiKey,
   type ApiKeyCreate,
   type AuthSession,
@@ -15,6 +16,7 @@ import {
   type ReplyDecision,
   type Sandbox,
   type Session,
+  type SessionCreate,
   type SessionList,
 } from "./types.gen";
 
@@ -130,6 +132,18 @@ export function listSessions(): Promise<SessionList> {
 
 export function getSession(sessionId: string): Promise<Session> {
   return request<Session>("GET", `/api/sessions/${seg(sessionId)}`);
+}
+
+// createSession starts a session: worktrees on fresh origin/<default branch>,
+// the agent, and the message as its first turn.
+export function createSession(session: SessionCreate): Promise<Session> {
+  return request<Session>("POST", "/api/sessions", session);
+}
+
+// listAgents is the agent catalog: providers with their models and whether
+// they can run now, and the permission modes.
+export function listAgents(): Promise<AgentCatalog> {
+  return request<AgentCatalog>("GET", "/api/agents");
 }
 
 export function sendMessage(

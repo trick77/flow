@@ -42,6 +42,8 @@ interface Server {
   projectsStatus?: number;
   // archive answers DELETE /api/sessions/{id}: 204 or an error code.
   archive?: string[];
+  // created answers POST /api/sessions.
+  created?: SessionSummary;
   calls: string[];
 }
 
@@ -55,6 +57,38 @@ function serve(server: Server) {
         return code
           ? new Response(JSON.stringify({ code }), { status: 409 })
           : new Response(null, { status: 204 });
+      }
+      if (url === "/api/agents") {
+        return new Response(
+          JSON.stringify({
+            providers: [
+              {
+                provider: "claude",
+                available: true,
+                claudeAuths: ["subscription_token"],
+                models: [{ id: "claude-opus-5-5", label: "Opus 5.5" }],
+                defaultModel: "claude-opus-5-5",
+              },
+            ],
+            modes: ["plan", "ask"],
+          }),
+        );
+      }
+      if (
+        url === "/api/sessions" &&
+        init?.method === "POST" &&
+        server.created
+      ) {
+        server.calls.push("POST /api/sessions");
+        return new Response(
+          JSON.stringify({
+            summary: server.created,
+            dir: "/w",
+            worktrees: [],
+            lastSeq: 0,
+          }),
+          { status: 201 },
+        );
       }
       if (url === "/api/terminals") {
         return new Response(
@@ -119,6 +153,75 @@ describe("App", () => {
     expect(await screen.findByText(en.shell.empty)).toBeInTheDocument();
     expect(screen.getByText(en.shell.emptyHint)).toBeInTheDocument();
     expect(screen.getAllByText(en.sidebar.empty)).toHaveLength(4);
+  });
+
+  it("starts a session from the sidebar and opens it at once", async () => {
+    window.localStorage.clear();
+    const created = summary({
+      id: "s-new",
+      title: "Clamp the width",
+      status: "working",
+      branch: "flow/clamp-the-width",
+      lastActivityAt: "2026-11-26T09:00:00Z",
+    });
+    const server: Server = {
+      sessions: [summary({})],
+      projects: [
+        {
+          ...project,
+          repos: [
+            { id: "r1", fullName: "dev/scener", defaultBranch: "master" },
+          ],
+        },
+      ],
+      created,
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    // The composer names the model from the catalog.
+    expect(
+      await screen.findByRole("img", { name: "Model: Claude Code, Opus 5.5" }),
+    ).toBeInTheDocument();
+
+    const newButton = screen.getByRole("button", {
+      name: en.sidebar.newSession,
+    });
+    fireEvent.click(newButton);
+    expect(newButton).toHaveAttribute("aria-current", "page");
+    const box = await screen.findByLabelText(en.composer.startPlaceholder);
+    expect(
+      screen.getByText("What should we work on in scener?"),
+    ).toBeInTheDocument();
+    fireEvent.change(box, { target: { value: "Clamp the width" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Clamp the width" }),
+    ).toBeInTheDocument();
+    expect(server.calls).toContain("POST /api/sessions");
+    expect(newButton).not.toHaveAttribute("aria-current");
+    const row = screen.getByRole("button", { name: /Clamp the width/ });
+    expect(row).toHaveAttribute("aria-current", "true");
+    expect(FakeEventSource.forUrl("/api/sessions/s-new/events")).toHaveLength(
+      1,
+    );
+  });
+
+  it("offers New session on the empty start", async () => {
+    serve({ sessions: [], projects: [], calls: [] });
+    render(<App EventSource={FakeEventSource} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: en.shell.newSession }),
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(en.composer.noProject);
+    fireEvent.click(
+      screen.getByRole("button", { name: en.composer.openProjects }),
+    );
+    expect(
+      screen.getByRole("heading", { level: 1, name: en.projects.title }),
+    ).toBeInTheDocument();
   });
 
   it("shows a list error from the errors namespace", async () => {

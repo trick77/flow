@@ -152,4 +152,30 @@ describe("applyAnswer", () => {
       applyAnswer(added, { kind: "session.removed", sessionId: "a" }).sessions,
     ).toEqual([]);
   });
+
+  it("adds a started session but never sets a known one back", () => {
+    const lists = {
+      sessions: [s("a", "working", "2026-11-26T10:00:00Z")],
+      projects: [],
+    };
+    const stale = s("a", "idle", "2026-11-26T09:00:00Z");
+    expect(
+      applyAnswer(lists, {
+        kind: "session.updated",
+        sessionId: "a",
+        session: stale,
+      }),
+    ).toBe(lists);
+    expect(
+      applyAnswer(lists, { kind: "session.updated", sessionId: "b" }),
+    ).toBe(lists);
+    const b = s("b", "idle", "2026-11-26T11:00:00Z");
+    expect(
+      applyAnswer(lists, {
+        kind: "session.updated",
+        sessionId: "b",
+        session: b,
+      }).sessions,
+    ).toEqual([lists.sessions[0], b]);
+  });
 });

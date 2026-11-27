@@ -2,6 +2,7 @@ import {
   ApiError,
   createApiKey,
   createProject,
+  createSession,
   deleteApiKey,
   deleteProject,
   errorCode,
@@ -12,6 +13,7 @@ import {
   sandboxAction,
   updateProfile,
   interruptTurn,
+  listAgents,
   listProjects,
   listSessions,
   logout,
@@ -46,6 +48,29 @@ describe("API client", () => {
     expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
     expect(fetchMock.mock.calls[0][1]?.body).toBeUndefined();
     expect(fetchMock.mock.calls[1][0]).toBe("/api/projects");
+  });
+
+  it("reads the agent catalog and creates a session", async () => {
+    const catalog = { providers: [], modes: ["plan", "ask"] };
+    fetchMock.mockResolvedValueOnce(respond(200, catalog));
+    fetchMock.mockResolvedValueOnce(
+      respond(201, { summary: { id: "s1" }, worktrees: [] }),
+    );
+    await expect(listAgents()).resolves.toEqual(catalog);
+    const body = {
+      projectId: "p1",
+      repoIds: ["r1"],
+      provider: "claude" as const,
+      model: "m",
+      mode: "ask" as const,
+    };
+    await expect(createSession(body)).resolves.toMatchObject({
+      summary: { id: "s1" },
+    });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/agents");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/sessions");
+    expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual(body);
   });
 
   it("escapes ids in paths", async () => {

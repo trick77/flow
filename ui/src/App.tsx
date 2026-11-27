@@ -2,20 +2,26 @@ import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { EventSourceCtor } from "./api";
-import type { SessionStatus } from "./api/types.gen";
+import type { Session, SessionStatus } from "./api/types.gen";
+import { NewSession, useCatalog } from "./composer";
 import { ProjectsPage, SettingsPage } from "./pages";
 import { Nav, SessionView, type View } from "./shell";
 import { orderSessions, Sidebar, useSessions } from "./sidebar";
 
-// The app: the session sidebar and, in the centre, the selected session or
-// one of the pages the header's Projects and Settings buttons open.
-// EventSource is injectable for tests (jsdom has none).
+// The app: the session sidebar and, in the centre, the selected session, the
+// start of a new one, or one of the pages the header's Projects and Settings
+// buttons open. EventSource is injectable for tests (jsdom has none).
 export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
   const { t } = useTranslation("shell");
   const { sessions, projects, loaded, error, projectsError, setStatus, apply } =
     useSessions(EventSource);
   const [picked, setPicked] = useState<string | null>(null);
   const [view, setView] = useState<View>("session");
+  // The catalog names the models in the composers; a failure only leaves
+  // the model ids showing.
+  const [catalogState] = useCatalog();
+  const catalog =
+    catalogState.state === "ready" ? catalogState.catalog : undefined;
 
   // The picked session while it exists, else the first row in the sidebar.
   const ordered = useMemo(() => orderSessions(sessions), [sessions]);
@@ -37,6 +43,18 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     setPicked(id);
     setView("session");
   }, []);
+  // A session just started opens at once, before the stream announces it.
+  const onCreated = useCallback(
+    (s: Session) => {
+      apply({
+        kind: "session.updated",
+        session: s.summary,
+        sessionId: s.summary.id,
+      });
+      onSelect(s.summary.id);
+    },
+    [apply, onSelect],
+  );
 
   const onArchived = useCallback(() => {
     if (selectedId) apply({ kind: "session.removed", sessionId: selectedId });
@@ -52,6 +70,7 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     for (const s of sessions) n[s.projectId] = (n[s.projectId] ?? 0) + 1;
     return n;
   }, [sessions]);
+  const startNew = () => setView("new");
   return (
     <div className="app">
       <Sidebar
@@ -59,10 +78,22 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
         projects={projects}
         selectedId={view === "session" ? selectedId : undefined}
         onSelect={onSelect}
+        onNewSession={startNew}
+        newSessionOpen={view === "new"}
         loaded={loaded}
         error={error}
       />
       <main className="main">
+        {view === "new" && (
+          <NewSession
+            projects={projects}
+            currentProjectId={selected?.projectId}
+            nav={nav}
+            onCreated={onCreated}
+            onOpenSettings={() => setView("settings")}
+            onOpenProjects={() => setView("projects")}
+          />
+        )}
         {view === "projects" && (
           <ProjectsPage
             projects={projects}
@@ -83,6 +114,7 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
             session={selected}
             sandbox={project?.sandbox}
             projectName={project?.name}
+            catalog={catalog}
             EventSource={EventSource}
             onStatus={onStatus}
             onArchived={onArchived}
@@ -99,6 +131,13 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
               <div className="empty-start">
                 <p className="big">{t("empty")}</p>
                 <p>{t("emptyHint")}</p>
+                <button
+                  type="button"
+                  className="btn primary empty-new"
+                  onClick={startNew}
+                >
+                  {t("newSession")}
+                </button>
               </div>
             )}
           </section>

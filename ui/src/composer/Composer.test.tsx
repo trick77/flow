@@ -132,6 +132,44 @@ describe("Composer", () => {
     );
   });
 
+  it("shows the session's agent, model and mode, not as pickers", () => {
+    render(
+      <Composer
+        sessionId="s1"
+        running={false}
+        provider="claude"
+        model="claude-opus-5-5"
+        modelLabel="Opus 5.5"
+        mode="accept_edits"
+        projectName="riptide"
+      />,
+    );
+    expect(screen.getByText("Runs in the riptide sandbox")).toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "Model: Claude Code, Opus 5.5" }),
+    ).toHaveTextContent("Opus 5.5");
+    expect(
+      screen.getByRole("img", { name: "Permission mode: Accept edits" }),
+    ).toHaveAttribute("title", en.composer.fixedHint);
+    expect(screen.queryByRole("button", { name: /Model/ })).toBeNull();
+  });
+
+  it("shows the model id without a label and skips an unknown mode", () => {
+    render(
+      <Composer
+        sessionId="s1"
+        running={false}
+        provider="opencode"
+        model="qwen"
+        mode={"yolo" as never}
+      />,
+    );
+    expect(
+      screen.getByRole("img", { name: "Model: OpenCode, qwen" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Permission mode/ })).toBeNull();
+  });
+
   it("has no stop button while idle", () => {
     render(<Composer sessionId="s1" running={false} />);
     expect(screen.queryByRole("button", { name: en.composer.stop })).toBeNull();

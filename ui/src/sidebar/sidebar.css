@@ -1,0 +1,212 @@
+/* The sidebar's top: the wordmark, the search button; New session below
+   (mock: .sb-top, .sb-tools, .nav-row, .plus-disc). */
+.sb-top {
+  justify-content: space-between;
+}
+.sb-tools {
+  flex: 0 0 auto;
+  padding: 2px 10px 4px;
+}
+.nav-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 32px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--color-ink-dim);
+  transition:
+    background-color 0.12s,
+    color 0.12s;
+}
+.nav-row:hover {
+  background: var(--color-raised);
+  color: var(--color-ink);
+}
+.nav-row[aria-current="page"] {
+  background: var(--color-active);
+  color: var(--color-ink);
+}
+.plus-disc {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: var(--color-ink);
+}
+.plus-disc svg.i {
+  width: 13px;
+  height: 13px;
+  stroke-width: 2.2;
+}
+
+/* "· 4 repos" after the branch of a multi-repository session. */
+.s-branch .s-repos {
+  flex: 0 0 auto;
+  overflow: visible;
+  color: var(--color-muted-2);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+}
+
+/* The search palette: centred over the app, its list as tall as its
+   content up to 60% of the viewport, the height change animated. */
+.pal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh 16px 16px;
+  background: rgba(0, 0, 0, 0.5);
+}
+.pal {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 100%);
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 14px;
+  background: var(--color-popover);
+  box-shadow: 0 18px 32px rgba(0, 0, 0, 0.38);
+  color: var(--color-ink-dim);
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+.pal-in {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 14px 0 16px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-muted);
+}
+.pal-in input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-ink-bright);
+  font-size: 1rem;
+}
+.pal-in input::placeholder {
+  color: var(--color-muted-2);
+}
+.pal-kbd {
+  padding: 0 5px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  color: var(--color-faint);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  line-height: 1.1rem;
+}
+.pal-body {
+  min-height: 0;
+  overflow-y: auto;
+  transition: height 0.18s ease-out;
+}
+.pal-content {
+  padding: 6px 0 8px;
+}
+.pal-h {
+  padding: 6px 16px 4px;
+  color: var(--color-muted-2);
+  font-size: 0.6875rem;
+  letter-spacing: 0.02em;
+}
+.pal-empty {
+  margin: 0;
+  padding: 10px 16px 6px;
+  color: var(--color-faint);
+}
+.pal-list {
+  margin: 0;
+  padding: 0 6px;
+  list-style: none;
+}
+.pal-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.pal-opt[aria-selected="true"] {
+  background: var(--color-active);
+}
+.pal-opt .mono-badge {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  font-size: 0.6875rem;
+}
+.pal-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.pal-title,
+.pal-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pal-title {
+  color: var(--color-ink-bright);
+}
+.pal-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-muted-2);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+.pal-sub svg.i {
+  width: 12px;
+  height: 12px;
+  color: var(--color-faint);
+}
+.pal-proj {
+  flex: 0 0 auto;
+}
+.pal-branch {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+.pal-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+}
+.pal mark {
+  background: none;
+  color: var(--color-accent-strong);
+}
+@media (max-width: 480px) {
+  .pal-scrim {
+    padding-top: 8vh;
+  }
+  .pal-right .status {
+    display: none;
+  }
+}
