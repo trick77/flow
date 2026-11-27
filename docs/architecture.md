@@ -345,9 +345,10 @@ sandbox (Incus system container, one per project)
 
 ## Sandbox network
 
-The host is a shared server with about 70 Docker containers behind a layered firewall that must stay intact
-(Docker on iptables-nft, a mail stack's ban chain first in FORWARD, firewalld, a blacklist table). Measured in the
-lab `flow-net` (report `flow-net-findings.md`, owner's plans), then end to end with Flow itself.
+The host is a shared server running Docker containers behind a layered firewall that must stay intact: Docker on
+iptables-nft and firewalld on nftables (both required), possibly a third party's ban chain that keeps its jump first
+in FORWARD, tables of its own. Measured in the lab `flow-net` (report `flow-net-findings.md`, owner's plans), with
+and without a ban chain, then end to end with Flow itself.
 
 - **Decision.** One Docker bridge network dedicated to Flow, `flow` on bridge `flowbr0` (`172.30.0.0/16`; Docker
   allocates only from `172.30.0.0/24`, the rest is the sandboxes' range `172.30.128.0/17`). Docker provides
@@ -360,8 +361,10 @@ lab `flow-net` (report `flow-net-findings.md`, owner's plans), then end to end w
   Rejected: an Incus-managed bridge with an Incus ACL (a second firewall manager on a host whose firewall must stay
   as it is); `enable_icc=false` (loads `br_netfilter` host-wide, changing bridged traffic for every container); a
   firewalld zone of its own for `flowbr0` (conflicts with Docker's runtime zone membership).
-- **Host additions**, by the owner's hand with `deploy/host-setup.sh` (baseline, dry run, verified diff, ban chain
-  check) and reversed by `deploy/host-teardown.sh`: firewalld policies `flow-sb-host` (range → host rejected, all
+- **Host additions**, by the owner's hand with `deploy/host-setup.sh` (preconditions in its header; baseline, dry
+  run, verified diff, `OTHER_CHURN` names others' churn to show but not count; the ban chain, when the host has
+  one, first before and after: `BAN_CHAIN` names it, a name set explicitly or recorded by the setup must exist,
+  `BAN_REQUIRE=1` refuses a host without the default) and reversed by `deploy/host-teardown.sh`: firewalld policies `flow-sb-host` (range → host rejected, all
   IPv6 from zone `docker` rejected), `flow-sb-docker` (range → other Docker bridges, also the routed hairpin back
   to another sandbox) and `flow-sb-lan` (range → 10/8, 172.16/12, 192.168/16, 169.254/16 with cloud metadata,
   100.64/10 behind the host, which it forwards otherwise: measured; so resolvers must be public or on the sandbox
@@ -440,6 +443,41 @@ without a start that fails (a fetch, flowd briefly away) leaves a warm sandbox w
 off from its bridge or on another address is recorded `failed`. Archive and
 whatever starts the session's host or terminal hold one per-session lock, so a send in flight cannot recreate them
 after an archive. A stopped host restarts on the next message with resume and logs `session.resumed`.
+
+## Owner operations on projects and the profile
+
+- **Project delete** (`DELETE /api/projects/{id}`). Refused with `project_has_sessions` while a session of the project
+  is not archived (the spec does not say; archiving first keeps uncommitted work on disk and says so, a delete would
+  not). Then the sandbox instance is stopped and deleted (`Manager.Delete`), its address released, and in one
+  transaction the project's sessions, then the project (its repositories and sandbox row by cascade). Sessions go
+  first so a worktree's `ON DELETE RESTRICT` on its repository never depends on the cascade's order. The row is
+  `deleting` from the instance's removal on: `ensure` refuses it, `Warm` reports it not warm and `Stop` leaves it, so
+  a queued setup, an environment push or a session start cannot make the instance again before the rows are gone; a
+  project never brought up gets such a row too. A failed removal leaves the row `failed` and the project in place,
+  to be tried again. The home volume stays (every sandbox shares it); metering rows stay (no foreign keys).
+- **Rebuild** (`POST .../sandbox/rebuild`) re-creates the instance from the base image: it is deleted, the row keeps
+  its id, address and flowd token, and a background bring-up creates it, delivers flowd and clones every repository
+  afresh. Same refusals as the delete. The spec's "re-run `.flow/setup.sh`" cannot be built yet: flowd runs no jobs
+  (`flowdclient` answers `StartJob` unsupported). Archived sessions' logs and kept worktrees go with the old
+  instance; their pending cleanups find nothing and are done (`sessions.Service.stop`).
+- Delete and rebuild never wait for a bring-up: a project lock still held after `LockWait` (2 s) answers
+  `sandbox_busy` (`tryLock`). The short wait lets a `Warm` (session followers every 2 s, an environment push) pass.
+  Under the lock both count the open sessions again, and the delete's transaction removes only archived sessions
+  and fails with `project_has_sessions` while another is left: a session made after the API's count is never lost.
+- `Manager.Setup` records `setup` before its bring-up starts (a new row, or a stopped or failed one; skipped while a
+  bring-up holds the lock). A creation publishes `project.updated` before it starts the setup: the browser drops a
+  `sandbox.updated` of a project it does not know, and a bring-up that failed at once was followed by the creation's
+  stale `setup`. `sandbox.updated` carries the sandbox, so the Projects page follows setup → warm from the app stream
+  alone; it never applies an answer's sandbox, which may be older than an event already shown. A sandbox row that
+  cannot be read publishes no `sandbox.updated` (never a made-up `none`).
+- At Flow's start, before any follower runs, a row still `setup`, `stopping` or `deleting` was left by an operation
+  cut off (a restart mid bring-up, a store error after the state was written) and turns `failed`
+  (`Manager.Reconcile`): start, rebuild and delete all work from there. Incus is not asked at that point.
+- **Profile** (`PATCH /api/profile`) decodes into pointers (the generated type cannot tell absent from empty) and
+  refuses control characters and oversize values: git name and email end up in a unit's `EnvironmentFile`. A changed
+  identity pushes the credential set to warm sandboxes at once; session hosts started afterwards carry it (measured:
+  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` in the new host's environment file and process), running hosts keep theirs. Only
+  both name and email reach sessions; the Settings page says so when one is empty.
 
 ## Failures
 
