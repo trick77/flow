@@ -220,7 +220,10 @@ export interface ToolStarted {
   /** The provider's tool name (Read, Bash, mcp__flow__create_session, ...). */
   name: string;
   kind: ToolKind;
-  /** File or directory the tool works on, relative to the session directory when inside it. */
+  /**
+   * File or directory the tool works on, relative to the agent's working directory (session.started.cwd)
+   * when inside it.
+   */
   path?: string;
   command?: string;
   pattern?: string;
