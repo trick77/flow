@@ -455,8 +455,9 @@ type API interface {
 	EnsureRepo(ctx context.Context, r RepoSpec) (RepoState, error)
 	EnsureSession(ctx context.Context, s SessionSpec) (SessionState, error)
 	Session(ctx context.Context, id string) (SessionState, error)
-	// StopSession stops the host unit; remove also deletes the worktrees and frees the session directory's claim
-	// (layout.SessionClaim) for another session (the log stays). On the wire: DELETE ...?remove=true.
+	// StopSession stops the host unit; remove also deletes the clean worktrees and, when none was kept, frees the
+	// session directory's claim (layout.SessionClaim) for another session (the log stays). A worktree with
+	// uncommitted or untracked work is kept, with its claim. On the wire: DELETE ...?remove=true.
 	StopSession(ctx context.Context, id string, remove bool) error
 	AddWorktree(ctx context.Context, sessionID string, w WorktreeSpec) (WorktreeState, error)
 	Command(ctx context.Context, c event.Command) (CommandResult, error)

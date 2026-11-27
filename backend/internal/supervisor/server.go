@@ -17,7 +17,6 @@ import (
 	"github.com/trick77/ship/kit/secret"
 
 	"github.com/trick77/flow/internal/event"
-	"github.com/trick77/flow/internal/eventlog"
 	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/layout"
 	"github.com/trick77/flow/internal/ssewire"
@@ -154,7 +153,7 @@ func (s *Supervisor) events(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-	_ = eventlog.NewReader(s.p(layout.EventLog(id))).Follow(ctx, after, wake, func(e event.Event) bool {
+	_ = s.log(id).r.Follow(ctx, after, wake, func(e event.Event) bool {
 		return send(sw, e) == nil
 	})
 }

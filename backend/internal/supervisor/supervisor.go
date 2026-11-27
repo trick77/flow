@@ -55,6 +55,39 @@ type Supervisor struct {
 	envSet flowdproto.Env
 	// locks serializes work on one repository's main checkout (git takes its own lock and fails instead of waiting).
 	locks sync.Map
+	// logs holds one reader per session whose log was read (guarded by mu), so its seq index and the status read
+	// last are kept: a stream open or a status read seeks instead of parsing the log from its start.
+	logs map[string]*sessionLog
+}
+
+// sessionLog is one session's log reader and what Session read from it last (guarded by its own mu).
+type sessionLog struct {
+	r       *eventlog.Reader
+	mu      sync.Mutex
+	lastSeq int64
+	status  event.SessionStatus
+}
+
+// log is the session's reader, made on first use; callers have checked the id (readSpec).
+func (s *Supervisor) log(id string) *sessionLog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.logs == nil {
+		s.logs = map[string]*sessionLog{}
+	}
+	l, ok := s.logs[id]
+	if !ok {
+		l = &sessionLog{r: eventlog.NewReader(s.p(layout.EventLog(id))), status: event.SessionStatusIdle}
+		s.logs[id] = l
+	}
+	return l
+}
+
+// forgetLog drops a session's reader (its session removed); a stream still using it keeps its own reference.
+func (s *Supervisor) forgetLog(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.logs, id)
 }
 
 // New returns a Supervisor.
@@ -110,14 +143,17 @@ func (s *Supervisor) Hello(ctx context.Context) (flowdproto.Hello, error) {
 	if err != nil {
 		return h, err
 	}
+	// One short budget for all host sockets, one for all terminal sockets: Flow gives the whole Hello 3 s, and a
+	// stalled host or terminal must not cost the sandbox its flowd. One that does not answer in time is reported by
+	// its unit state alone (no log read either: after a flowd restart a long log would take the time again).
+	sctx, scancel := context.WithTimeout(ctx, helloSessionBudget)
 	for _, u := range units {
 		id := strings.TrimSuffix(strings.TrimPrefix(u, "flow-session-"), ".service")
-		if st, err := s.Session(ctx, id); err == nil {
+		if st, err := s.session(ctx, sctx, id, false); err == nil {
 			h.Sessions = append(h.Sessions, st)
 		}
 	}
-	// One short budget for all terminal sockets: Flow gives the whole Hello 3 s, and a stalled terminal must not cost
-	// the sandbox its flowd. A terminal that does not answer in time is reported by its unit state alone.
+	scancel()
 	qctx, cancel := context.WithTimeout(ctx, helloTerminalBudget)
 	defer cancel()
 	if h.Terminals, err = s.terminals(ctx, qctx); err != nil {
@@ -126,8 +162,12 @@ func (s *Supervisor) Hello(ctx context.Context) (flowdproto.Hello, error) {
 	return h, nil
 }
 
-// helloTerminalBudget bounds Hello's questions to the terminal sockets together.
-const helloTerminalBudget = 500 * time.Millisecond
+// helloSessionBudget and helloTerminalBudget bound Hello's questions to the host sockets together and to the
+// terminal sockets together.
+const (
+	helloSessionBudget  = 500 * time.Millisecond
+	helloTerminalBudget = 500 * time.Millisecond
+)
 
 // release is the release directory flowd runs from (Hello.Release), "" when its binary is not in one.
 func (s *Supervisor) release() string {
@@ -540,6 +580,12 @@ func hasWorktree(ws []flowdproto.WorktreeState, repo string) bool {
 
 // Session implements flowdproto.API: the unit, and the host's own view when it runs, else the log's.
 func (s *Supervisor) Session(ctx context.Context, id string) (flowdproto.SessionState, error) {
+	return s.session(ctx, ctx, id, true)
+}
+
+// session is Session with qctx bounding the question to the host's socket; fromLog false reports a host that does
+// not answer by its unit state alone.
+func (s *Supervisor) session(ctx, qctx context.Context, id string, fromLog bool) (flowdproto.SessionState, error) {
 	sp, err := s.readSpec(id)
 	if err != nil {
 		return flowdproto.SessionState{}, err
@@ -552,24 +598,29 @@ func (s *Supervisor) Session(ctx context.Context, id string) (flowdproto.Session
 	if st.Worktrees == nil {
 		st.Worktrees = []flowdproto.WorktreeState{}
 	}
-	if h, err := s.hostHello(ctx, id); err == nil {
+	if h, err := s.hostHello(qctx, id); err == nil {
 		st.HostVersion, st.HostProtocol, st.LastSeq, st.Status = h.Version, h.Protocol, h.LastSeq, h.Status
 		return st, nil
 	}
-	evs, err := eventlog.NewReader(s.p(layout.EventLog(id))).Read(0, 0)
-	if err != nil {
-		return st, err
+	if !fromLog {
+		return st, nil
 	}
+	// From the log, read on from where the last read ended.
+	l := s.log(id)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	evs, err := l.r.Read(l.lastSeq, 0)
 	for _, e := range evs {
-		st.LastSeq = e.Seq
+		l.lastSeq = e.Seq
 		if e.Kind == event.KindSessionStatus {
 			var p event.SessionStatusChanged
 			if json.Unmarshal(e.Data, &p) == nil {
-				st.Status = p.Status
+				l.status = p.Status
 			}
 		}
 	}
-	return st, nil
+	st.LastSeq, st.Status = l.lastSeq, l.status
+	return st, err
 }
 
 // StopSession implements flowdproto.API.
@@ -587,16 +638,27 @@ func (s *Supervisor) StopSession(ctx context.Context, id string, remove bool) er
 	if !remove {
 		return nil
 	}
+	s.forgetLog(id)
 	// Safe to run again after any partial run: a worktree already gone counts as removed.
+	kept := false
 	for _, w := range sp.Worktrees {
 		dir, _ := repoDir(w.Repo)
 		checkout := s.p(layout.Checkout(dir))
 		unlock := s.lock(checkout)
-		err := s.removeWorktree(ctx, checkout, s.p(w.Path), w)
+		dirty, err := s.removeWorktree(ctx, checkout, s.p(w.Path), w)
 		unlock()
 		if err != nil {
 			return err
 		}
+		if dirty {
+			kept = true
+			s.o.Log.Warn("worktree kept: it holds uncommitted or untracked changes", "session", id, "worktree", w.Path,
+				"branch", w.Branch)
+		}
+	}
+	if kept {
+		// The directory and its claim stay with the kept work: a later session of that name must not adopt it.
+		return nil
 	}
 	_ = os.Remove(s.p(sp.Dir)) // only when empty
 	// The worktrees are gone: the directory's name may serve another session. Only this session's claim is freed.
@@ -609,30 +671,39 @@ func (s *Supervisor) StopSession(ctx context.Context, id string, remove bool) er
 	return nil
 }
 
-// removeWorktree removes one worktree of a session and its branch; callers hold the checkout's lock. The branch is
-// deleted only when every commit on it is reachable from its base (nothing of its own, or merged since): a branch
-// with commits of its own stays, pushed or not, for the owner to decide.
-func (s *Supervisor) removeWorktree(ctx context.Context, checkout, dir string, w flowdproto.WorktreeState) error {
+// removeWorktree removes one worktree of a session and its branch; callers hold the checkout's lock. A worktree with
+// uncommitted or untracked changes is kept with its branch (dirty true): only the owner may drop work, and a status
+// that cannot be read never counts as clean. The branch is deleted only when every commit on it is reachable from
+// its base (nothing of its own, or merged since): a branch with commits of its own stays, pushed or not, for the
+// owner to decide.
+func (s *Supervisor) removeWorktree(ctx context.Context, checkout, dir string, w flowdproto.WorktreeState) (dirty bool, err error) {
 	if _, err := os.Stat(dir); err == nil {
+		status, err := s.git(ctx, dir, "status", "--porcelain")
+		if err != nil {
+			return false, fmt.Errorf("worktree %s: %w", dir, err)
+		}
+		if status != "" {
+			return true, nil
+		}
 		if _, err := s.git(ctx, checkout, "worktree", "remove", "--force", dir); err != nil {
-			return err
+			return false, err
 		}
 	} else if errors.Is(err, os.ErrNotExist) {
 		if _, err := s.git(ctx, checkout, "worktree", "prune"); err != nil {
-			return err
+			return false, err
 		}
 	} else {
-		return err
+		return false, err
 	}
 	if _, err := s.git(ctx, checkout, "rev-parse", "--verify", "--quiet", "refs/heads/"+w.Branch); err != nil {
-		return nil //nolint:nilerr // no such branch (removed before): done
+		return false, nil //nolint:nilerr // no such branch (removed before): done
 	}
 	own, err := s.ownCommits(ctx, checkout, w.BaseRef, w.Branch)
 	if err != nil || own > 0 {
-		return err
+		return false, err
 	}
 	_, err = s.git(ctx, checkout, "branch", "-D", w.Branch)
-	return err
+	return false, err
 }
 
 // claim makes session id the owner of the session directory name, or refuses when another id owns it: worktrees
@@ -718,7 +789,11 @@ func (s *Supervisor) hostHello(ctx context.Context, id string) (hostproto.Hello,
 		return hostproto.Hello{}, err
 	}
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	deadline := time.Now().Add(3 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = conn.SetDeadline(deadline)
 	resp, err := roundTrip(conn, hostproto.Request{ID: "h", Op: hostproto.OpHello})
 	if err != nil {
 		return hostproto.Hello{}, err
