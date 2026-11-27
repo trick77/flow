@@ -25,9 +25,14 @@ BAN_WAIT="${BAN_WAIT:-60}" # seconds its owner gets to put it first again
 # containers starting): a difference it matches is shown, never counted. Never excuses a line of Flow's own. Empty
 # (the default): every difference outside Flow's and the ban chain's counts. Example: 'f2b-|crowdsec'.
 OTHER_CHURN="${OTHER_CHURN:-}"
-INCUS_LISTEN="${INCUS_LISTEN:-127.0.0.1:8443}"
+# The Incus API on the sandbox network's gateway: Flow's container reaches it there (loopback is the container's
+# own), sandboxes do not (policy flow-sb-host), other containers only with a trusted client certificate. Incus
+# can bind it at boot: the drop-in starts Incus after Docker has made the bridge.
+INCUS_LISTEN="${INCUS_LISTEN:-$GATEWAY:8443}"
 INCUS_DIR="${INCUS_DIR:-/var/lib/incus}" # Incus' own variable: where its server.crt lies
 CERT_DIR="${CERT_DIR:-/etc/flow-host/incus}"
+# Owner of CERT_DIR and its files: the uid:gid Flow's container runs as (compose.yaml `user`), never 1000.
+CERT_OWNER="${CERT_OWNER:-65532:65532}"
 POOL_DRIVER="${POOL_DRIVER:-btrfs}"
 POOL_SIZE="${POOL_SIZE:-40GiB}"
 STATE_DIR="${STATE_DIR:-/var/lib/flow-host/host-setup}"

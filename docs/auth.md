@@ -33,8 +33,8 @@ to `groups` (kit/auth reads only that one).
 
 All but the TTL are required in oidc mode, the subject and group as "at least one of": without either Flow refuses
 to start. `BACKEND_PUBLIC_FQDN` must be a bare host name (no scheme, port, path or trailing dot). In the container,
-`compose.yaml` passes nothing of this itself: every setting above goes into `.env` next to it, or Flow does not
-boot (oidc is the default mode).
+`compose.yaml` passes nothing of this itself: every setting above goes into `.env` next to it (template
+`deploy/flow.env.example`, sequence `docs/deploy.md`), or Flow does not boot (oidc is the default mode).
 
 ## Admission
 
