@@ -159,9 +159,11 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 	svc.CloseTerminals = func(ctx context.Context, api flowdproto.API, id string) error {
 		return api.CloseTerminal(ctx, terminals.SessionTerminalID(id, 1))
 	}
-	// Archives made while a sandbox was stopped are finished when it is up again.
+	// Archives made while a sandbox was stopped are finished when it is up again, and turns its stop cut off are
+	// closed.
 	manager.Warmed = func(projectID string, api flowdproto.API) {
 		svc.Sweep(context.WithoutCancel(ctx), projectID, api)
+		svc.CloseLostTurns(context.WithoutCancel(ctx), projectID, api)
 	}
 	// A project's sandbox and rows go only when no session of it is in use (archived ones go with them).
 	active := func(ctx context.Context, projectID string) (int, error) {
@@ -183,7 +185,7 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 		DefaultBranch:  projects.RemoteDefaultBranch("https://github.com/", &http.Client{Timeout: 30 * time.Second}),
 		ActiveSessions: active, Publish: publish}
 	areas.Sandboxes = &sandboxes.API{Manager: manager, ActiveSessions: active}
-	areas.Sessions = &sessions.API{Service: svc}
+	areas.Sessions = &sessions.API{Service: svc, Keys: creds}
 	areas.Timeline = &timeline.API{Sessions: svc, Hub: hub}
 	areas.Terminals = &terminals.API{Sessions: svc.Store, Projects: projectStore, Sandboxes: manager, Lock: svc.Lock}
 	return nil
@@ -196,7 +198,7 @@ func handler(cfg config.Config, opts httpapi.Options) http.Handler {
 }
 
 // sandboxManager is the sandboxes area: addresses persisted in the sandbox rows (adopted from the instances' NICs
-// on first use), and the memory ceiling for all running sandboxes from the configuration.
+// on first use), and the memory admission for all running sandboxes from the configuration.
 func sandboxManager(cfg config.Config, db *sql.DB, projectStore projects.SQL, runtime sandbox.Runtime,
 	sealer credentials.Sealer, hub *sse.Hub[apitypes.AppEvent]) *sandboxes.Manager {
 	// Packed once per Flow process: the same files give the same bytes, and so the same release.
@@ -217,7 +219,7 @@ func sandboxManager(cfg config.Config, db *sql.DB, projectStore projects.SQL, ru
 	m := &sandboxes.Manager{Store: sandboxes.SQL{DB: db}, Projects: projectStore, Runtime: runtime,
 		Dialer: flowdclient.NewDialer(), Sealer: sealer, Image: cfg.SandboxImage, Network: cfg.SandboxNetwork,
 		Memory: cfg.SandboxMemory, CPUs: cfg.SandboxCPUs, MemoryTotal: cfg.SandboxMemoryTotal,
-		HomeVolume: cfg.HomeVolume, Sidecar: bundle,
+		MemoryHeadroom: cfg.SandboxMemoryHeadroom, HomeVolume: cfg.HomeVolume, Sidecar: bundle,
 		Addresses: sandboxes.SQLAddresses{DB: db, Network: cfg.SandboxNetwork},
 		Version:   version.String(), Log: slog.Default(), Wait: time.Minute, Poll: 200 * time.Millisecond,
 		LockWait: 2 * time.Second,
