@@ -65,13 +65,17 @@ export function applyAppEvent(lists: Lists, e: AppEvent): Lists {
 
 // applyAnswer changes the lists by the answer to the owner's own request.
 // An answer is no event: one that comes back after the stream has shown a
-// newer state must not set it back. So a project already known is left as
-// the stream keeps it (a created project's answer only adds it), and removals
+// newer state must not set it back. So a project or session already known is
+// left as the stream keeps it (a creation's answer only adds it), and removals
 // are applied as they are (they cannot be stale).
 export function applyAnswer(lists: Lists, e: AppEvent): Lists {
   switch (e.kind) {
     case "project.updated":
       return lists.projects.some((p) => p.id === e.projectId)
+        ? lists
+        : applyAppEvent(lists, e);
+    case "session.updated":
+      return !e.session || lists.sessions.some((s) => s.id === e.session?.id)
         ? lists
         : applyAppEvent(lists, e);
     case "project.removed":

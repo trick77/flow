@@ -2,6 +2,7 @@
 export const shell = {
   empty: "No sessions yet.",
   emptyHint: "Sessions you start will show up here.",
+  newSession: "New session",
   session: "Session",
   crumbSeparator: "/",
   branch: "Branch",

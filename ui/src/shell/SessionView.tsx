@@ -8,13 +8,14 @@ import {
   type EventSourceCtor,
 } from "../api";
 import type {
+  AgentCatalog,
   ErrorCode,
   Sandbox,
   SandboxState,
   SessionStatus,
   SessionSummary,
 } from "../api/types.gen";
-import { Composer } from "../composer";
+import { Composer, modelLabel } from "../composer";
 import {
   TerminalDrawer,
   TerminalToggle,
@@ -95,7 +96,10 @@ export function SessionView({
   onArchived,
   nav,
   hidden,
+  catalog,
 }: {
+  // catalog names the session's model; without it the model id shows.
+  catalog?: AgentCatalog;
   session: SessionSummary;
   // sandbox is the project's, as the app stream keeps it.
   sandbox?: Sandbox;
@@ -229,6 +233,11 @@ export function SessionView({
         />
         <Composer
           sessionId={session.id}
+          provider={session.provider}
+          model={session.model}
+          modelLabel={modelLabel(catalog, session.provider, session.model)}
+          mode={session.mode}
+          projectName={projectName}
           running={
             down
               ? status === "working"

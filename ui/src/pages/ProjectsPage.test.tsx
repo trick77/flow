@@ -84,6 +84,7 @@ describe("ProjectsPage", () => {
     ]);
     expect(screen.getByRole("heading", { name: en.title })).toBeInTheDocument();
     const apps = screen.getByRole("article", { name: "apps" });
+    expect(within(apps).getByText("AP")).toHaveClass("pbadge");
     expect(within(apps).getByText(en.sandboxWarm)).toBeInTheDocument();
     expect(within(apps).getByText("2 repositories")).toBeInTheDocument();
     expect(within(apps).getByText("trick77/toolkit")).toBeInTheDocument();

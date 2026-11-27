@@ -1,9 +1,22 @@
-// The session sidebar: sections, grouping, statuses. Owned by the sidebar area.
+// The session sidebar: sections, grouping, statuses, the session search.
+// Owned by the sidebar area.
 export const sidebar = {
   label: "Sessions",
   listLabel: "Session list",
   newSession: "New session",
   search: "Search sessions",
+  // The search button's tooltip, with the platform's shortcut.
+  searchTitle: "Search sessions ({{shortcut}})",
+  shortcutMac: "⌘K",
+  shortcutOther: "Ctrl+K",
+  searchPlaceholder: "Search by title, project or branch",
+  searchEsc: "Esc",
+  searchRecent: "Recent sessions",
+  searchMatches_one: "{{count}} match",
+  searchMatches_other: "{{count}} matches",
+  searchMatchesLabel: "Matching sessions",
+  searchNone: "No session matches.",
+  searchNoSessions: "No sessions yet.",
   groupByStatus: "By status",
   groupByProject: "By project",
   sectionNeeds: "Needs you",
@@ -21,4 +34,7 @@ export const sidebar = {
   statusFailed: "Failed",
   statusIdle: "Idle",
   branch: "Branch",
+  // After the branch of a session working in more than one repository.
+  repoCount_one: "· {{count}} repo",
+  repoCount_other: "· {{count}} repos",
 };

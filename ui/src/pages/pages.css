@@ -133,9 +133,10 @@
   border-radius: 7px;
   background: var(--color-track);
   color: var(--color-badge-ink);
-  font-family: var(--font-mono);
   font-size: 0.75rem;
-  text-transform: lowercase;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1;
 }
 .sbx {
   display: inline-flex;

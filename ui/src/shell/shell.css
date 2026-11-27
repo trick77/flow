@@ -46,6 +46,17 @@
   color: var(--color-ink);
 }
 
+/* New session under the empty start text. */
+.empty-start .empty-new {
+  margin-top: 16px;
+}
+
+/* Narrow: the title needs the room more than the branch chip. */
+@media (max-width: 900px) {
+  .hdr .chip {
+    display: none;
+  }
+}
 /* A session view kept mounted under a page (draft, terminal and stream
    stay): .view's display:flex would beat the hidden attribute. */
 .view[hidden] {

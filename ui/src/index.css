@@ -81,6 +81,9 @@
   /* The session view (mock): the sidebar edge and selected row, the user
      bubble and code blocks, the activity trace, tints behind pills. */
   --color-border-side: #343432;
+  /* The hairline under a view's header: barely there, the scroll area's
+     fade below it does the separating. */
+  --color-border-faint: #252523;
   --color-sel: #10100f;
   --color-bubble: #111110;
   --color-code-bg: #111110;
@@ -291,7 +294,6 @@ svg.i {
   white-space: nowrap;
 }
 .s-branch {
-  grid-column: 1 / -1;
   gap: 6px;
 }
 .s-branch svg.i {
@@ -314,8 +316,8 @@ svg.i {
   color: var(--color-badge-ink);
   font-size: 0.5625rem;
   font-weight: 650;
+  letter-spacing: 0.02em;
   line-height: 1;
-  text-transform: uppercase;
 }
 .s-title {
   grid-column: 1 / -1;
@@ -337,6 +339,27 @@ svg.i {
   font-size: 0.75rem;
   line-height: 16px;
   white-space: nowrap;
+}
+/* The agent of a session: CC filled, OC outlined. */
+.prov {
+  display: inline-grid;
+  place-items: center;
+  height: 15px;
+  min-width: 20px;
+  padding: 0 3px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.5625rem;
+  letter-spacing: 0.04em;
+  line-height: 1;
+}
+.prov-cc {
+  background: var(--color-track);
+  color: var(--color-ink-warm);
+}
+.prov-oc {
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-muted);
 }
 .status {
   display: inline-flex;
@@ -407,7 +430,7 @@ svg.i {
   height: 48px;
   flex: 0 0 auto;
   padding: 0 12px 0 16px;
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border-faint);
   min-width: 0;
 }
 .crumb {

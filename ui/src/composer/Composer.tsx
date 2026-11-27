@@ -8,8 +8,11 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { errorCode, interruptTurn, sendMessage } from "../api";
-import type { ErrorCode } from "../api/types.gen";
+import type { ErrorCode, PermissionMode, Provider } from "../api/types.gen";
+import { AgentPill, useAgentName } from "../shell/AgentPill";
 import { Icon } from "../shell/Icon";
+import "./composer.css";
+import { modeKeys } from "./modes";
 
 // Composer: the message box of a session. Enter sends, Shift+Enter breaks
 // the line. While a turn runs a message queues (the server decides) and a
@@ -17,11 +20,26 @@ import { Icon } from "../shell/Icon";
 export function Composer({
   sessionId,
   running,
+  provider,
+  model,
+  modelLabel,
+  mode,
+  projectName,
 }: {
   sessionId: string;
   running: boolean;
+  // projectName names the sandbox in the note under the box.
+  projectName?: string;
+  // The session's agent, model and permission mode, shown in the bar. The
+  // API cannot change them yet (PATCH /api/sessions/{id} is not built), so
+  // they are not pickers.
+  provider?: Provider;
+  model?: string;
+  modelLabel?: string;
+  mode?: PermissionMode;
 }) {
   const { t } = useTranslation("composer");
+  const agentName = useAgentName();
   const inputId = useId();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -87,6 +105,36 @@ export function Composer({
             onKeyDown={onKeyDown}
           />
           <div className="comp-bar">
+            {provider && model && (
+              <span
+                className="picker picker-ro"
+                role="img"
+                aria-label={t("modelOf", {
+                  agent: agentName(provider),
+                  model: modelLabel ?? model,
+                })}
+                title={t("fixedHint")}
+              >
+                <AgentPill provider={provider} />
+                <span aria-hidden="true">
+                  <span className="long">
+                    {t("agentPrefix", { agent: agentName(provider) })}
+                  </span>
+                  {modelLabel ?? model}
+                </span>
+              </span>
+            )}
+            {mode && mode in modeKeys && (
+              <span
+                className="picker picker-ro"
+                role="img"
+                aria-label={t("modeOf", { mode: t(modeKeys[mode].label) })}
+                title={t("fixedHint")}
+              >
+                <Icon name="shield" />
+                <span aria-hidden="true">{t(modeKeys[mode].label)}</span>
+              </span>
+            )}
             <span className="grow" />
             {running && (
               <button
@@ -114,6 +162,9 @@ export function Composer({
           <p className="comp-error" role="alert">
             {t(error, { ns: "errors" })}
           </p>
+        )}
+        {projectName && (
+          <p className="comp-note">{t("runsIn", { project: projectName })}</p>
         )}
       </div>
     </div>
