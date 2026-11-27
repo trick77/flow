@@ -316,10 +316,13 @@ func (d deliveredFlowd) Hello(ctx context.Context) (flowdproto.Hello, error) {
 	return d.reachable.Hello(ctx)
 }
 
-type deliveredDialer struct{ d *dialer }
+type deliveredDialer struct {
+	d   *dialer
+	rel string
+}
 
 func (dd deliveredDialer) Dial(e flowdproto.Endpoint) flowdproto.API {
-	return deliveredFlowd{reachable: dd.d.Dial(e).(reachable), version: "fake"}
+	return deliveredFlowd{reachable: dd.d.Dial(e).(reachable), version: dd.rel}
 }
 
 // An instance deleted behind Flow's back (the host's teardown) is made again; its row still names the flowd of
@@ -333,7 +336,7 @@ func TestEnsure_recreatedInstanceGetsFlowdAtOnce(t *testing.T) {
 	_ = r.rt.Stop(ctx, "flow-b679dbb3324e", time.Second)
 	_ = r.rt.Delete(ctx, "flow-b679dbb3324e")
 	r.m.Forget(pid)
-	r.m.Dialer, r.m.Wait = deliveredDialer{r.d}, 5*time.Second
+	r.m.Dialer, r.m.Wait = deliveredDialer{r.d, r.release(t)}, 5*time.Second
 	t0 := time.Now()
 	if _, err := r.m.Ensure(ctx, pid); err != nil {
 		t.Fatal(err)

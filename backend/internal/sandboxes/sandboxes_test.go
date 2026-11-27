@@ -84,7 +84,23 @@ func newRig(t *testing.T) *rig {
 		Network: labNetwork(), Memory: 1 << 30, Version: "fake", Log: slog.New(slog.DiscardHandler), Wait: time.Second,
 		Poll: time.Millisecond, Flowd: func(arch string) ([]byte, error) { return []byte("bin-" + arch), nil },
 		Changed: func(id string) { r.events = append(r.events, id) }}
+	// The fake flowd runs this build's release, as one delivered before does.
+	rel, err := r.m.Release("amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.d.fake.SetRelease(rel)
 	return r
+}
+
+// release is the manager's release for the fake's architecture.
+func (r *rig) release(t *testing.T) string {
+	t.Helper()
+	rel, err := r.m.Release("amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rel
 }
 
 const pid = "01a21998-5a4f-7828-81be-b679dbb3324e"
@@ -110,10 +126,10 @@ func TestEnsure(t *testing.T) {
 		t.Error("second Ensure dialled again")
 	}
 	sb, _ := r.m.Store.ByProject(ctx, pid)
-	if sb.State != StateWarm || sb.FlowdVersion != "fake" || len(sb.FlowdToken) == 0 || sb.Arch != "amd64" {
+	if sb.State != StateWarm || sb.FlowdVersion != r.release(t) || len(sb.FlowdToken) == 0 || sb.Arch != "amd64" {
 		t.Errorf("row %+v", sb)
 	}
-	if d := r.m.Describe(ctx, pid); d.State != "warm" || d.FlowdVersion != "fake" {
+	if d := r.m.Describe(ctx, pid); d.State != "warm" || d.FlowdVersion != r.release(t) {
 		t.Errorf("Describe = %+v", d)
 	}
 	token := r.d.endpoints[0].Token
@@ -133,7 +149,10 @@ func TestEnsure(t *testing.T) {
 		t.Fatal(err)
 	}
 	in, _ = r.rt.Instance("flow-b679dbb3324e")
-	for _, p := range []string{layout.Release("2.0.0") + "/flowd.new", layout.Unit, layout.Config} {
+	if rel := r.release(t); !strings.HasPrefix(rel, "2.0.0-") {
+		t.Errorf("release %s does not carry the version", rel)
+	}
+	for _, p := range []string{layout.Release(r.release(t)) + "/flowd.new", layout.Unit, layout.Config} {
 		if _, ok := in.Files[p]; !ok {
 			t.Errorf("not pushed: %s", p)
 		}
@@ -290,11 +309,12 @@ func TestStart_waitsForTheInstalledFlowd(t *testing.T) {
 		t.Fatal(err)
 	}
 	in, _ := r.rt.Instance("flow-b679dbb3324e")
-	if _, ok := in.Files[layout.Release("3.0.0")+"/flowd.new"]; !ok {
+	rel := layout.Release(r.release(t))
+	if _, ok := in.Files[rel+"/flowd.new"]; !ok {
 		t.Errorf("flowd not pushed to a temporary name: %v", in.Files)
 	}
 	script := r.rt.Execs[len(r.rt.Execs)-1].Args[2]
-	if !strings.Contains(script, "[ -e "+layout.Release("3.0.0")+"/flowd ]") || !strings.Contains(script, "mv -f") {
+	if !strings.Contains(script, "[ -e "+rel+"/flowd ]") || !strings.Contains(script, "mv -f") {
 		t.Errorf("activation does not keep an existing release: %s", script)
 	}
 }

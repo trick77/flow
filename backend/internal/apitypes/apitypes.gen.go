@@ -675,8 +675,10 @@ type TerminalCreate struct {
 	ProjectID string `json:"projectId"`
 	// Start in this session's directory; else in the home directory.
 	SessionID string `json:"sessionId,omitempty"`
-	Cols      int    `json:"cols"`
-	Rows      int    `json:"rows"`
+	// 1 to 500.
+	Cols int `json:"cols"`
+	// 1 to 200.
+	Rows int `json:"rows"`
 }
 
 // Terminal is part of the contract.
@@ -694,8 +696,22 @@ type TerminalControl struct {
 
 // TerminalSize is part of the contract.
 type TerminalSize struct {
+	// 1 to 500; others are ignored.
 	Cols int `json:"cols"`
+	// 1 to 200; others are ignored.
 	Rows int `json:"rows"`
+}
+
+// TerminalEvent: Text frame from the server on a terminal WebSocket. exit is the last frame before a normal
+// close.
+type TerminalEvent struct {
+	Exit *TerminalExit `json:"exit,omitempty"`
+}
+
+// TerminalExit is part of the contract.
+type TerminalExit struct {
+	// The shell's exit code, or 128 + the signal that ended it.
+	Code int `json:"code"`
 }
 
 // Preview is part of the contract.

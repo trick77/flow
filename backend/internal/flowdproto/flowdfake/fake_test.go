@@ -367,14 +367,14 @@ func TestSandboxWideCalls(t *testing.T) {
 		"session":   func() error { _, err := f.Session(ctx, "x"); return err }(),
 		"stop":      f.StopSession(ctx, "x", false),
 		"worktree":  func() error { _, err := f.AddWorktree(ctx, "x", flowdproto.WorktreeSpec{}); return err }(),
-		"attach":    func() error { _, err := f.AttachTerminal(ctx, "x"); return err }(),
+		"attach":    func() error { _, err := f.AttachTerminal(ctx, "x", flowdproto.TerminalSize{}); return err }(),
 		"terminals": nil,
 	} {
 		if name != "terminals" && !errors.Is(err, flowdproto.ErrNotFound) {
 			t.Errorf("%s of a missing target: %v", name, err)
 		}
 	}
-	conn, err := f.AttachTerminal(ctx, "t1")
+	conn, err := f.AttachTerminal(ctx, "t1", flowdproto.TerminalSize{})
 	if err != nil {
 		t.Fatal(err)
 	}

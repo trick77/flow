@@ -1,8 +1,10 @@
 package sandboxes
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -54,11 +56,22 @@ type Manager struct {
 	Runtime  sandbox.Runtime
 	Dialer   flowdproto.Dialer
 	Sealer   credentials.Sealer
-	// Image is the base image alias, Network how sandboxes are networked, Memory each instance's memory limit in
-	// bytes.
+	// Image is the base image alias, Network how sandboxes are networked, Memory and CPUs each instance's limits
+	// (0: unset), set at create and again before every start, so a changed setting reaches a stopped sandbox and the
+	// memory ceiling counts what the instance will run with.
 	Image   string
 	Network sandbox.Network
 	Memory  int64
+	CPUs    int
+	// HomeVolume is the one custom volume mounted at layout.HomeVolume in every sandbox, created when missing and
+	// attached at every bring-up (an instance made before it gets it then); "" mounts none.
+	HomeVolume string
+	// Sidecar returns the sidecar bundle delivered with flowd (layout.SidecarArchive, a gzip'd tar of the server
+	// image's sidecar directory); nil delivers none. Its bytes are part of the release's identity.
+	Sidecar func() ([]byte, error)
+	// Env returns the sandbox-wide set (credentials, git identity) pushed to flowd at every bring-up and by PushEnv,
+	// its Revision above every earlier one; nil pushes nothing.
+	Env func(ctx context.Context) (flowdproto.Env, error)
 	// MemoryTotal is the ceiling on the memory limits of all running sandboxes together: a start that would pass
 	// it is refused (ErrMemoryCeiling). 0: no ceiling.
 	MemoryTotal int64
@@ -66,13 +79,17 @@ type Manager struct {
 	Addresses Addresses
 	// Flowd returns the flowd binary for a Go architecture.
 	Flowd func(arch string) ([]byte, error)
-	// Version is this build's: the release flowd must report, else it is delivered again.
+	// Version is this build's; the release flowd must report (Release) carries it.
 	Version string
 	Log     *slog.Logger
 	// Wait bounds each wait (IPv4, flowd answering); Poll is the interval.
 	Wait, Poll time.Duration
 	// Changed is told when a project's sandbox state changes (the app event stream).
 	Changed func(projectID string)
+	// Warmed is told, in a goroutine of its own and outside the project's lock, after every bring-up that greeted
+	// flowd (a start, the reconnect after a Flow restart or a dropped connection), with that flowd: the sessions area
+	// finishes archives made while the sandbox was stopped. nil: nobody.
+	Warmed func(projectID string, api flowdproto.API)
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -81,6 +98,9 @@ type Manager struct {
 	// two projects starting at once cannot both take the last room.
 	addrMu, startMu sync.Mutex
 	addrReady       bool
+	// volMu guards volReady: the home volume exists.
+	volMu    sync.Mutex
+	volReady bool
 }
 
 // cachedAPI is a flowd connection and the address it dials.
@@ -357,6 +377,9 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 		return nil, apitypes.Fail(failCode(err), err.Error())
 	}
 	m.remember(projectID, c)
+	if m.Warmed != nil {
+		go m.Warmed(projectID, c.api)
+	}
 	return c.api, nil
 }
 
@@ -388,7 +411,7 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 	st, err := m.Runtime.State(ctx, sb.Instance)
 	if errors.Is(err, sandbox.ErrNotFound) {
 		err = m.Runtime.Create(ctx, sandbox.Spec{Name: sb.Instance, Image: m.Image, NIC: nic, Nesting: true,
-			Limits: sandbox.Limits{MemoryBytes: m.Memory}})
+			Limits: m.limits()})
 		if err != nil {
 			return cachedAPI{}, fmt.Errorf("create: %w", err)
 		}
@@ -409,6 +432,9 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 	}
 	if err != nil {
 		return cachedAPI{}, err
+	}
+	if err := m.homeVolume(ctx, sb.Instance); err != nil {
+		return cachedAPI{}, fmt.Errorf("home volume: %w", err)
 	}
 	if st.Status == sandbox.StatusRunning {
 		if why := m.misplaced(ctx, st, addr); why != nil {
@@ -457,21 +483,30 @@ func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, start
 	}
 	api := m.Dialer.Dial(flowdproto.Endpoint{Sandbox: sb.Instance, Address: net.JoinHostPort(addr.String(),
 		strconv.Itoa(flowdproto.Port)), Token: token})
+	rel, err := m.Release(st.Arch)
+	if err != nil {
+		return nil, err
+	}
 	// A sandbox that just booted with flowd delivered before needs a moment until flowd listens; delivering again
 	// would only restart it.
-	hello, err := m.hello(ctx, api, started && sb.FlowdVersion != "")
-	if err != nil || hello.Version != m.Version {
+	hello, err := m.hello(ctx, api, started && sb.FlowdVersion != "", true)
+	if err != nil || hello.Release != rel {
 		t2 := time.Now()
-		if err := m.deliver(ctx, sb.Instance, st.Arch, token); err != nil {
+		if err := m.deliver(ctx, sb.Instance, st.Arch, token, rel); err != nil {
 			return nil, fmt.Errorf("deliver flowd: %w", err)
 		}
-		if hello, err = m.hello(ctx, api, true); err != nil {
+		if hello, err = m.hello(ctx, api, true, false); err != nil {
 			return nil, err
 		}
-		m.Log.Info("flowd delivered", "sandbox", sb.Instance, "version", hello.Version, "ms", time.Since(t2).Milliseconds())
+		m.Log.Info("flowd delivered", "sandbox", sb.Instance, "release", rel, "version", hello.Version,
+			"ms", time.Since(t2).Milliseconds())
 	}
 	if !flowdproto.Compatible(hello) {
 		return nil, fmt.Errorf("%w: flowd %s", flowdproto.ErrProtocol, hello.Version)
+	}
+	// After any delivery's restart: a restarted flowd holds no set.
+	if err := m.pushEnv(ctx, api); err != nil {
+		return nil, fmt.Errorf("environment: %w", err)
 	}
 	repos, err := m.Projects.Repos(ctx, sb.ProjectID)
 	if err != nil {
@@ -483,7 +518,7 @@ func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, start
 		}
 	}
 	now := time.Now()
-	sb.Arch, sb.FlowdVersion, sb.StartedAt, sb.LastUsedAt = st.Arch, hello.Version, &now, &now
+	sb.Arch, sb.FlowdVersion, sb.StartedAt, sb.LastUsedAt = st.Arch, cmp.Or(hello.Release, hello.Version), &now, &now
 	sb.State, sb.ProgressCode, sb.ErrorCode = StateWarm, "", ""
 	if err := m.Store.Put(ctx, *sb); err != nil {
 		return nil, err
@@ -499,6 +534,12 @@ func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, start
 func (m *Manager) start(ctx context.Context, st sandbox.State, nic sandbox.NIC) error {
 	m.startMu.Lock()
 	defer m.startMu.Unlock()
+	// The configured limits, also for an instance made under other settings: the ceiling then counts them.
+	l := m.limits()
+	if err := m.Runtime.SetLimits(ctx, st.Name, l); err != nil {
+		return fmt.Errorf("set limits: %w", err)
+	}
+	st.MemoryLimitBytes = l.MemoryBytes // 0 lifted the instance's limit
 	if err := m.roomFor(ctx, st); err != nil {
 		return err
 	}
@@ -532,13 +573,16 @@ func (m *Manager) poll(ctx context.Context, f func() (sandbox.State, bool, error
 	}
 }
 
-func (m *Manager) hello(ctx context.Context, api flowdproto.API, wait bool) (flowdproto.Hello, error) {
+// hello greets flowd, with wait retrying while it does not answer yet. refusedIsFinal: a token refusal ends the wait
+// at once (a flowd that runs with another token, after a rotation, answers that way until the delivery).
+func (m *Manager) hello(ctx context.Context, api flowdproto.API, wait, refusedIsFinal bool) (flowdproto.Hello, error) {
 	deadline := time.Now().Add(m.Wait)
 	for {
 		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		h, err := api.Hello(hctx)
 		cancel()
-		if err == nil || !wait || errors.Is(err, flowdproto.ErrProtocol) || time.Now().After(deadline) {
+		if err == nil || !wait || errors.Is(err, flowdproto.ErrProtocol) || time.Now().After(deadline) ||
+			refusedIsFinal && errors.Is(err, flowdproto.ErrUnauthorized) {
 			return h, err
 		}
 		select {
@@ -550,10 +594,15 @@ func (m *Manager) hello(ctx context.Context, api flowdproto.API, wait bool) (flo
 }
 
 // token is the sandbox's flowd token: made once, kept sealed, so flowd keeps answering Flow across Flow's restarts.
+// A sealed token that no longer opens (a new BACKEND_SEAL_KEY, or dev mode's key made at each start) is rotated:
+// flowd refuses the old one, so the bring-up delivers the config with the new one.
 func (m *Manager) token(ctx context.Context, sb *Sandbox) (string, error) {
 	if len(sb.FlowdToken) > 0 {
 		b, err := m.Sealer.Open(sb.FlowdToken)
-		return string(b), err
+		if err == nil {
+			return string(b), nil
+		}
+		m.Log.Warn("flowd token unreadable with this seal key, making a new one", "sandbox", sb.Instance)
 	}
 	raw := make([]byte, 32)
 	_, _ = rand.Read(raw)
@@ -566,22 +615,123 @@ func (m *Manager) token(ctx context.Context, sb *Sandbox) (string, error) {
 	return token, m.Store.Put(ctx, *sb)
 }
 
-// deliver pushes this release of flowd, its unit and its config, then one bounded exec switches the release and
-// restarts flowd. Releases are never overwritten: the binary goes to a temporary name and is moved into place only
-// when the release does not exist yet. Running hosts keep their binary, and Incus refuses to write onto a running
-// executable anyway (measured: 500 "open …/flowd: text file busy").
-func (m *Manager) deliver(ctx context.Context, instance, arch, token string) error {
+// limits are the instance limits from the settings.
+func (m *Manager) limits() sandbox.Limits {
+	return sandbox.Limits{MemoryBytes: m.Memory, CPUs: m.CPUs}
+}
+
+// homeVolume makes the home volume once per Flow process and attaches it to the instance (a no-op when attached).
+func (m *Manager) homeVolume(ctx context.Context, instance string) error {
+	if m.HomeVolume == "" {
+		return nil
+	}
+	m.volMu.Lock()
+	if !m.volReady {
+		// Not shifted: idmapped mounts are not available on every pool (measured), and the sandboxes share the
+		// project's idmap, so Incus maps the volume the same for all of them (layout.AgentUID).
+		if err := m.Runtime.EnsureVolume(ctx, sandbox.Volume{Name: m.HomeVolume}); err != nil {
+			m.volMu.Unlock()
+			return err
+		}
+		m.volReady = true
+	}
+	m.volMu.Unlock()
+	return m.Runtime.Attach(ctx, instance, sandbox.Mount{Volume: m.HomeVolume, Path: layout.HomeVolume})
+}
+
+// Release is the release directory name a sandbox of arch gets: the version and a hash of the flowd binary and the
+// sidecar bundle, so two builds reporting the same version (an unstamped dev-<commit>-dirty) are told apart and
+// never share a directory, which is never overwritten.
+func (m *Manager) Release(arch string) (string, error) {
+	bin, err := m.Flowd(arch)
+	if err != nil {
+		return "", err
+	}
+	bundle, err := m.bundle()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "flowd %d\n", len(bin))
+	h.Write(bin)
+	_, _ = fmt.Fprintf(h, "sidecar %d\n", len(bundle))
+	h.Write(bundle)
+	return m.Version + "-" + hex.EncodeToString(h.Sum(nil))[:12], nil
+}
+
+func (m *Manager) bundle() ([]byte, error) {
+	if m.Sidecar == nil {
+		return nil, nil
+	}
+	return m.Sidecar()
+}
+
+// pushEnv pushes the current set to one flowd.
+func (m *Manager) pushEnv(ctx context.Context, api flowdproto.API) error {
+	if m.Env == nil {
+		return nil
+	}
+	e, err := m.Env(ctx)
+	if err != nil {
+		return err
+	}
+	return api.PutEnv(ctx, e)
+}
+
+// PushEnv pushes the current set to every warm sandbox, never starting one (a stopped sandbox gets it at its next
+// bring-up). Called when a credential changes; failures are logged, never with the set's values. The stored state
+// is not filtered on: a sandbox in setup has had its set pushed already and turns warm with it, so Warm waits for
+// that bring-up (the project's lock) and the push follows it. One goroutine per sandbox, so a long bring-up holds up
+// no other; PushEnv returns when all are done.
+func (m *Manager) PushEnv(ctx context.Context) {
+	rows, err := m.Store.List(ctx)
+	if err != nil {
+		m.Log.Error("environment push: listing sandboxes", "err", err)
+		return
+	}
+	var wg sync.WaitGroup
+	for _, sb := range rows {
+		wg.Go(func() {
+			api, err := m.Warm(ctx, sb.ProjectID)
+			if err == nil {
+				err = m.pushEnv(ctx, api)
+			}
+			switch {
+			case err == nil:
+				m.Log.Info("environment pushed", "sandbox", sb.Instance)
+			case !errors.Is(err, ErrNotWarm):
+				m.Log.Warn("environment push", "sandbox", sb.Instance, "err", err)
+			}
+		})
+	}
+	wg.Wait()
+}
+
+// deliver pushes this release of flowd with the sidecar bundle, its unit and its config, then one bounded exec
+// switches the release and restarts flowd, which unpacks the bundle before it answers. Releases are never
+// overwritten: the binary goes to a temporary name and is moved into place only when the release does not exist
+// yet, and flowd drops a bundle pushed into a release that has one. Running hosts keep their binary, and Incus
+// refuses to write onto a running executable anyway (measured: 500 "open …/flowd: text file busy").
+func (m *Manager) deliver(ctx context.Context, instance, arch, token, rel string) error {
 	bin, err := m.Flowd(arch)
 	if err != nil {
 		return err
 	}
+	bundle, err := m.bundle()
+	if err != nil {
+		return err
+	}
 	cfg, _ := json.Marshal(map[string]string{"token": token, "sandbox": instance})
-	release := layout.Release(m.Version)
-	err = m.Runtime.Push(ctx, instance,
+	release := layout.Release(rel)
+	files := []sandbox.File{}
+	if bundle != nil {
+		files = append(files, sandbox.File{Path: release + "/" + layout.SidecarArchive, Content: bundle, Mode: 0o600})
+	}
+	files = append(files,
 		sandbox.File{Path: release + "/flowd.new", Content: bin, Mode: 0o755},
 		sandbox.File{Path: layout.Unit, Content: []byte(Unit), Mode: 0o644},
 		sandbox.File{Path: layout.Config, Content: cfg, Mode: 0o600})
-	if err != nil {
+	if err := m.Runtime.Push(ctx, instance, files...); err != nil {
 		return err
 	}
 	script := "set -e; if [ -e " + release + "/flowd ]; then rm -f " + release + "/flowd.new; else mv -f " + release +

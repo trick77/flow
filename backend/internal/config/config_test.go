@@ -20,9 +20,67 @@ func oidcVars(extra map[string]string) map[string]string {
 		"BACKEND_OIDC_CLIENT_SECRET":   "client-secret",
 		"BACKEND_OIDC_ALLOWED_SUBJECT": "owner-sub",
 		"BACKEND_SESSION_SECRET":       strings.Repeat("s", 32),
+		"BACKEND_SEAL_KEY":             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 	}
 	maps.Copy(vars, extra)
 	return vars
+}
+
+// oidc mode keeps credentials across restarts, so it needs a key; dev mode may run without (cmd/flow makes one).
+func TestLoad_sealKey(t *testing.T) {
+	if _, err := Load(lookup(oidcVars(map[string]string{"BACKEND_SEAL_KEY": ""}))); err == nil ||
+		!strings.Contains(err.Error(), "BACKEND_SEAL_KEY") {
+		t.Errorf("oidc without a seal key: %v", err)
+	}
+	// Blank is unset too: it would boot with a key made for this run and lose every credential at the restart.
+	if _, err := Load(lookup(oidcVars(map[string]string{"BACKEND_SEAL_KEY": "  \t"}))); err == nil ||
+		!strings.Contains(err.Error(), "BACKEND_SEAL_KEY") {
+		t.Errorf("oidc with a blank seal key: %v", err)
+	}
+	cfg, err := Load(lookup(map[string]string{"BACKEND_AUTH_MODE": "dev", "BACKEND_ADDR": "127.0.0.1:1",
+		"BACKEND_INCUS_URL": "https://x", "BACKEND_INCUS_CERT": "c", "BACKEND_INCUS_KEY": "k",
+		"BACKEND_INCUS_SERVER_CERT": "s"}))
+	if err != nil || cfg.SealKey != nil {
+		t.Errorf("dev with Incus and no seal key: %v, key %v", err, cfg.SealKey)
+	}
+}
+
+// Sandbox and session limits: defaults sized for a full check (about 4 GiB) inside a 6 GiB sandbox, session
+// defaults that follow the sandbox's, and bounds no session may pass.
+func TestLoad_limits(t *testing.T) {
+	cfg, err := Load(lookup(oidcVars(nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SandboxMemory != 6<<30 || cfg.SandboxCPUs != 4 || cfg.SandboxMemoryTotal != 14<<30 {
+		t.Errorf("sandbox defaults: memory %d, cpus %d, total %d", cfg.SandboxMemory, cfg.SandboxCPUs, cfg.SandboxMemoryTotal)
+	}
+	if want := (SessionLimits{MemoryBytes: 5 << 30, CPUPercent: 300, Tasks: 4096}); cfg.Session != want {
+		t.Errorf("session defaults %+v, want %+v", cfg.Session, want)
+	}
+	if cfg.SessionReplay || cfg.HomeVolume != "flow-home" || cfg.FlowdDir != "/opt/flow" ||
+		cfg.SidecarDir != "/opt/flow/sidecar" || cfg.IncusPool != "default" {
+		t.Errorf("cfg %+v", cfg)
+	}
+	cfg, err = Load(lookup(oidcVars(map[string]string{"BACKEND_SANDBOX_MEMORY_MIB": "2048", "BACKEND_SANDBOX_CPUS": "1",
+		"BACKEND_SESSION_REPLAY": "true"})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Session.MemoryBytes != 1<<30 || cfg.Session.CPUPercent != 100 || !cfg.SessionReplay {
+		t.Errorf("derived session limits %+v, replay %v", cfg.Session, cfg.SessionReplay)
+	}
+	for name, extra := range map[string]map[string]string{
+		"session above the sandbox": {"BACKEND_SESSION_MEMORY_MIB": "7000"},
+		"cpu above the sandbox":     {"BACKEND_SESSION_CPU_PERCENT": "401"},
+		"negative tasks":            {"BACKEND_SESSION_TASKS_MAX": "-1"},
+		"negative cpus":             {"BACKEND_SANDBOX_CPUS": "-1"},
+		"bad replay":                {"BACKEND_SESSION_REPLAY": "maybe"},
+	} {
+		if _, err := Load(lookup(oidcVars(extra))); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
 }
 
 func TestLoad_defaults(t *testing.T) {
@@ -131,7 +189,7 @@ func TestLoad_devAuthAndIncus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AuthMode != AuthDev || len(cfg.SealKey) != 32 || cfg.SandboxImage != "flow-base" || cfg.SandboxMemory != 4<<30 {
+	if cfg.AuthMode != AuthDev || len(cfg.SealKey) != 32 || cfg.SandboxImage != "flow-base" || cfg.SandboxMemory != 6<<30 {
 		t.Errorf("cfg %+v", cfg)
 	}
 	if cfg.OIDC != (OIDC{}) {
@@ -144,7 +202,7 @@ func TestLoad_devAuthAndIncus(t *testing.T) {
 		"dev on every interface": {"BACKEND_AUTH_MODE": "dev"},
 		"bad seal key":           oidcVars(map[string]string{"BACKEND_SEAL_KEY": "short"}),
 		"incus without certs":    oidcVars(map[string]string{"BACKEND_INCUS_URL": "https://x", "BACKEND_SEAL_KEY": key}),
-		"incus without seal key": oidcVars(map[string]string{"BACKEND_INCUS_URL": "https://x", "BACKEND_INCUS_CERT": "c", "BACKEND_INCUS_KEY": "k", "BACKEND_INCUS_SERVER_CERT": "s"}),
+		"oidc without seal key":  oidcVars(map[string]string{"BACKEND_SEAL_KEY": "", "BACKEND_INCUS_URL": "https://x", "BACKEND_INCUS_CERT": "c", "BACKEND_INCUS_KEY": "k", "BACKEND_INCUS_SERVER_CERT": "s"}),
 	} {
 		if _, err := Load(lookup(vars)); err == nil {
 			t.Errorf("%s: accepted", name)

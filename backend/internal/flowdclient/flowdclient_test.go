@@ -75,9 +75,6 @@ func TestUnsupportedAndErrors(t *testing.T) {
 		func() error { _, err := c.StartJob(ctx, flowdproto.JobSpec{}); return err }(),
 		func() error { _, err := c.Job(ctx, "j"); return err }(),
 		func() error { _, err := c.JobLog(ctx, "j", 0); return err }(),
-		func() error { _, err := c.EnsureTerminal(ctx, flowdproto.TerminalSpec{}); return err }(),
-		func() error { _, err := c.AttachTerminal(ctx, "t"); return err }(),
-		c.CloseTerminal(ctx, "t"),
 	}
 	for _, err := range c.Control(ctx) {
 		unsupported = append(unsupported, err)
@@ -93,7 +90,8 @@ func TestUnsupportedAndErrors(t *testing.T) {
 		t.Errorf("port: %d", w.Code)
 	}
 	if !errors.Is(&Error{Body: flowdproto.ErrorBody{Code: flowdproto.CodeInvalid}}, flowdproto.ErrInvalid) ||
-		!errors.Is(&Error{Body: flowdproto.ErrorBody{Code: flowdproto.CodeRepoBroken}}, flowdproto.ErrRepoBroken) {
+		!errors.Is(&Error{Body: flowdproto.ErrorBody{Code: flowdproto.CodeRepoBroken}}, flowdproto.ErrRepoBroken) ||
+		!errors.Is(&Error{Body: flowdproto.ErrorBody{Code: flowdproto.CodeNotImplemented}}, flowdproto.ErrNotImplemented) {
 		t.Error("invalid or repo_broken not mapped")
 	}
 	if (&Error{Body: flowdproto.ErrorBody{Code: "other"}}).Is(flowdproto.ErrNotFound) {

@@ -1,6 +1,6 @@
 // Package flowdclient is Flow's HTTP implementation of flowdproto.API and flowdproto.Dialer (bearer token,
-// Flow-Protocol header, SSE with Last-Event-ID). Terminals, jobs, diffs, control and ports are not part of the
-// walking skeleton and answer ErrUnsupported. Owner: flowd runtime area (docs/ownership.md).
+// Flow-Protocol header, SSE with Last-Event-ID, terminals over WebSocket). Jobs, diffs, control and ports are not
+// part of the walking skeleton and answer ErrUnsupported. Owner: flowd runtime area (docs/ownership.md).
 package flowdclient
 
 import (
@@ -17,10 +17,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/trick77/flow/internal/apitypes"
 	"github.com/trick77/flow/internal/event"
 	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/ssewire"
+	"github.com/trick77/flow/internal/terminals/wsterm"
 )
 
 // ErrUnsupported is a protocol call this build of the client does not make yet.
@@ -127,6 +130,8 @@ func (e *Error) Is(target error) bool {
 		return target == flowdproto.ErrRepoBroken
 	case flowdproto.CodeInvalid:
 		return target == flowdproto.ErrInvalid
+	case flowdproto.CodeNotImplemented:
+		return target == flowdproto.ErrNotImplemented
 	}
 	return false
 }
@@ -265,17 +270,43 @@ func (c *Client) JobLog(context.Context, string, int) ([]flowdproto.LogLine, err
 }
 
 // EnsureTerminal implements flowdproto.API.
-func (c *Client) EnsureTerminal(context.Context, flowdproto.TerminalSpec) (flowdproto.TerminalState, error) {
-	return flowdproto.TerminalState{}, ErrUnsupported
+func (c *Client) EnsureTerminal(ctx context.Context, t flowdproto.TerminalSpec) (flowdproto.TerminalState, error) {
+	var st flowdproto.TerminalState
+	return st, c.call(ctx, http.MethodPut, "/v1/terminals/"+url.PathEscape(t.ID), t, &st)
 }
 
-// AttachTerminal implements flowdproto.API.
-func (c *Client) AttachTerminal(context.Context, string) (flowdproto.TerminalConn, error) {
-	return nil, ErrUnsupported
+// attachWait bounds the WebSocket handshake with flowd (a variable for tests: the connection must outlive it).
+var attachWait = 15 * time.Second
+
+// AttachTerminal implements flowdproto.API: a WebSocket to flowd (internal/terminals/wsterm), on the pooled
+// transport, not under callTimeout: it lives until Close.
+func (c *Client) AttachTerminal(ctx context.Context, id string, size flowdproto.TerminalSize) (flowdproto.TerminalConn, error) {
+	ctx, cancel := context.WithTimeout(ctx, attachWait)
+	defer cancel()
+	u := c.base + "/v1/terminals/" + url.PathEscape(id) + "/attach"
+	if flowdproto.ValidTerminalSize(size.Cols, size.Rows) {
+		u += "?cols=" + strconv.Itoa(size.Cols) + "&rows=" + strconv.Itoa(size.Rows)
+	}
+	h := http.Header{}
+	h.Set("Authorization", "Bearer "+c.token)
+	h.Set(flowdproto.HeaderProtocol, strconv.Itoa(flowdproto.Protocol))
+	// coder/websocket owns resp.Body: nil after an upgrade, an in-memory copy after a refusal.
+	ws, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPClient: c.http, HTTPHeader: h, //nolint:bodyclose // see above
+		CompressionMode: websocket.CompressionDisabled})
+	if err != nil {
+		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
+			return nil, decodeError(resp)
+		}
+		return nil, fmt.Errorf("%w: %w", flowdproto.ErrUnavailable, err)
+	}
+	conn := wsterm.Wrap(ws)
+	return conn, nil
 }
 
 // CloseTerminal implements flowdproto.API.
-func (c *Client) CloseTerminal(context.Context, string) error { return ErrUnsupported }
+func (c *Client) CloseTerminal(ctx context.Context, id string) error {
+	return c.call(ctx, http.MethodDelete, "/v1/terminals/"+url.PathEscape(id), nil, nil)
+}
 
 // Port implements flowdproto.API.
 func (c *Client) Port(int) http.Handler {

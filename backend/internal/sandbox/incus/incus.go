@@ -365,9 +365,10 @@ func (c *Client) Delete(ctx context.Context, name string) error {
 	return err
 }
 
-// SetLimits implements sandbox.Runtime.
+// SetLimits implements sandbox.Runtime. A zero CPU or memory limit is sent empty, which Incus takes as unset: a
+// limit taken back in the settings is then lifted on the instance too, not kept from an earlier start.
 func (c *Client) SetLimits(ctx context.Context, name string, l sandbox.Limits) error {
-	config := map[string]string{}
+	config := map[string]string{"limits.cpu": "", "limits.memory": ""}
 	limits(config, l)
 	err := c.sync(ctx, http.MethodPatch, inst(name), map[string]any{"config": config})
 	return err

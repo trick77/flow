@@ -147,6 +147,11 @@ func newRig(t *testing.T) *rig {
 	r := &rig{t: t, root: root, base: base, units: newUnits()}
 	t.Cleanup(r.units.stopAll)
 	r.flowd()
+	// Flow's bring-up pushes the set before anything else; flowd starts no unit without one. A restart (flowd())
+	// loses it, as a real one does.
+	if err := r.api.PutEnv(context.Background(), flowdproto.Env{Revision: 1}); err != nil {
+		t.Fatal(err)
+	}
 	return r
 }
 
@@ -217,7 +222,7 @@ func TestSessionLifecycle(t *testing.T) {
 		t.Fatalf("fetch of an existing checkout: %v", err)
 	}
 	spec := flowdproto.SessionSpec{ID: "s1", Name: "demo", Provider: event.ProviderClaude, Model: "m",
-		Mode: event.PermissionModeAsk, Limits: flowdproto.Limits{MemoryMaxBytes: 1 << 30, CPUQuotaPercent: 200},
+		Mode: event.PermissionModeAsk, Limits: flowdproto.Limits{MemoryMaxBytes: 1 << 30, CPUQuotaPercent: 200}, Replay: true,
 		Worktrees: []flowdproto.WorktreeSpec{
 			{Repo: "trick77/toolkit", Branch: "flow/demo", BaseRef: "origin/master"},
 			{Repo: "trick77/ship", Branch: "flow/demo", BaseRef: "origin/master"}}}
@@ -299,6 +304,21 @@ func TestSessionLifecycle(t *testing.T) {
 	if _, err := r.api.Command(ctx, command(t, "m2", event.CmdTurnInterrupt, event.TurnInterrupt{})); !errors.Is(err, flowdproto.ErrUnavailable) {
 		t.Errorf("command to a stopped host: %v", err)
 	}
+	// The restarted flowd holds no set: it starts no host (one would run without its credential) until Flow
+	// pushes again, which Flow does on the busy answer.
+	if h, _ := r.api.Hello(ctx); h.EnvRevision != 0 {
+		t.Errorf("env revision after restart %d", h.EnvRevision)
+	}
+	if _, err := r.api.EnsureSession(ctx, spec); !errors.Is(err, flowdproto.ErrUnavailable) ||
+		len(r.units.started) != 1 {
+		t.Fatalf("host start without a set: %v (starts %v)", err, r.units.started)
+	}
+	if err := r.api.PutEnv(ctx, flowdproto.Env{Revision: 3}); err != nil {
+		t.Error(err)
+	}
+	if h, _ := r.api.Hello(ctx); h.EnvRevision != 3 {
+		t.Errorf("env revision %d", h.EnvRevision)
+	}
 	// The next start resumes.
 	if _, err := r.api.EnsureSession(ctx, spec); err != nil {
 		t.Fatal(err)
@@ -306,12 +326,6 @@ func TestSessionLifecycle(t *testing.T) {
 	resumed := collect(t, r.api, st2.LastSeq, kindIs(event.KindSessionResumed))
 	if len(durable(resumed)) != 1 {
 		t.Errorf("after restart: %v", resumed)
-	}
-	if err := r.api.PutEnv(ctx, flowdproto.Env{Revision: 3}); err != nil {
-		t.Error(err)
-	}
-	if h, _ := r.api.Hello(ctx); h.EnvRevision != 3 {
-		t.Errorf("env revision %d", h.EnvRevision)
 	}
 	if err := r.api.StopSession(ctx, "s1", true); err != nil {
 		t.Errorf("stop and remove: %v", err)
@@ -431,7 +445,7 @@ func TestEnsureSession_adoptsOnlyItsOwnWorktrees(t *testing.T) {
 	ctx := context.Background()
 	spec := func(id string) flowdproto.SessionSpec {
 		return flowdproto.SessionSpec{ID: id, Name: "same", Provider: event.ProviderClaude, Model: "m", Mode: "ask",
-			Worktrees: []flowdproto.WorktreeSpec{{Repo: "trick77/toolkit", Branch: "flow/same", BaseRef: "origin/master"}}}
+			Replay: true, Worktrees: []flowdproto.WorktreeSpec{{Repo: "trick77/toolkit", Branch: "flow/same", BaseRef: "origin/master"}}}
 	}
 	if _, err := r.api.EnsureSession(ctx, spec("s1")); err != nil {
 		t.Fatal(err)
@@ -570,7 +584,8 @@ func TestRun_servesUntilStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, slog.New(slog.DiscardHandler), "1.2.3", cfg, &Options{Units: newUnits(), Run: ExecRunner{}})
+		done <- run(ctx, slog.New(slog.DiscardHandler), "1.2.3", cfg, &Options{Root: dir, Units: newUnits(),
+			Run: ExecRunner{}})
 	}()
 	time.Sleep(100 * time.Millisecond)
 	cancel()
@@ -609,7 +624,7 @@ func TestSystemd(t *testing.T) {
 	}
 	got := strings.Join(f.cmds[0].Args, " ")
 	for _, want := range []string{"--unit=flow-session-s1.service", "--uid=65532", "--collect", "MemorySwapMax=0",
-		"-p MemoryMax=1", "-- /opt/flow/releases/1/flowd host"} {
+		"-p OOMPolicy=continue", "-p MemoryMax=1", "-- /opt/flow/releases/1/flowd host"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("systemd-run %s lacks %q", got, want)
 		}

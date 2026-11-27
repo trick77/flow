@@ -243,6 +243,10 @@ func (f *fake) instance(w http.ResponseWriter, r *http.Request, parts []string, 
 		}
 		if c, ok := body["config"].(map[string]any); ok {
 			for k, v := range c {
+				if v.(string) == "" { // Incus stores no empty value: the key is unset
+					delete(in.config, k)
+					continue
+				}
 				in.config[k] = v.(string)
 			}
 		}
@@ -409,6 +413,16 @@ func TestLifecycle(t *testing.T) {
 	}
 	if err := c.SetLimits(ctx, "sb1", sandbox.Limits{CPUs: 4}); err != nil {
 		t.Error(err)
+	}
+	// A limit set back to 0 is lifted, not kept from before: memory was set at create, CPUs just now.
+	if got := f.instances["sb1"].config; got["limits.cpu"] != "4" || got["limits.memory"] != "" {
+		t.Errorf("limits after SetLimits{CPUs: 4}: %v", got)
+	}
+	if err := c.SetLimits(ctx, "sb1", sandbox.Limits{}); err != nil {
+		t.Error(err)
+	}
+	if got := f.instances["sb1"].config; got["limits.cpu"] != "" || got["limits.memory"] != "" {
+		t.Errorf("limits after SetLimits{}: %v", got)
 	}
 	if err := c.Delete(ctx, "sb1"); !errors.Is(err, sandbox.ErrState) {
 		t.Errorf("delete of a running instance: %v", err)

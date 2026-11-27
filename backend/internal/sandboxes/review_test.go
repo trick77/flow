@@ -154,7 +154,7 @@ func TestEnsure_recreatedVersionClearIsPersisted(t *testing.T) {
 	_ = r.rt.Stop(ctx, "flow-b679dbb3324e", time.Second)
 	_ = r.rt.Delete(ctx, "flow-b679dbb3324e")
 	r.m.Forget(pid)
-	r.m.Dialer, r.m.Wait = deliveredDialer{r.d}, 3*time.Second
+	r.m.Dialer, r.m.Wait = deliveredDialer{r.d, r.release(t)}, 3*time.Second
 	r.failFirstDelivery()
 	if _, err := r.m.Ensure(ctx, pid); err == nil {
 		t.Fatal("first delivery did not fail")

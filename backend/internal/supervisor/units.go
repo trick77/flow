@@ -65,11 +65,14 @@ type Units interface {
 type Systemd struct{ Run Runner }
 
 // Start implements Units: a service (not a scope, so it is nobody's child), collected after it ends, never
-// restarted by systemd (flowd restarts hosts on the next message, with resume), swap off.
+// restarted by systemd (flowd restarts hosts on the next message, with resume), swap off. OOMPolicy=continue:
+// systemd's default for services (stop) ends the whole unit when the kernel kills one of its processes at
+// MemoryMax (measured, systemd 257: "Failed with result 'oom-kill'"), so an agent's oversized build would take its
+// session host down with it; with continue only that process dies and the host reports the failed command.
 func (s Systemd) Start(ctx context.Context, unit string, argv []string, props []string) error {
 	args := []string{"--unit=" + unit, "--uid=" + strconv.Itoa(layout.AgentUID), "--gid=" + strconv.Itoa(layout.AgentGID),
 		"--collect", "--service-type=exec", "--quiet", "-p", "Restart=no", "-p", "MemorySwapMax=0",
-		"--setenv=HOME=" + layout.Home}
+		"-p", "OOMPolicy=continue", "--setenv=HOME=" + layout.Home}
 	for _, p := range props {
 		args = append(args, "-p", p)
 	}

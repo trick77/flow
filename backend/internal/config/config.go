@@ -43,8 +43,19 @@ type Config struct {
 	// SandboxMemory is each sandbox's limits.memory in bytes (0: none). Setting it also keeps the sandbox from
 	// swapping (spike finding 7). SandboxMemoryTotal is the ceiling for all running sandboxes together.
 	SandboxMemory, SandboxMemoryTotal int64
-	// FlowdDir holds flowd-linux-amd64 and flowd-linux-arm64, the binaries Flow pushes into sandboxes.
-	FlowdDir string
+	// SandboxCPUs is each sandbox's limits.cpu (0: all of the host's).
+	SandboxCPUs int
+	// Session bounds each session host unit and everything its agent runs (systemd MemoryMax, CPUQuota, TasksMax;
+	// MemorySwapMax=0 always).
+	Session SessionLimits
+	// SessionReplay makes session hosts play the recorded demo turn instead of starting the agent: demos, and
+	// machines without a Claude credential. Read at each host start.
+	SessionReplay bool
+	// HomeVolume is the custom volume mounted into every sandbox (layout.HomeVolume); IncusPool holds it.
+	HomeVolume, IncusPool string
+	// FlowdDir holds flowd-linux-amd64 and flowd-linux-arm64, the binaries Flow pushes into sandboxes; SidecarDir
+	// the sidecar bundle delivered with them (package.json, dist/, production node_modules).
+	FlowdDir, SidecarDir string
 	// OIDC is the oidc mode's sign-in; empty in dev mode.
 	OIDC OIDC
 }
@@ -91,12 +102,19 @@ func Load(getenv func(string) string) (Config, error) {
 		IncusCert:       r.String("BACKEND_INCUS_CERT", ""),
 		IncusKey:        r.String("BACKEND_INCUS_KEY", ""),
 		IncusServerCert: r.String("BACKEND_INCUS_SERVER_CERT", ""),
+		IncusPool:       r.String("BACKEND_INCUS_POOL", "default"),
 		SandboxImage:    r.String("BACKEND_SANDBOX_IMAGE", "flow-base"),
 		SandboxNetwork:  loadSandboxNetwork(r),
-		SandboxMemory:   int64(r.Int("BACKEND_SANDBOX_MEMORY_MIB", 4096)) << 20,
-		FlowdDir:        r.String("BACKEND_FLOWD_DIR", "/flowd"),
+		SandboxMemory:   int64(r.Int("BACKEND_SANDBOX_MEMORY_MIB", DefaultSandboxMemoryMiB)) << 20,
+		SandboxCPUs:     r.Int("BACKEND_SANDBOX_CPUS", DefaultSandboxCPUs),
+		SessionReplay:   r.Bool("BACKEND_SESSION_REPLAY", false),
+		HomeVolume:      r.String("BACKEND_HOME_VOLUME", "flow-home"),
+		// Where backend/Containerfile puts them.
+		FlowdDir:   r.String("BACKEND_FLOWD_DIR", "/opt/flow"),
+		SidecarDir: r.String("BACKEND_SIDECAR_DIR", "/opt/flow/sidecar"),
 	}
 	cfg.SandboxMemoryTotal = loadSandboxMemoryTotal(r, cfg.SandboxMemory)
+	cfg.Session = loadSessionLimits(r, cfg.SandboxMemory, cfg.SandboxCPUs)
 	checkAddrOffSandboxNetwork(r, cfg.Addr, cfg.SandboxNetwork)
 	// net.Listen would refuse it too, but only after the rest of startup ran.
 	host, _, err := net.SplitHostPort(cfg.Addr)
@@ -114,13 +132,15 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if cfg.AuthMode == AuthOIDC {
 		cfg.OIDC = loadOIDC(r)
+		// Dev mode makes a key per start (cmd/flow); a real installation must keep its secrets across restarts.
+		// Blank counts as unset (as the reader above takes it); a key that is set but bad has its own fault.
+		if cfg.SealKey == nil && strings.TrimSpace(getenv("BACKEND_SEAL_KEY")) == "" {
+			r.Fail("BACKEND_AUTH_MODE=oidc needs BACKEND_SEAL_KEY (32 bytes, base64): credentials are stored sealed")
+		}
 	}
 	if cfg.IncusURL != "" {
 		if cfg.IncusCert == "" || cfg.IncusKey == "" || cfg.IncusServerCert == "" {
 			r.Fail("BACKEND_INCUS_URL needs BACKEND_INCUS_CERT, BACKEND_INCUS_KEY and BACKEND_INCUS_SERVER_CERT")
-		}
-		if cfg.SealKey == nil {
-			r.Fail("BACKEND_INCUS_URL needs BACKEND_SEAL_KEY: flowd tokens are stored sealed")
 		}
 	}
 	if err := r.Err(); err != nil {
