@@ -44,4 +44,53 @@ export const settings = {
     "Paste the whole value on one line; at most {{max}} characters.",
   confirmRemove:
     "Delete the stored {{what}}? Sessions that use it stop working until you store another.",
+  // GitHub.
+  github: "GitHub",
+  githubUnavailable: "Not available: this server has no GitHub App configured.",
+  githubDisconnectedHint:
+    "Connect to let agents push and reach private repositories.",
+  githubPendingHint: "A connection was started but not confirmed on GitHub.",
+  githubConnectedAs: "Connected as {{login}}",
+  githubConnected: "Connected",
+  githubSince: "since {{date}}",
+  githubRenewBy: "renew by {{date}}",
+  githubSeparator: " · ",
+  githubExpiredHint:
+    "The authorization expired. Agents cannot push or reach private repositories until you reconnect.",
+  githubUnknownState: "The connection is in a state this page does not know.",
+  pillUnavailable: "Unavailable",
+  pillNotConnected: "Not connected",
+  pillConnecting: "Connecting",
+  pillConnected: "Connected",
+  pillReconnect: "Reconnect needed",
+  pillError: "Error",
+  connect: "Connect",
+  starting: "Starting…",
+  reconnect: "Reconnect",
+  startAgain: "Start again",
+  disconnect: "Disconnect",
+  disconnecting: "Disconnecting…",
+  confirmDisconnect:
+    "Disconnect GitHub? Agents can no longer push or reach private repositories. Running sessions keep working with what they already have.",
+  // The device flow.
+  deviceTitle: "Connect GitHub",
+  deviceEnter: "Enter this code on GitHub to connect Flow.",
+  deviceCode: "Code to enter on GitHub",
+  deviceCopy: "Copy code",
+  deviceCopied: "Copied",
+  deviceCopyFailed: "Copying failed: select the code and copy it by hand.",
+  deviceOpen: "Open GitHub",
+  deviceOpenHint: "Opens in a new tab.",
+  deviceExpiresIn: "The code expires in {{time}}.",
+  deviceTime: "{{minutes}}:{{seconds}}",
+  deviceWaiting: "Waiting for your confirmation on GitHub…",
+  devicePaused:
+    "Paused while this tab is hidden; it goes on when you come back.",
+  deviceConnectedAs: "Connected as {{login}}.",
+  deviceConnected: "GitHub is connected.",
+  deviceDenied:
+    "GitHub did not confirm the connection: it was denied or the code is no longer valid.",
+  deviceExpired: "The code expired before it was confirmed.",
+  deviceFailed: "Connecting failed.",
+  tryAgain: "Try again",
 };

@@ -1,4 +1,11 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -10,9 +17,15 @@ import {
   getProfile,
   updateProfile,
 } from "../api";
-import type { ApiKey, ErrorCode, Profile } from "../api/types.gen";
+import type {
+  ApiKey,
+  ErrorCode,
+  GitHubConnection,
+  Profile,
+} from "../api/types.gen";
 import { formatDateTime, formatNumber } from "../i18n/format";
 import { Icon, type IconName } from "../shell";
+import { GitHubRow } from "./GitHubRow";
 import { Page } from "./Page";
 
 // MAX_SECRET is the backend's bound on a stored secret (credentials.MaxSecret).
@@ -21,27 +34,43 @@ const MAX_SECRET = 4096;
 type Loaded =
   | { kind: "loading" }
   | { kind: "failed"; code: ErrorCode }
-  | { kind: "ready"; profile: Profile; keys: ApiKey[] };
+  | {
+      kind: "ready";
+      profile: Profile;
+      keys: ApiKey[];
+      github: GitHubConnection;
+    };
 
 // SettingsPage is the owner's profile (the git identity sessions commit with)
-// and the Claude credentials: the subscription token and the API key, shown
-// only as stored or not, never as their values.
+// and the connections: GitHub, and the Claude credentials (the subscription
+// token and the API key, shown only as stored or not, never as their values).
+// connectionsRev counts the app stream's connections.updated frames: each
+// one reads the connections again.
 export function SettingsPage({
   nav,
   onBack,
+  connectionsRev = 0,
 }: {
   nav: ReactNode;
   onBack?: () => void;
+  connectionsRev?: number;
 }) {
   const { t } = useTranslation("settings");
   const [loaded, setLoaded] = useState<Loaded>({ kind: "loading" });
+  // Bumped to read the connections again after an action of this page.
+  const [refetch, setRefetch] = useState(0);
 
   useEffect(() => {
     let live = true;
     Promise.all([getProfile(), getConnections()]).then(
       ([profile, connections]) => {
         if (live) {
-          setLoaded({ kind: "ready", profile, keys: connections.apiKeys });
+          setLoaded({
+            kind: "ready",
+            profile,
+            keys: connections.apiKeys,
+            github: connections.github,
+          });
         }
       },
       (err: unknown) => {
@@ -53,8 +82,39 @@ export function SettingsPage({
     };
   }, []);
 
+  // A later read changes only the connections; a failed one keeps what is
+  // shown (the stream or the next action reads again).
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    let live = true;
+    getConnections().then(
+      (c) => {
+        if (live) {
+          setLoaded((l) =>
+            l.kind === "ready"
+              ? { ...l, keys: c.apiKeys, github: c.github }
+              : l,
+          );
+        }
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [connectionsRev, refetch]);
+
   const setKeys = (update: (keys: ApiKey[]) => ApiKey[]) =>
     setLoaded((l) => (l.kind === "ready" ? { ...l, keys: update(l.keys) } : l));
+  const onConnected = useCallback((github: GitHubConnection) => {
+    setLoaded((l) => (l.kind === "ready" ? { ...l, github } : l));
+    setRefetch((n) => n + 1);
+  }, []);
+  const onChanged = useCallback(() => setRefetch((n) => n + 1), []);
 
   return (
     <Page title={t("title")} lead={t("lead")} nav={nav} onBack={onBack}>
@@ -78,6 +138,11 @@ export function SettingsPage({
               <p className="sec-hint">{t("connectionsHint")}</p>
             </div>
             <div className="conn">
+              <GitHubRow
+                connection={loaded.github}
+                onConnected={onConnected}
+                onChanged={onChanged}
+              />
               <SecretRow
                 kind="claude_token"
                 icon="agent"

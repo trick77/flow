@@ -5,8 +5,11 @@ import {
   type ApiKeyCreate,
   type AuthSession,
   type Connections,
+  type DeviceFlow,
   type Diff,
   type ErrorCode,
+  type GitHubConnection,
+  type GitHubRepoList,
   type MessageAccepted,
   type MessageCreate,
   type PlanAnswer,
@@ -291,6 +294,33 @@ export function createApiKey(key: ApiKeyCreate): Promise<ApiKey> {
 
 export function deleteApiKey(keyId: string): Promise<void> {
   return request<void>("DELETE", `/api/connections/api-keys/${seg(keyId)}`);
+}
+
+// startGitHubDeviceFlow asks GitHub for a device code: the owner enters the
+// user code at the verification URL; pollGitHubDeviceFlow then says whether
+// the owner has confirmed.
+export function startGitHubDeviceFlow(): Promise<DeviceFlow> {
+  return request<DeviceFlow>("POST", "/api/connections/github/device");
+}
+
+export function pollGitHubDeviceFlow(): Promise<GitHubConnection> {
+  return request<GitHubConnection>(
+    "POST",
+    "/api/connections/github/device/poll",
+  );
+}
+
+// disconnectGitHub forgets the tokens; sandboxes lose git and gh access to
+// GitHub on the next push of credentials.
+export function disconnectGitHub(): Promise<void> {
+  return request<void>("DELETE", "/api/connections/github");
+}
+
+// listGitHubRepos is what the GitHub connection can reach, optionally
+// filtered by name on the server.
+export function listGitHubRepos(query = ""): Promise<GitHubRepoList> {
+  const q = query === "" ? "" : `?query=${seg(query)}`;
+  return request<GitHubRepoList>("GET", `/api/github/repos${q}`);
 }
 
 export function createProject(project: ProjectCreate): Promise<Project> {

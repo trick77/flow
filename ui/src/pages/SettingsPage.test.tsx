@@ -263,4 +263,127 @@ describe("SettingsPage", () => {
     });
     expect(within(r).getByText(en.notStored)).toBeInTheDocument();
   });
+
+  describe("GitHub", () => {
+    // serveGitHub answers the connections with whatever github holds now.
+    function serveGitHub(state: { github: unknown; fail?: boolean }) {
+      const calls: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          calls.push(`${init?.method ?? "GET"} ${url}`);
+          if (url === "/api/profile") return json(200, profile);
+          if (url === "/api/connections") {
+            if (state.fail && calls.length > 2) {
+              return json(500, { code: "internal" });
+            }
+            return json(200, {
+              github: state.github,
+              claude: { signedIn: false },
+              apiKeys: [],
+            });
+          }
+          if (url === "/api/connections/github") return json(204);
+          throw new Error("unexpected " + url);
+        }),
+      );
+      return calls;
+    }
+
+    it("puts the GitHub row above the Claude rows", async () => {
+      serveGitHub({ github: { state: "disconnected" } });
+      await renderPage();
+      const groups = screen
+        .getAllByRole("group")
+        .map((g) => g.getAttribute("aria-label"));
+      expect(groups).toEqual([en.github, en.claudeToken, en.anthropicKey]);
+    });
+
+    it("reads the connections again on connectionsRev and after a disconnect", async () => {
+      const state = {
+        github: { state: "connected", login: "octo-user" } as unknown,
+      };
+      const calls = serveGitHub(state);
+      const view = render(<SettingsPage nav={null} connectionsRev={0} />);
+      await act(async () => undefined);
+      const gh = row(en.github);
+      expect(gh).toHaveTextContent("octo-user");
+      state.github = { state: "expired", login: "octo-user" };
+      await act(async () => {
+        view.rerender(<SettingsPage nav={null} connectionsRev={1} />);
+      });
+      expect(gh).toHaveTextContent(en.githubExpiredHint);
+      state.github = { state: "disconnected" };
+      fireEvent.click(within(gh).getByRole("button", { name: en.disconnect }));
+      await act(async () => {
+        fireEvent.click(
+          within(within(gh).getByRole("alertdialog")).getByRole("button", {
+            name: en.disconnect,
+          }),
+        );
+      });
+      expect(gh).toHaveTextContent(en.pillNotConnected);
+      expect(calls.filter((c) => c === "GET /api/connections")).toHaveLength(3);
+    });
+
+    it("keeps what it shows when a later read fails", async () => {
+      serveGitHub({
+        github: { state: "connected", login: "octo-user" },
+        fail: true,
+      });
+      const view = render(<SettingsPage nav={null} connectionsRev={0} />);
+      await act(async () => undefined);
+      await act(async () => {
+        view.rerender(<SettingsPage nav={null} connectionsRev={1} />);
+      });
+      expect(row(en.github)).toHaveTextContent("octo-user");
+    });
+
+    it("shows a confirmed connection at once", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: false });
+      const state = { github: { state: "disconnected" } as unknown };
+      const calls: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          calls.push(url);
+          if (url === "/api/profile") return json(200, profile);
+          if (url === "/api/connections") {
+            return json(200, {
+              github: state.github,
+              claude: { signedIn: false },
+              apiKeys: [],
+            });
+          }
+          if (url === "/api/connections/github/device") {
+            return json(200, {
+              userCode: "ABCD-1234",
+              verificationUri: "https://github.com/login/device",
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+              intervalSeconds: 5,
+            });
+          }
+          state.github = { state: "connected", login: "octo-user" };
+          return json(200, { state: "connected", login: "octo-user" });
+        }),
+      );
+      try {
+        await renderPage();
+        const gh = row(en.github);
+        await act(async () => {
+          fireEvent.click(within(gh).getByRole("button", { name: en.connect }));
+        });
+        await act(() => vi.advanceTimersByTimeAsync(5000));
+        expect(within(gh).getAllByRole("status")[0]).toHaveTextContent(
+          en.pillConnected,
+        );
+        expect(gh).toHaveTextContent("Connected as octo-user.");
+        expect(calls.filter((c) => c === "/api/connections")).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
