@@ -382,6 +382,28 @@ describe("App", () => {
     );
   });
 
+  it("leaves the sidebar status to the row for statuses it mirrored already", async () => {
+    // A turn cut off by a sandbox stop: the row says failed up to seq 16, the
+    // log still says working there.
+    serve({
+      sessions: [summary({ status: "failed", lastSeq: 16 })],
+      projects: [project],
+      calls: [],
+    });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    const es = FakeEventSource.forUrl("/api/sessions/s-done/events")[0];
+    emitDemo(es, 16);
+    const row = () =>
+      within(
+        screen.getByRole("navigation", { name: en.sidebar.listLabel }),
+      ).getByRole("button", { name: /Persist the sidebar width/ });
+    expect(row()).toHaveTextContent(en.sidebar.statusFailed);
+    // A status past the row's last seq is news.
+    act(() => es.emit("flow", fixtureLines("demo.jsonl")[17]));
+    expect(row()).toHaveTextContent(en.sidebar.statusApproval);
+  });
+
   it("says the session's sandbox is stopped and starts it from there", async () => {
     const server: Server = {
       sessions: [summary({ status: "failed" })],

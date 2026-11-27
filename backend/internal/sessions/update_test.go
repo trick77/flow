@@ -13,6 +13,7 @@ import (
 
 	"github.com/trick77/flow/internal/apitypes"
 	"github.com/trick77/flow/internal/event"
+	"github.com/trick77/flow/internal/flowdproto"
 	"github.com/trick77/flow/internal/sandboxes"
 )
 
@@ -60,6 +61,11 @@ func settingsOf(t *testing.T, r *rig, id string) []event.SessionSettings {
 // (logged as session.settings); a mode above the cap and malformed values are refused.
 func TestUpdateSession(t *testing.T) {
 	r := newRig(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := r.svc.Start(ctx); err != nil { // the follower mirrors the settings into the row
+		t.Fatal(err)
+	}
 	id := newSession(t, r)
 	w := patch(t, r, id, `{"title":"  New title  "}`)
 	if w.Code != http.StatusOK {
@@ -83,6 +89,7 @@ func TestUpdateSession(t *testing.T) {
 	if got := settingsOf(t, r, id); len(got) != 1 || got[0].Model != "claude-sonnet-5-5" || got[0].Mode != "accept_edits" {
 		t.Errorf("session.settings %+v", got)
 	}
+	waitRow(t, r, id, func(se Session) bool { return se.Model == "claude-sonnet-5-5" && se.Mode == "accept_edits" })
 	// The same values again change nothing.
 	if w := patch(t, r, id, `{"model":"claude-sonnet-5-5"}`); w.Code != http.StatusOK || len(settingsOf(t, r, id)) != 1 {
 		t.Errorf("unchanged model sent again: %d, %v", w.Code, settingsOf(t, r, id))
@@ -289,6 +296,127 @@ func TestCommandIfRunning_startsTheHostHeld(t *testing.T) {
 	}
 	if st, _ := r.sb.api.Session(t.Context(), id); st.Unit == "active" {
 		t.Error("the host started for the interrupt keeps running")
+	}
+}
+
+// A Stop that waited for the session's lock while the sandbox stopped does not start it again: the sandbox is
+// asked under the lock.
+func TestCommandIfRunning_sandboxStoppedWhileWaiting(t *testing.T) {
+	r := newRig(t)
+	id := newSession(t, r)
+	before := r.sb.ensures.Load()
+	unlock := r.svc.Lock(id) // a closeLostTurn or a Create holds it
+	type answer struct {
+		ran bool
+		err error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		_, ran, err := r.svc.CommandIfRunning(t.Context(), id, "interrupt-1", event.CmdTurnInterrupt, event.TurnInterrupt{})
+		done <- answer{ran, err}
+	}()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		r.svc.mu.Lock()
+		waiting := r.svc.locks[id].users == 2
+		r.svc.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stop never waited for the lock")
+		}
+	}
+	r.sb.warmErr = sandboxes.ErrNotWarm // the sandbox stops meanwhile
+	unlock()
+	a := <-done
+	if a.err != nil || a.ran {
+		t.Errorf("stop on a stopped sandbox: ran %v, %v", a.ran, a.err)
+	}
+	if n := r.sb.ensures.Load(); n != before {
+		t.Errorf("the stopped sandbox was started (%d Ensure calls)", n-before)
+	}
+}
+
+// correctingAPI is a host whose agent corrects a settings change at once: the follower mirrors the correction
+// right after the command, before Update answers.
+type correctingAPI struct {
+	flowdproto.API
+	correct func()
+}
+
+func (c correctingAPI) Command(ctx context.Context, cmd event.Command) (flowdproto.CommandResult, error) {
+	res, err := c.API.Command(ctx, cmd)
+	if cmd.Kind == event.CmdSettingsSet {
+		c.correct()
+	}
+	return res, err
+}
+
+// A mode change the agent corrected stays corrected in the row: Update leaves model and mode to the mirror.
+func TestUpdate_keepsAMirroredCorrection(t *testing.T) {
+	r := newRig(t)
+	id := newSession(t, r)
+	r.svc.Sandboxes = &fakeSandboxesAPI{api: correctingAPI{API: r.sb.api, correct: func() {
+		_ = r.svc.Store.ApplyMirror(t.Context(), id, Mirror{Mode: "plan"})
+	}}}
+	if w := patch(t, r, id, `{"mode":"accept_edits"}`); w.Code != http.StatusOK {
+		t.Fatalf("mode change: %d %s", w.Code, w.Body)
+	}
+	if se, _ := r.svc.Store.Get(t.Context(), id); se.Mode != "plan" {
+		t.Errorf("row mode %s after the agent put plan in force", se.Mode)
+	}
+}
+
+// A status, mode or mode cap this contract does not list is left out of the mirror, which goes on: the row still
+// takes the valid fields and every later event.
+func TestFollow_skipsValuesNotInTheContract(t *testing.T) {
+	r := newRig(t)
+	r.sb.api.Script = func(string) []event.EventDraft {
+		return []event.EventDraft{
+			{Kind: event.KindSessionStatus, Data: json.RawMessage(`{"status":"paused"}`)},
+			{Kind: event.KindSessionSettings, Data: json.RawMessage(`{"model":"x-model","mode":"root","modeCap":"sudo"}`)},
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := r.svc.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id := newSession(t, r)
+	if _, err := r.svc.Command(ctx, id, "m1", event.CmdMessageSend, event.MessageSend{MessageID: "m1", Text: "go",
+		Origin: event.MessageOriginUser}); err != nil {
+		t.Fatal(err)
+	}
+	waitRow(t, r, id, func(se Session) bool { return se.Status == "done" })
+	if se, _ := r.svc.Store.Get(t.Context(), id); se.Model != "x-model" || se.Mode != "ask" || se.ModeCap != "" {
+		t.Errorf("row %+v", se)
+	}
+}
+
+// The row's turn start and last activity are the events' times, not when Flow mirrored them (a restart catching
+// up on a running turn).
+func TestFollow_mirrorsTheEventsTime(t *testing.T) {
+	r := newRig(t)
+	at := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
+	r.sb.api.Now = func() time.Time { return at }
+	r.sb.api.Script = func(string) []event.EventDraft {
+		d, _ := json.Marshal(event.PlanProposed{RequestID: "pl1", Plan: "do it"})
+		return []event.EventDraft{{Kind: event.KindPlanProposed, Data: d}}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := r.svc.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id := newSession(t, r)
+	if _, err := r.svc.Command(ctx, id, "m1", event.CmdMessageSend, event.MessageSend{MessageID: "m1", Text: "plan",
+		Origin: event.MessageOriginUser}); err != nil {
+		t.Fatal(err)
+	}
+	waitRow(t, r, id, func(se Session) bool { return se.Status == "plan" })
+	se, _ := r.svc.Store.Get(t.Context(), id)
+	if se.TurnStartedAt == nil || !se.TurnStartedAt.Equal(at) || !se.LastActivityAt.Equal(at) {
+		t.Errorf("turn started %v, last activity %v, want %v", se.TurnStartedAt, se.LastActivityAt, at)
 	}
 }
 

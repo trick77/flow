@@ -158,8 +158,12 @@ func affected(res sql.Result, err error, what string) error {
 // ApplyMirror implements Store; LastSeq never moves backwards.
 func (s SQL) ApplyMirror(ctx context.Context, id string, m Mirror) error {
 	now := store.Format(time.Now())
+	at := now
+	if !m.At.IsZero() {
+		at = store.Format(m.At)
+	}
 	q := `UPDATE sessions SET last_seq = max(last_seq, ?), last_activity_at = ?, updated_at = ?`
-	args := []any{m.LastSeq, now, now}
+	args := []any{m.LastSeq, at, now}
 	if m.Status != "" {
 		q += `, status_at = CASE WHEN status = ? THEN status_at ELSE ? END, status = ?`
 		args = append(args, m.Status, now, m.Status)
@@ -173,7 +177,7 @@ func (s SQL) ApplyMirror(ctx context.Context, id string, m Mirror) error {
 	}
 	if m.TurnStarted {
 		q += `, turn_started_at = ?`
-		args = append(args, now)
+		args = append(args, at)
 	}
 	if m.TurnEnded {
 		q += `, turn_started_at = NULL`

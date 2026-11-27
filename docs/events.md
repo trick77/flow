@@ -172,7 +172,7 @@ no sentence depends on them. Codes in use:
 | `api_retry` | warning | sidecar | the CLI retries a failed API call (`attempt`, `maxRetries`, `retryDelayMs`, `errorStatus`, `error`) |
 | `auth_required` | error | sidecar | Claude Code is not signed in or its credential was refused (`error`) |
 | `provider_error` | error | sidecar | any other assistant message error (`error`) |
-| `mode_change_failed`, `model_change_failed` | error | sidecar | `setPermissionMode` / `setModel` failed; a `session.settings` with the mode in force follows a failed mode change (`mode` / `model`) |
+| `mode_change_failed`, `model_change_failed` | error | sidecar | `setPermissionMode` / `setModel` failed; a `session.settings` with the mode or model in force follows (`mode` / `model`) |
 | `draft_too_large` | warning | sidecar | a draft stayed over the line limit even shortened and was replaced by this notice (`kind`) |
 | `request_too_large` | error | sidecar | a permission, question or plan request too large to show; the agent was answered no (`requestId`, `tool`) |
 | `sidecar_translate_failed` | warning | sidecar | the mapping failed on a message; it follows as `provider.passthrough` (`name`) |
