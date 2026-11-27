@@ -23,7 +23,9 @@ import (
 	"github.com/trick77/flow/internal/credentials"
 	"github.com/trick77/flow/internal/flowdclient"
 	"github.com/trick77/flow/internal/httpapi"
+	"github.com/trick77/flow/internal/metering"
 	"github.com/trick77/flow/internal/projects"
+	"github.com/trick77/flow/internal/sandbox"
 	"github.com/trick77/flow/internal/sandbox/incus"
 	"github.com/trick77/flow/internal/sandboxes"
 	"github.com/trick77/flow/internal/sessions"
@@ -34,6 +36,9 @@ import (
 
 // shutdownTimeout lets in-flight requests finish on SIGTERM.
 const shutdownTimeout = 15 * time.Second
+
+// discoveryTimeout bounds reading the OIDC provider's discovery document at start.
+const discoveryTimeout = 15 * time.Second
 
 func main() {
 	// The container probe (compose healthcheck) runs before any setup: it must answer even when the rest of the
@@ -63,9 +68,20 @@ func serve() error {
 	base, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	opts := httpapi.Options{Version: version.String(), Static: web.SPAHandler()}
-	if cfg.AuthMode == config.AuthDev {
+	switch cfg.AuthMode {
+	case config.AuthDev:
 		slog.Warn("dev auth mode: every request is the owner's", "addr", cfg.Addr)
 		opts.Guard, opts.Areas.Auth = auth.Dev{}, auth.Dev{}
+	case config.AuthOIDC:
+		// One discovery round trip at start, bounded: a provider that does not answer fails the boot.
+		ctx, stop := context.WithTimeout(base, discoveryTimeout)
+		oidc, err := auth.NewOIDC(ctx, cfg.OIDC)
+		stop()
+		if err != nil {
+			return err
+		}
+		slog.Info("oidc sign-in", "issuer", cfg.OIDC.Issuer, "public_url", cfg.OIDC.PublicURL)
+		opts.Guard, opts.Areas.Auth = oidc, oidc
 	}
 	hub := sse.NewHub[apitypes.AppEvent](sse.HubOptions{})
 	defer hub.Close()
@@ -81,7 +97,7 @@ func serve() error {
 	} else {
 		slog.Warn("BACKEND_INCUS_URL unset: projects, sandboxes, sessions and timeline answer not_implemented")
 	}
-	srv := httpx.NewServer(cfg.Addr, httpapi.New(opts))
+	srv := httpx.NewServer(cfg.Addr, handler(cfg, opts))
 	srv.BaseContext = func(net.Listener) context.Context { return base }
 	srv.RegisterOnShutdown(cancel)
 	srv.RegisterOnShutdown(hub.Close)
@@ -102,18 +118,8 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 		return err
 	}
 	projectStore := projects.SQL{DB: db}
-	sessionStore := sessions.SQL{DB: db}
-	manager := &sandboxes.Manager{Store: sandboxes.SQL{DB: db}, Projects: projectStore, Runtime: runtime,
-		Dialer: flowdclient.NewDialer(), Sealer: sealer, Image: cfg.SandboxImage, Network: cfg.SandboxNetwork,
-		Memory: cfg.SandboxMemory, Version: version.String(), Log: slog.Default(), Wait: time.Minute,
-		Poll: 200 * time.Millisecond,
-		Flowd: func(arch string) ([]byte, error) {
-			return os.ReadFile(filepath.Join(cfg.FlowdDir, fmt.Sprintf("flowd-linux-%s", arch)))
-		},
-		Changed: func(projectID string) {
-			hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: projectID})
-		}}
-	svc := &sessions.Service{Store: sessionStore, Projects: projectStore, Sandboxes: manager, Hub: hub, Log: slog.Default()}
+	manager := sandboxManager(cfg, db, projectStore, runtime, sealer, hub)
+	svc := sessionService(db, projectStore, manager, hub)
 	if err := svc.Start(ctx); err != nil {
 		return err
 	}
@@ -123,4 +129,34 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 	areas.Sessions = &sessions.API{Service: svc}
 	areas.Timeline = &timeline.API{Sessions: svc, Hub: hub}
 	return nil
+}
+
+// handler is the server's whole handler: the browser API and the UI, never served to a request that arrives over
+// the sandbox network (sandboxes reach Flow's container there at L2), whatever areas are wired.
+func handler(cfg config.Config, opts httpapi.Options) http.Handler {
+	return sandboxes.OffSandboxNetwork(httpapi.New(opts), cfg.SandboxNetwork.Subnet)
+}
+
+// sandboxManager is the sandboxes area: addresses persisted in the sandbox rows (adopted from the instances' NICs
+// on first use), and the memory ceiling for all running sandboxes from the configuration.
+func sandboxManager(cfg config.Config, db *sql.DB, projectStore projects.SQL, runtime sandbox.Runtime,
+	sealer credentials.Sealer, hub *sse.Hub[apitypes.AppEvent]) *sandboxes.Manager {
+	return &sandboxes.Manager{Store: sandboxes.SQL{DB: db}, Projects: projectStore, Runtime: runtime,
+		Dialer: flowdclient.NewDialer(), Sealer: sealer, Image: cfg.SandboxImage, Network: cfg.SandboxNetwork,
+		Memory: cfg.SandboxMemory, MemoryTotal: cfg.SandboxMemoryTotal,
+		Addresses: sandboxes.SQLAddresses{DB: db, Network: cfg.SandboxNetwork},
+		Version:   version.String(), Log: slog.Default(), Wait: time.Minute, Poll: 200 * time.Millisecond,
+		Flowd: func(arch string) ([]byte, error) {
+			return os.ReadFile(filepath.Join(cfg.FlowdDir, fmt.Sprintf("flowd-linux-%s", arch)))
+		},
+		Changed: func(projectID string) {
+			hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: projectID})
+		}}
+}
+
+// sessionService is the sessions area, its follower feeding the metering ledger on the same database.
+func sessionService(db *sql.DB, projectStore projects.SQL, sb sessions.Sandboxes,
+	hub *sse.Hub[apitypes.AppEvent]) *sessions.Service {
+	return &sessions.Service{Store: sessions.SQL{DB: db}, Projects: projectStore, Sandboxes: sb, Hub: hub,
+		Log: slog.Default(), Meter: &metering.Recorder{Store: metering.SQL{DB: db}}}
 }

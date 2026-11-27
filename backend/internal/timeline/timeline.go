@@ -203,19 +203,18 @@ func (a *API) SendMessage(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, &apitypes.Error{Code: apitypes.ErrorCodeInvalidRequest, Field: "text"})
 		return
 	}
-	busy := se.Status != string(event.SessionStatusIdle) && se.Status != string(event.SessionStatusDone) &&
-		se.Status != string(event.SessionStatusFailed)
 	whenBusy := event.WhenBusyQueue
 	if in.Interrupt {
 		whenBusy = event.WhenBusyInterrupt
 	}
-	_, err := a.Sessions.Command(r.Context(), se.ID, in.ClientID, event.CmdMessageSend, event.MessageSend{
+	res, err := a.Sessions.Command(r.Context(), se.ID, in.ClientID, event.CmdMessageSend, event.MessageSend{
 		MessageID: in.ClientID, Text: in.Text, Origin: event.MessageOriginUser, WhenBusy: whenBusy})
 	if err != nil {
 		httpapi.WriteError(w, err)
 		return
 	}
-	httpapi.WriteJSON(w, http.StatusAccepted, apitypes.MessageAccepted{MessageID: in.ClientID, Queued: busy && !in.Interrupt})
+	// The host says whether it queued the message: the mirrored status read before sending can be stale.
+	httpapi.WriteJSON(w, http.StatusAccepted, apitypes.MessageAccepted{MessageID: in.ClientID, Queued: res.Queued})
 }
 
 // InterruptTurn implements httpapi.Timeline.

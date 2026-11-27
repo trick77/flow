@@ -4,9 +4,13 @@ package config
 import (
 	"encoding/base64"
 	"net"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/trick77/ship/kit/env"
+
+	"github.com/trick77/flow/internal/sandbox"
 )
 
 // DefaultAddr is where the server listens when BACKEND_ADDR is unset.
@@ -31,14 +35,43 @@ type Config struct {
 	// Incus is how Flow reaches the sandbox runtime; the sandbox, session and timeline areas stay unwired without
 	// IncusURL.
 	IncusURL, IncusProject, IncusCert, IncusKey, IncusServerCert string
-	// SandboxImage is the base image alias, SandboxNetwork the managed bridge sandboxes attach to.
-	SandboxImage, SandboxNetwork string
+	// SandboxImage is the base image alias.
+	SandboxImage string
+	// SandboxNetwork is how sandboxes are networked: the host's Docker bridge, its subnet and gateway, the
+	// sandboxes' address range and resolvers (network.go).
+	SandboxNetwork sandbox.Network
 	// SandboxMemory is each sandbox's limits.memory in bytes (0: none). Setting it also keeps the sandbox from
-	// swapping (spike finding 7).
-	SandboxMemory int64
+	// swapping (spike finding 7). SandboxMemoryTotal is the ceiling for all running sandboxes together.
+	SandboxMemory, SandboxMemoryTotal int64
 	// FlowdDir holds flowd-linux-amd64 and flowd-linux-arm64, the binaries Flow pushes into sandboxes.
 	FlowdDir string
+	// OIDC is the oidc mode's sign-in; empty in dev mode.
+	OIDC OIDC
 }
+
+// OIDC configures sign-in through the owner's identity provider (docs/auth.md).
+type OIDC struct {
+	// PublicURL is https://<BACKEND_PUBLIC_FQDN>: the redirect URI and the origin state changes must come from.
+	PublicURL                      string
+	Issuer, ClientID, ClientSecret string
+	// Subject and Group admit the owner: a login whose sub is Subject, or whose groups claim holds Group. At least
+	// one is set.
+	Subject, Group string
+	// SessionSecret signs the session cookie (at least 32 characters); rotating it signs the owner out.
+	SessionSecret string
+	// SessionTTL is how long a sign-in lasts; nothing renews it, and nothing but its end (or a new SessionSecret)
+	// notices a change at the provider: the cookie carries the groups of the sign-in.
+	SessionTTL time.Duration
+}
+
+// minSessionSecret: a shorter secret can be guessed offline from one cookie, and then a session forged.
+const minSessionSecret = 32
+
+// DefaultSessionTTL is the sign-in lifetime when BACKEND_SESSION_TTL is unset: one working day. It is also how long
+// a group removal or a disabled account at the provider takes to reach Flow (the cookie keeps the groups of its
+// sign-in), so short; one sign-in a day costs the owner a redirect, usually without a password prompt while the
+// provider's own session lasts.
+const DefaultSessionTTL = 12 * time.Hour
 
 // Addr is BACKEND_ADDR as Load reads it (trimmed, empty is unset). The healthcheck subcommand probes it before
 // anything else is set up, so a broken rest of the environment cannot fail the probe.
@@ -59,10 +92,12 @@ func Load(getenv func(string) string) (Config, error) {
 		IncusKey:        r.String("BACKEND_INCUS_KEY", ""),
 		IncusServerCert: r.String("BACKEND_INCUS_SERVER_CERT", ""),
 		SandboxImage:    r.String("BACKEND_SANDBOX_IMAGE", "flow-base"),
-		SandboxNetwork:  r.String("BACKEND_SANDBOX_NETWORK", "incusbr0"),
+		SandboxNetwork:  loadSandboxNetwork(r),
 		SandboxMemory:   int64(r.Int("BACKEND_SANDBOX_MEMORY_MIB", 4096)) << 20,
 		FlowdDir:        r.String("BACKEND_FLOWD_DIR", "/flowd"),
 	}
+	cfg.SandboxMemoryTotal = loadSandboxMemoryTotal(r, cfg.SandboxMemory)
+	checkAddrOffSandboxNetwork(r, cfg.Addr, cfg.SandboxNetwork)
 	// net.Listen would refuse it too, but only after the rest of startup ran.
 	host, _, err := net.SplitHostPort(cfg.Addr)
 	if err != nil {
@@ -77,6 +112,9 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.SealKey = key
 	}
+	if cfg.AuthMode == AuthOIDC {
+		cfg.OIDC = loadOIDC(r)
+	}
 	if cfg.IncusURL != "" {
 		if cfg.IncusCert == "" || cfg.IncusKey == "" || cfg.IncusServerCert == "" {
 			r.Fail("BACKEND_INCUS_URL needs BACKEND_INCUS_CERT, BACKEND_INCUS_KEY and BACKEND_INCUS_SERVER_CERT")
@@ -89,6 +127,62 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// loadOIDC reads the oidc mode's settings; every one but the TTL and one of subject and group is required.
+func loadOIDC(r *env.Reader) OIDC {
+	o := OIDC{
+		Issuer:        r.Required("BACKEND_OIDC_ISSUER"),
+		ClientID:      r.Required("BACKEND_OIDC_CLIENT_ID"),
+		ClientSecret:  r.Required("BACKEND_OIDC_CLIENT_SECRET"),
+		Subject:       r.String("BACKEND_OIDC_ALLOWED_SUBJECT", ""),
+		Group:         r.String("BACKEND_OIDC_ALLOWED_GROUP", ""),
+		SessionSecret: r.Required("BACKEND_SESSION_SECRET"),
+		SessionTTL:    r.Duration("BACKEND_SESSION_TTL", DefaultSessionTTL),
+	}
+	// The public URL is the only one Flow answers state changes from and the provider's redirect target: a bare
+	// host name, served over TLS (the session cookie is Secure).
+	if fqdn := r.Required("BACKEND_PUBLIC_FQDN"); fqdn != "" {
+		// Judged by the parsed host name, so a stray port separator or trailing dot (which would boot and then
+		// refuse every state change and break the redirect URI) is a startup error.
+		u, err := url.Parse("https://" + fqdn)
+		if err != nil || u.Hostname() != fqdn || !hostName(fqdn) {
+			r.Fail("BACKEND_PUBLIC_FQDN: want a bare host name such as flow.example.com (no scheme, port, path or "+
+				"trailing dot), got %q", fqdn)
+		} else {
+			o.PublicURL = "https://" + strings.ToLower(u.Hostname())
+		}
+	}
+	if o.Subject == "" && o.Group == "" {
+		r.Fail("BACKEND_AUTH_MODE=oidc admits only the owner: set BACKEND_OIDC_ALLOWED_SUBJECT or BACKEND_OIDC_ALLOWED_GROUP")
+	}
+	if o.SessionSecret != "" && len(o.SessionSecret) < minSessionSecret {
+		r.Fail("BACKEND_SESSION_SECRET: want at least %d characters, it signs the session cookie", minSessionSecret)
+	}
+	if o.SessionTTL <= 0 {
+		r.Fail("BACKEND_SESSION_TTL: want a duration above zero")
+	}
+	return o
+}
+
+// hostName reports whether h is a DNS host name: dot-separated labels of letters, digits and inner hyphens.
+func hostName(h string) bool {
+	for _, label := range strings.Split(h, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !hostNameRune(c) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// hostNameRune reports whether c may appear in a host name label: a letter, a digit or a hyphen.
+func hostNameRune(c rune) bool {
+	return c == '-' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 func loopback(host string) bool {
