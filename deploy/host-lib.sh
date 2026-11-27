@@ -42,7 +42,11 @@ CERT_DIR="${CERT_DIR:-/etc/flow-host/incus}"
 # Owner of CERT_DIR and its files: the uid:gid Flow's container runs as (compose.yaml `user`), never 1000.
 CERT_OWNER="${CERT_OWNER:-65532:65532}"
 POOL_DRIVER="${POOL_DRIVER:-btrfs}"
-POOL_SIZE="${POOL_SIZE:-40GiB}"
+POOL_SIZE="${POOL_SIZE:-40GiB}" # the loop file's size; unused with POOL_PATH
+# The pool on a btrfs filesystem the owner made and mounted himself (docs/deploy.md, "Sizing a dedicated host"):
+# its mount point or a directory on it, handed to Incus as `source=`. The scripts never format, wipe or mount
+# anything. Empty (the default): the loop file.
+POOL_PATH="${POOL_PATH:-}"
 STATE_DIR="${STATE_DIR:-/var/lib/flow-host/host-setup}"
 
 # Destinations behind the host sandboxes may not reach: private networks, link-local (cloud metadata
@@ -111,6 +115,10 @@ record() {
 	grep -qxF "$*" "$MANIFEST" 2>/dev/null || printf '%s\n' "$*" >>"$MANIFEST"
 }
 recorded() { grep -qxF "$*" "$MANIFEST" 2>/dev/null; }
+
+# The manifest line a setup writes before it creates a pool on POOL_PATH: `pool-path <pool> <path>`.
+# pool_path_line POOL prints the path.
+pool_path_line() { sed -n "s/^pool-path $1 //p" "$MANIFEST" 2>/dev/null | tail -n 1; }
 
 # The rich rules of each policy, one per line, in firewalld's own spelling. family ipv6 needs a source
 # ("INVALID_RULE: no element, no source, no destination"), hence ::/0.
