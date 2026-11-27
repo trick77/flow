@@ -654,6 +654,8 @@ type Diff struct {
 	BaseRef string     `json:"baseRef"`
 	BaseSHA string     `json:"baseSha"`
 	Files   []DiffFile `json:"files"`
+	// Files left out past the file-count or size limit.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // PullRequestEntry is part of the contract.
