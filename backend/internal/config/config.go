@@ -41,8 +41,9 @@ type Config struct {
 	// sandboxes' address range and resolvers (network.go).
 	SandboxNetwork sandbox.Network
 	// SandboxMemory is each sandbox's limits.memory in bytes (0: none). Setting it also keeps the sandbox from
-	// swapping (spike finding 7). SandboxMemoryTotal is the ceiling for all running sandboxes together.
-	SandboxMemory, SandboxMemoryTotal int64
+	// swapping (spike finding 7). A sandbox starts while the running ones' measured memory plus
+	// SandboxMemoryHeadroom fits under SandboxMemoryTotal (0: no check).
+	SandboxMemory, SandboxMemoryTotal, SandboxMemoryHeadroom int64
 	// SandboxCPUs is each sandbox's limits.cpu (0: all of the host's).
 	SandboxCPUs int
 	// Session bounds each session host unit and everything its agent runs (systemd MemoryMax, CPUQuota, TasksMax;
@@ -113,7 +114,7 @@ func Load(getenv func(string) string) (Config, error) {
 		FlowdDir:   r.String("BACKEND_FLOWD_DIR", "/opt/flow"),
 		SidecarDir: r.String("BACKEND_SIDECAR_DIR", "/opt/flow/sidecar"),
 	}
-	cfg.SandboxMemoryTotal = loadSandboxMemoryTotal(r, cfg.SandboxMemory)
+	cfg.SandboxMemoryTotal, cfg.SandboxMemoryHeadroom = loadSandboxMemoryTotal(r, cfg.SandboxMemory)
 	cfg.Session = loadSessionLimits(r, cfg.SandboxMemory, cfg.SandboxCPUs)
 	checkAddrOffSandboxNetwork(r, cfg.Addr, cfg.SandboxNetwork)
 	// net.Listen would refuse it too, but only after the rest of startup ran.

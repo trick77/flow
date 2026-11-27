@@ -596,7 +596,6 @@ func toState(in instance) sandbox.State {
 	if a, err := netip.ParseAddr(in.Devices["eth0"]["ipv4.address"]); err == nil {
 		s.Address = a
 	}
-	s.MemoryLimitBytes, _ = strconv.ParseInt(in.Config["limits.memory"], 10, 64)
 	if st := in.State; st != nil {
 		s.MemoryBytes, s.MemoryPeakBytes, s.CPUNanos, s.Processes = st.Memory.Usage, st.Memory.UsagePeak, st.CPU.Usage, st.Processes
 		if d, ok := st.Disk["root"]; ok {
@@ -623,6 +622,66 @@ func goArch(a string) string {
 		return "arm64"
 	}
 	return a
+}
+
+// MemoryInUse implements sandbox.Runtime from the project's metrics (/1.0/metrics, Prometheus text; the
+// project-restricted certificate may read it, measured): MemTotal less MemFree is the cgroup's memory.current,
+// Inactive_file its inactive file cache from memory.stat. The instance state carries memory.current only.
+func (c *Client) MemoryInUse(ctx context.Context) (map[string]int64, error) {
+	b, err := c.raw(ctx, "/1.0/metrics")
+	if err != nil {
+		return nil, fmt.Errorf("metrics: %w", err)
+	}
+	return parseMemoryMetrics(b), nil
+}
+
+// parseMemoryMetrics reads the memory metrics per instance; one lacking any of the three is left out.
+func parseMemoryMetrics(b []byte) map[string]int64 {
+	type mem struct{ total, free, inactive float64 }
+	seen := map[string]*mem{}
+	got := map[string]int{}
+	for line := range strings.Lines(string(b)) {
+		metric, rest, ok := strings.Cut(strings.TrimSpace(line), "{")
+		if !ok || !strings.HasPrefix(metric, "incus_memory_") {
+			continue
+		}
+		labels, value, ok := strings.Cut(rest, "} ")
+		if !ok {
+			continue
+		}
+		_, name, ok := strings.Cut(labels, `name="`)
+		if !ok {
+			continue
+		}
+		name, _, _ = strings.Cut(name, `"`)
+		v, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			continue
+		}
+		m := seen[name]
+		if m == nil {
+			m = &mem{}
+			seen[name] = m
+		}
+		switch metric {
+		case "incus_memory_MemTotal_bytes":
+			m.total = v
+		case "incus_memory_MemFree_bytes":
+			m.free = v
+		case "incus_memory_Inactive_file_bytes":
+			m.inactive = v
+		default:
+			continue
+		}
+		got[name]++
+	}
+	out := map[string]int64{}
+	for name, m := range seen {
+		if got[name] == 3 {
+			out[name] = max(int64(m.total-m.free-m.inactive), 0)
+		}
+	}
+	return out
 }
 
 // List implements sandbox.Runtime.

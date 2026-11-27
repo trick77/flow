@@ -57,8 +57,7 @@ type Manager struct {
 	Dialer   flowdproto.Dialer
 	Sealer   credentials.Sealer
 	// Image is the base image alias, Network how sandboxes are networked, Memory and CPUs each instance's limits
-	// (0: unset), set at create and again before every start, so a changed setting reaches a stopped sandbox and the
-	// memory ceiling counts what the instance will run with.
+	// (0: unset), set at create and again before every start, so a changed setting reaches a stopped sandbox.
 	Image   string
 	Network sandbox.Network
 	Memory  int64
@@ -72,9 +71,10 @@ type Manager struct {
 	// Env returns the sandbox-wide set (credentials, git identity) pushed to flowd at every bring-up and by PushEnv,
 	// its Revision above every earlier one; nil pushes nothing.
 	Env func(ctx context.Context) (flowdproto.Env, error)
-	// MemoryTotal is the ceiling on the memory limits of all running sandboxes together: a start that would pass
-	// it is refused (ErrMemoryCeiling). 0: no ceiling.
-	MemoryTotal int64
+	// MemoryTotal is the memory all running sandboxes may use together: a sandbox is created and started only while
+	// the measured working sets of the running ones plus MemoryHeadroom fit under it, else ErrMemoryCeiling. A
+	// limit is a cap, not a reservation: idle sandboxes hold a fraction of theirs. 0: no check.
+	MemoryTotal, MemoryHeadroom int64
 	// Addresses assigns sandbox addresses; nil uses a MemoryAddresses seeded from the instances' NICs.
 	Addresses Addresses
 	// Flowd returns the flowd binary for a Go architecture.
@@ -102,7 +102,7 @@ type Manager struct {
 	locks map[string]*sync.Mutex
 	apis  map[string]cachedAPI
 	// addrMu guards setting up Addresses (addrReady); startMu makes the memory check and the start one step, so
-	// two projects starting at once cannot both take the last room.
+	// two projects starting at once cannot both take the same headroom.
 	addrMu, startMu sync.Mutex
 	addrReady       bool
 	// volMu guards volReady: the home volume exists.
@@ -116,7 +116,8 @@ type cachedAPI struct {
 	addr netip.Addr
 }
 
-// ErrMemoryCeiling means starting the sandbox would take the running sandboxes past Manager.MemoryTotal.
+// ErrMemoryCeiling means the running sandboxes' measured memory plus the headroom does not fit under
+// Manager.MemoryTotal.
 var ErrMemoryCeiling = errors.New("sandboxes: memory ceiling for all sandboxes reached")
 
 // errMoved means a running instance's NIC carries another address than the sandbox's assignment.
@@ -239,32 +240,50 @@ func (m *Manager) instanceAddresses(ctx context.Context) (map[string]netip.Addr,
 	return held, nil
 }
 
-// roomFor checks the memory ceiling for starting the instance st: the limits of all other running instances plus
-// its own. An instance without a limit counts as Memory.
-func (m *Manager) roomFor(ctx context.Context, st sandbox.State) error {
+// admit checks that the instance name may be created or started (step): the working sets of all other instances
+// that are not stopped (Runtime.MemoryInUse), plus MemoryHeadroom, fit under MemoryTotal. An instance the metrics
+// do not measure (they failed, or it is missing from them) counts with its cgroup usage page cache included
+// (State.MemoryBytes): too much rather than nothing, so a broken measurement neither admits everything nor blocks
+// for good. An instance list that fails refuses the start (sandbox_unavailable); the next start asks again.
+func (m *Manager) admit(ctx context.Context, name, step string) error {
 	if m.MemoryTotal <= 0 {
 		return nil
 	}
-	limit := func(s sandbox.State) int64 {
-		if s.MemoryLimitBytes > 0 {
-			return s.MemoryLimitBytes
-		}
-		return m.Memory
-	}
 	list, err := m.Runtime.List(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("measuring sandbox memory: %w", err)
 	}
+	inUse, err := m.Runtime.MemoryInUse(ctx)
 	used := int64(0)
+	var unmeasured []string
 	for _, s := range list {
-		if s.Name != st.Name && s.Status != sandbox.StatusStopped {
-			used += limit(s)
+		if s.Name == name || s.Status == sandbox.StatusStopped {
+			continue
 		}
+		if v, ok := inUse[s.Name]; ok {
+			used += v
+			continue
+		}
+		used += s.MemoryBytes
+		unmeasured = append(unmeasured, s.Name)
 	}
-	if need := limit(st); used+need > m.MemoryTotal {
-		return fmt.Errorf("%w: running sandboxes hold %d MiB of %d MiB, %s needs %d MiB", ErrMemoryCeiling,
-			used>>20, m.MemoryTotal>>20, st.Name, need>>20)
+	switch {
+	case err != nil:
+		m.Log.Warn("sandbox memory: metrics failed, counting usage with page cache", "sandbox", name,
+			"unmeasured", unmeasured, "err", err)
+	case len(unmeasured) > 0:
+		// Incus serves its metrics from a cache: an instance started seconds ago is not in them yet (measured).
+		m.Log.Info("sandbox memory: not in the metrics yet, counting usage with page cache", "sandbox", name,
+			"unmeasured", unmeasured)
 	}
+	attrs := []any{"sandbox", name, "step", step, "measured_mib", used >> 20, "headroom_mib", m.MemoryHeadroom >> 20,
+		"total_mib", m.MemoryTotal >> 20}
+	if used+m.MemoryHeadroom > m.MemoryTotal {
+		m.Log.Warn("sandbox refused: memory full", attrs...)
+		return fmt.Errorf("%w: running sandboxes use %d MiB, with %d MiB headroom past %d MiB", ErrMemoryCeiling,
+			used>>20, m.MemoryHeadroom>>20, m.MemoryTotal>>20)
+	}
+	m.Log.Info("sandbox admitted", attrs...)
 	return nil
 }
 
@@ -480,6 +499,11 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 	}
 	st, err := m.Runtime.State(ctx, sb.Instance)
 	if errors.Is(err, sandbox.ErrNotFound) {
+		// Before the create (about 40 s): a start refused afterwards would leave a whole instance behind. start
+		// checks again, the authoritative one.
+		if err := m.admit(ctx, sb.Instance, "create"); err != nil {
+			return cachedAPI{}, err
+		}
 		err = m.Runtime.Create(ctx, sandbox.Spec{Name: sb.Instance, Image: m.Image, NIC: nic, Nesting: true,
 			Limits: m.limits()})
 		if err != nil {
@@ -603,18 +627,16 @@ func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, start
 }
 
 // start sets the NIC (the assigned address, also for an instance cloned or made before) and starts the instance,
-// within the memory ceiling.
+// when the measured memory admits it.
 func (m *Manager) start(ctx context.Context, st sandbox.State, nic sandbox.NIC) error {
 	m.startMu.Lock()
 	defer m.startMu.Unlock()
-	// The configured limits, also for an instance made under other settings: the ceiling then counts them.
-	l := m.limits()
-	if err := m.Runtime.SetLimits(ctx, st.Name, l); err != nil {
-		return fmt.Errorf("set limits: %w", err)
-	}
-	st.MemoryLimitBytes = l.MemoryBytes // 0 lifted the instance's limit
-	if err := m.roomFor(ctx, st); err != nil {
+	if err := m.admit(ctx, st.Name, "start"); err != nil {
 		return err
+	}
+	// The configured limits, also for an instance made under other settings.
+	if err := m.Runtime.SetLimits(ctx, st.Name, m.limits()); err != nil {
+		return fmt.Errorf("set limits: %w", err)
 	}
 	if err := m.Runtime.SetNIC(ctx, st.Name, nic); err != nil {
 		return fmt.Errorf("set NIC: %w", err)

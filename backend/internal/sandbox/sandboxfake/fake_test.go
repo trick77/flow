@@ -78,12 +78,12 @@ func TestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	in, ok := r.Instance("p1")
-	if !ok || len(in.Mounts) != 1 || in.Limits.CPUs != 6 || string(in.Files["/opt/flow/bin/flowd"].Content) != "elf" {
+	if !ok || len(in.Mounts) != 1 || in.Limits.CPUs != 6 || in.Limits.MemoryBytes != 4<<30 || string(in.Files["/opt/flow/bin/flowd"].Content) != "elf" {
 		t.Errorf("instance = %+v", in)
 	}
 	st, err := r.State(ctx, "p1")
 	if err != nil || st.Status != sandbox.StatusRunning || st.IPv4 != "172.30.128.2" || st.Arch != "amd64" ||
-		st.MemoryBytes == 0 || st.Address.String() != "172.30.128.2" || st.HostIface == "" || st.MemoryLimitBytes != 4<<30 {
+		st.MemoryBytes == 0 || st.Address.String() != "172.30.128.2" || st.HostIface == "" {
 		t.Errorf("state = %+v, %v", st, err)
 	}
 	if err := r.SetNIC(ctx, "p1", nic("172.30.128.3")); !errors.Is(err, sandbox.ErrState) {

@@ -109,8 +109,6 @@ type State struct {
 	// side while running, a port of the bridge unless the bridge was deleted and made again under it.
 	Address   netip.Addr
 	HostIface string
-	// MemoryLimitBytes is the configured limits.memory, 0 when unset.
-	MemoryLimitBytes int64
 	// Usage, present while running.
 	MemoryBytes     int64
 	MemoryPeakBytes int64
@@ -149,4 +147,9 @@ type Runtime interface {
 	Exec(ctx context.Context, name string, c Command) (Result, error)
 	State(ctx context.Context, name string) (State, error)
 	List(ctx context.Context) ([]State, error)
+	// MemoryInUse is each running instance's working set by name: its cgroup's memory less the inactive file cache,
+	// which the kernel reclaims before it would refuse anyone memory. State's MemoryBytes includes that cache (an
+	// idle sandbox just booted: about 270 MiB, 210 MiB of it inactive file cache; measured, Incus 6.0.4). An
+	// instance missing from the map was not measured.
+	MemoryInUse(ctx context.Context) (map[string]int64, error)
 }
