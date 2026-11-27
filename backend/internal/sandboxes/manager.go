@@ -134,6 +134,12 @@ func (m *Manager) misplaced(ctx context.Context, st sandbox.State, addr netip.Ad
 	return nil
 }
 
+// relocate reports whether a misplaced answer says the instance must be restarted onto its bridge and address; any
+// other error (the bridge's ports could not be read) says nothing about the instance.
+func relocate(err error) bool {
+	return errors.Is(err, errMoved) || errors.Is(err, sandbox.ErrNetworkMissing)
+}
+
 // busy is the addresses on the NICs of every instance but name's own: whatever the assignment knows, none of them
 // may go to this sandbox (an instance whose row is gone keeps its address while it exists).
 func (m *Manager) busy(ctx context.Context, name string) ([]netip.Addr, error) {
@@ -323,7 +329,7 @@ func (m *Manager) Ensure(ctx context.Context, projectID string) (flowdproto.API,
 }
 
 // ensure is Ensure; with mayStart false a sandbox that is not running is ErrNotWarm (and recorded as stopped)
-// instead of being started.
+// instead of being started, one not warm by the records but maybe running ErrMayRun.
 func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (flowdproto.API, error) {
 	defer m.lock(projectID)()
 	// Bring-up runs to its end on its own context: a caller that leaves (a page reload) must not leave a healthy
@@ -333,10 +339,12 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 	sb, err := m.Store.ByProject(ctx, projectID)
 	if c := m.cached(projectID); c.api != nil && err == nil {
 		// Two cheap looks: a sandbox stopped behind Flow's back, or running but cut off from the bridge or on another
-		// address, must not keep its dead connection.
-		if st, serr := m.Runtime.State(ctx, sb.Instance); serr == nil && st.Status == sandbox.StatusRunning &&
-			m.misplaced(ctx, st, c.addr) == nil {
-			return c.api, nil
+		// address, must not keep its dead connection. A look that fails (the bridge's ports not readable just now)
+		// proves nothing: the connection stays.
+		if st, serr := m.Runtime.State(ctx, sb.Instance); serr == nil && st.Status == sandbox.StatusRunning {
+			if why := m.misplaced(ctx, st, c.addr); why == nil || !relocate(why) {
+				return c.api, nil
+			}
 		}
 		m.remember(projectID, cachedAPI{})
 	}
@@ -345,7 +353,13 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 			return nil, err
 		}
 		if sb.State != StateWarm {
-			return nil, ErrNotWarm
+			// Not warm by the records (failed, a bring-up cut off by Flow's restart): only an instance that is gone or
+			// stopped proves nothing of it runs.
+			st, serr := m.Runtime.State(ctx, sb.Instance)
+			if errors.Is(serr, sandbox.ErrNotFound) || serr == nil && st.Status == sandbox.StatusStopped {
+				return nil, ErrNotWarm
+			}
+			return nil, fmt.Errorf("%w (recorded %s)", ErrMayRun, sb.State)
 		}
 		st, serr := m.Runtime.State(ctx, sb.Instance)
 		if serr == nil && st.Status != sandbox.StatusRunning || errors.Is(serr, sandbox.ErrNotFound) {
@@ -373,7 +387,12 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart bool) (
 	}
 	if err != nil {
 		m.Log.Error("sandbox setup", "sandbox", sb.Instance, "err", err)
-		m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(failCode(err)))
+		// A reconnect (no start) that failed leaves a running, warm sandbox warm: the next call tries again (a fetch
+		// that failed, flowd briefly away). Only one cut off from its bridge or on another address needs a start, which
+		// failed says.
+		if mayStart || relocate(err) {
+			m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(failCode(err)))
+		}
 		return nil, apitypes.Fail(failCode(err), err.Error())
 	}
 	m.remember(projectID, c)
@@ -438,6 +457,9 @@ func (m *Manager) bring(ctx context.Context, sb *Sandbox, mayStart bool) (cached
 	}
 	if st.Status == sandbox.StatusRunning {
 		if why := m.misplaced(ctx, st, addr); why != nil {
+			if !relocate(why) {
+				return cachedAPI{}, why // a failed look proves nothing: never stop a healthy sandbox for it
+			}
 			if !mayStart {
 				return cachedAPI{}, fmt.Errorf("%w: start it again", why)
 			}
@@ -699,7 +721,7 @@ func (m *Manager) PushEnv(ctx context.Context) {
 			switch {
 			case err == nil:
 				m.Log.Info("environment pushed", "sandbox", sb.Instance)
-			case !errors.Is(err, ErrNotWarm):
+			case !errors.Is(err, ErrNotWarm) && !errors.Is(err, ErrMayRun): // not warm: its next bring-up pushes
 				m.Log.Warn("environment push", "sandbox", sb.Instance, "err", err)
 			}
 		})
@@ -748,11 +770,17 @@ func (m *Manager) deliver(ctx context.Context, instance, arch, token, rel string
 	return nil
 }
 
-// ErrNotWarm is Warm's answer for a sandbox Flow has not brought up (or the owner stopped).
+// ErrNotWarm is Warm's answer for a sandbox Flow has not brought up (or the owner stopped) whose instance is gone
+// or stopped: nothing of it runs.
 var ErrNotWarm = errors.New("sandboxes: not warm")
 
+// ErrMayRun is Warm's answer for a sandbox that is not warm by Flow's records (failed, say) while its instance is
+// not proven stopped: its session hosts and shells may still run. It is not ErrNotWarm, so nobody takes it for a
+// stop.
+var ErrMayRun = errors.New("sandboxes: not warm, but its instance may still run")
+
 // Warm returns the flowd of a sandbox that is warm by Flow's records, reconnecting after Flow's own restart; it
-// never starts a stopped sandbox.
+// never starts a stopped sandbox. ErrNotWarm: nothing runs; ErrMayRun: not warm, the instance may run.
 func (m *Manager) Warm(ctx context.Context, projectID string) (flowdproto.API, error) {
 	return m.ensure(ctx, projectID, false)
 }
