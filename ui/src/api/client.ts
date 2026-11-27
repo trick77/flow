@@ -302,9 +302,14 @@ export function deleteProject(projectId: string): Promise<void> {
 }
 
 // getSetupLog is the last setup run's log lines after line `after` (at most
-// 1000 per answer); sandbox_unavailable while the sandbox cannot answer.
-export function getSetupLog(projectId: string, after = 0): Promise<SetupLog> {
-  const q = after > 0 ? `?after=${after}` : "";
+// 1000 per answer), or with `tail` its last that many lines; sandbox_unavailable
+// while the sandbox cannot answer.
+export function getSetupLog(
+  projectId: string,
+  after = 0,
+  tail = 0,
+): Promise<SetupLog> {
+  const q = tail > 0 ? `?tail=${tail}` : after > 0 ? `?after=${after}` : "";
   return request<SetupLog>(
     "GET",
     `/api/projects/${seg(projectId)}/sandbox/setup-log${q}`,
