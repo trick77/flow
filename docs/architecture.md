@@ -50,7 +50,9 @@ sandbox (Incus system container, one per project)
   `worktree.added` itself; an adapter's own `session.started` draft is dropped. Ids an adapter puts into drafts
   (`toolId`, `requestId`, `blockId`) must be unique across the whole log, also across host restarts: Flow derives
   reply command ids from request ids, so a reused one turns a new reply into a duplicate. The host holds one
-  request slot and resolves requests itself on the owner's reply; the only resolution it takes from an adapter is
+  request slot and resolves requests itself on the owner's reply; an interrupt expires the open request at once
+  (the adapter answers it as the interrupt, so a later reply is `not_pending`, never logged as accepted). The only
+  resolution it takes from an adapter is
   `expired` for the open request (the provider withdrew it, e.g. the SDK aborted `canUseTool`), which frees the
   slot and sets the session working again. The sidecar shows no next request while a withdrawn one is still open on
   the host. The spec picks the adapter: `SessionSpec.replay` plays `contract/fixtures/demo.jsonl` (tests, demo
@@ -497,8 +499,10 @@ after an archive. A stopped host restarts on the next message with resume and lo
   first so a worktree's `ON DELETE RESTRICT` on its repository never depends on the cascade's order. The row is
   `deleting` from the instance's removal on: `ensure` refuses it, `Warm` reports it not warm and `Stop` leaves it, so
   a queued setup, an environment push or a session start cannot make the instance again before the rows are gone; a
-  project never brought up gets such a row too. A failed removal leaves the row `failed` and the project in place,
-  to be tried again. The home volume stays (every sandbox shares it); metering rows stay (no foreign keys).
+  project never brought up gets such a row too. The rows go under the same hold of the project's lock as the
+  instance, so no bring-up comes between the two; when they cannot (a session made after the count, a store error)
+  the row turns `stopped` and the project stays usable without an instance (a start makes it anew). A failed removal
+  leaves the row `failed` and the project in place, to be tried again. The home volume stays (every sandbox shares it); metering rows stay (no foreign keys).
 - **Rebuild** (`POST .../sandbox/rebuild`) re-creates the instance from the base image: it is deleted, the row keeps
   its id, address and flowd token, and a background bring-up creates it, delivers flowd and clones every repository
   afresh, then runs every repository's `.flow/setup.sh` again (the new instance holds no job results). Same
@@ -535,11 +539,14 @@ after an archive. A stopped host restarts on the next message with resume and lo
   last `tail` lines (the UI reads the end first: a failed script's error is there); for `setup`, `warm`
   and `failed` only (`sandbox_unavailable` otherwise). Config sync, the other job kind, answers `not_implemented`.
 - Delete and rebuild never wait for a bring-up: a project lock still held after `LockWait` (2 s) answers
-  `sandbox_busy` (`tryLock`). The short wait lets a `Warm` (session followers every 2 s, an environment push) pass.
+  `sandbox_busy` (`tryLock`). The short wait lets a `Warm` (session followers, an environment push) pass. A
+  follower whose sandbox does not run asks again after 2 s, doubling to 30 s, and at once on the project's
+  `sandbox.updated` (as the session stream does).
   `Warm` never waits behind a bring-up that may start the sandbox: it answers "not warm, may run" at once (the
   environment push alone waits, to follow the bring-up); every other wait for the lock ends when its caller leaves.
   Under the lock both count the open sessions again, and the delete's transaction removes only archived sessions
-  and fails with `project_has_sessions` while another is left: a session made after the API's count is never lost.
+  and fails with `project_has_sessions` while another is left: a session made after the API's count is never lost
+  (the sandbox row then turns `stopped`, see Project delete).
 - `Manager.Setup` records `setup` before its bring-up starts (a new row, or a stopped or failed one; skipped while a
   bring-up holds the lock). A creation publishes `project.updated` before it starts the setup: the browser drops a
   `sandbox.updated` of a project it does not know, and a bring-up that failed at once was followed by the creation's
