@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -130,8 +132,10 @@ type rig struct {
 	root  string
 	base  string
 	units *procUnits
-	srv   *httptest.Server
-	api   flowdproto.API
+	// over, when set, is the Units flowd uses instead of units (a wrapper around it).
+	over Units
+	srv  *httptest.Server
+	api  flowdproto.API
 }
 
 func newRig(t *testing.T) *rig {
@@ -161,7 +165,11 @@ func (r *rig) flowd() {
 		r.srv.CloseClientConnections()
 		r.srv.Close()
 	}
-	s := New(Options{Version: "test", Sandbox: "sb", Root: r.root, Units: r.units, Run: ExecRunner{}, Exe: "flowd",
+	var units Units = r.units
+	if r.over != nil {
+		units = r.over
+	}
+	s := New(Options{Version: "test", Sandbox: "sb", Root: r.root, Units: units, Run: ExecRunner{}, Exe: "flowd",
 		HostArgs: []string{"--pace", "0"}, CloneBase: "file://" + r.base, Log: slog.New(slog.DiscardHandler)})
 	s.Reattach(context.Background())
 	r.srv = httptest.NewServer(s.Handler("tok"))
@@ -404,6 +412,94 @@ func TestRefusals(t *testing.T) {
 	}
 }
 
+// A host that accepts a command and never answers (stuck holding its lock) holds Command only as long as the
+// request lives: its end closes the connection.
+func TestCommand_stuckHostEndsWithTheRequest(t *testing.T) {
+	root, err := os.MkdirTemp("", "sv") // unix socket paths are short
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	s := New(Options{Root: root})
+	sock := s.p(layout.HostSocket("s1"))
+	_ = os.MkdirAll(filepath.Dir(sock), 0o700)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	closed := make(chan struct{})
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, c) // reads the command, answers nothing, until the peer closes
+		close(closed)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Command(ctx, command(t, "c1", event.CmdTurnInterrupt, event.TurnInterrupt{}))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("command to a stuck host: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Command outlived its request")
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Error("the connection to the stuck host stayed open")
+	}
+}
+
+// The spec lies in a directory the agent owns: a link planted at its name is replaced, never written through, and
+// a spec whose name or directory flowd did not write is refused, not acted on.
+func TestSpec_plantedLinkAndTamperedFields(t *testing.T) {
+	root := t.TempDir()
+	s := New(Options{Root: root})
+	path := s.p(layout.SessionSpecFile("s1"))
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	victim := filepath.Join(root, "flowd.json")
+	_ = os.WriteFile(victim, []byte("config"), 0o600)
+	if err := os.Symlink(victim, path); err != nil {
+		t.Fatal(err)
+	}
+	sp := host.Spec{Session: flowdproto.SessionSpec{ID: "s1", Name: "demo"}, Dir: layout.SessionDir("demo")}
+	if err := s.writeSpec(sp); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "config" {
+		t.Errorf("written through the link: %q", b)
+	}
+	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+		t.Errorf("spec %v, %v", fi.Mode(), err)
+	}
+	if got, err := s.readSpec("s1"); err != nil || got.Dir != sp.Dir {
+		t.Errorf("read back %+v, %v", got, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".spec-*")); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
+	for _, bad := range []host.Spec{
+		{Session: flowdproto.SessionSpec{ID: "s1", Name: "demo"}, Dir: "/etc"},
+		{Session: flowdproto.SessionSpec{ID: "s1", Name: "../x"}, Dir: layout.SessionDir("../x")},
+		{Session: flowdproto.SessionSpec{ID: "s2", Name: "demo"}, Dir: layout.SessionDir("demo")},
+	} {
+		b, _ := json.Marshal(bad)
+		_ = os.WriteFile(path, b, 0o600)
+		if _, err := s.readSpec("s1"); err == nil {
+			t.Errorf("tampered spec accepted: %+v", bad)
+		}
+	}
+}
+
 // Parents flowd creates for an agent directory (/run/flow/sessions after a boot cleared the tmpfs) stay traversable
 // for the agent user, or its host cannot bind its socket.
 func TestMkdirAgent_parentsTraversable(t *testing.T) {
@@ -465,6 +561,68 @@ func TestEnsureSession_adoptsOnlyItsOwnWorktrees(t *testing.T) {
 	}
 	if _, err := r.api.EnsureSession(ctx, spec("s2")); err != nil {
 		t.Errorf("name not freed by stop-and-remove: %v", err)
+	}
+}
+
+// lingerUnits keeps an ending unit loaded (deactivating) until it is stopped, and refuses to start a loaded name,
+// as systemd-run does.
+type lingerUnits struct {
+	*procUnits
+	mu     sync.Mutex
+	loaded map[string]flowdproto.UnitState
+}
+
+func (u *lingerUnits) State(ctx context.Context, unit string) (flowdproto.UnitState, error) {
+	st, err := u.procUnits.State(ctx, unit)
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if ls, ok := u.loaded[unit]; ok && st == flowdproto.UnitMissing {
+		return ls, nil
+	}
+	return st, err
+}
+
+func (u *lingerUnits) Start(ctx context.Context, unit string, argv, props []string) error {
+	u.mu.Lock()
+	_, ok := u.loaded[unit]
+	u.mu.Unlock()
+	if ok {
+		return errors.New("Failed to start transient service unit: Unit " + unit + " was already loaded or has a fragment file.")
+	}
+	return u.procUnits.Start(ctx, unit, argv, props)
+}
+
+func (u *lingerUnits) Stop(ctx context.Context, unit string) error {
+	u.mu.Lock()
+	delete(u.loaded, unit)
+	u.mu.Unlock()
+	return u.procUnits.Stop(ctx, unit)
+}
+
+// A host whose unit is still loaded while it ends (deactivating: State reads inactive) is stopped before the next
+// start: systemd-run refuses a loaded name. (A failed one is collected at once under --collect.)
+func TestEnsureSession_clearsADeactivatingUnit(t *testing.T) {
+	r := newRig(t)
+	u := &lingerUnits{procUnits: r.units, loaded: map[string]flowdproto.UnitState{}}
+	r.over = u
+	r.flowd()
+	ctx := context.Background()
+	if err := r.api.PutEnv(ctx, flowdproto.Env{Revision: 1}); err != nil {
+		t.Fatal(err)
+	}
+	spec := flowdproto.SessionSpec{ID: "s1", Name: "demo", Provider: event.ProviderClaude, Model: "m", Mode: "ask",
+		Replay: true, Worktrees: []flowdproto.WorktreeSpec{}}
+	unit := layout.HostUnit("s1")
+	if _, err := r.api.EnsureSession(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	_ = r.units.Stop(ctx, unit) // the host is ending
+	u.mu.Lock()
+	u.loaded[unit] = flowdproto.UnitInactive
+	u.mu.Unlock()
+	st, err := r.api.EnsureSession(ctx, spec)
+	if err != nil || st.Unit != flowdproto.UnitActive {
+		t.Fatalf("start over a deactivating unit: %+v, %v", st, err)
 	}
 }
 

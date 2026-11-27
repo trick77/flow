@@ -179,8 +179,14 @@ func (h *Host) recover(events []event.Event) {
 		case *event.PermissionResolved, *event.QuestionResolved, *event.PlanResolved:
 			h.pendingID, h.pendingKind = "", ""
 		case *event.MessageQueued:
-			h.queue = append(h.queue, event.MessageSend{MessageID: p.MessageID, Text: p.Text, Origin: p.Origin,
-				FromSession: p.FromSession})
+			// A message queued again (sent now) moves: its id is in the queue once, where the last entry put it.
+			h.queue = slices.DeleteFunc(h.queue, func(m event.MessageSend) bool { return m.MessageID == p.MessageID })
+			m := event.MessageSend{MessageID: p.MessageID, Text: p.Text, Origin: p.Origin, FromSession: p.FromSession}
+			if p.Front {
+				h.queue = slices.Insert(h.queue, 0, m)
+			} else {
+				h.queue = append(h.queue, m)
+			}
 		case *event.MessageDequeued:
 			h.queue = slices.DeleteFunc(h.queue, func(m event.MessageSend) bool { return m.MessageID == p.MessageID })
 		}
@@ -424,6 +430,10 @@ func (h *Host) apply(c event.Command, p any) error {
 			return &CommandError{Code: hostproto.CodeNotPending, Detail: "message not queued"}
 		}
 		m := h.queue[i]
+		// Logged again at the head, so a restarted host drains in the order the owner chose.
+		if err := h.tryAppend(event.KindMessageQueued, cmd, h.turn, queued(m, true)); err != nil {
+			return &CommandError{Code: hostproto.CodeInvalid, Detail: err.Error()}
+		}
 		h.queue = slices.Insert(slices.Delete(h.queue, i, i+1), 0, m)
 		if h.turn != "" {
 			h.interrupt(cmd)
@@ -593,8 +603,7 @@ func (h *Host) startTurn(cmd string, m event.MessageSend) error {
 
 // enqueue logs a message as queued, then queues it (first with front); a message that cannot be logged is refused.
 func (h *Host) enqueue(cmd string, m event.MessageSend, front bool) error {
-	if err := h.tryAppend(event.KindMessageQueued, cmd, h.turn, event.MessageQueued{MessageID: m.MessageID,
-		Text: m.Text, Origin: m.Origin, FromSession: m.FromSession}); err != nil {
+	if err := h.tryAppend(event.KindMessageQueued, cmd, h.turn, queued(m, front)); err != nil {
 		return &CommandError{Code: hostproto.CodeInvalid, Detail: err.Error()}
 	}
 	if front {
@@ -603,6 +612,11 @@ func (h *Host) enqueue(cmd string, m event.MessageSend, front bool) error {
 		h.queue = append(h.queue, m)
 	}
 	return nil
+}
+
+func queued(m event.MessageSend, front bool) event.MessageQueued {
+	return event.MessageQueued{MessageID: m.MessageID, Text: m.Text, Origin: m.Origin, FromSession: m.FromSession,
+		Front: front}
 }
 
 // drain starts the next queued message when no turn runs.
