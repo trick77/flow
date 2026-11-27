@@ -73,7 +73,14 @@ func RemoteDefaultBranch(base string, client *http.Client) func(ctx context.Cont
 		for {
 			line, err := br.ReadString('\n')
 			if _, ref, ok := strings.Cut(line, "symref=HEAD:refs/heads/"); ok {
-				return strings.Fields(strings.NewReplacer("\x00", " ").Replace(ref))[0], nil
+				// The branch ends at the next capability (space), the capability list's NUL or the line's end.
+				if i := strings.IndexAny(ref, " \x00\r\n"); i >= 0 {
+					ref = ref[:i]
+				}
+				if ref != "" {
+					return ref, nil
+				}
+				return "", fmt.Errorf("%s: no HEAD in the ref advertisement", fullName)
 			}
 			if err != nil {
 				return "", fmt.Errorf("%s: no HEAD in the ref advertisement", fullName)
