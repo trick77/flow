@@ -355,6 +355,9 @@ export function foldEvents(state: StreamState): Folded {
         items.push({ type: "resumed", key: `resumed:${e.seq}`, ts: e.ts });
         break;
       case "notice":
+        // provider_session is the host's marker that the provider has the
+        // session (docs/architecture.md, "Claude sidecar"), nothing to read.
+        if (e.data.code === "provider_session") break;
         items.push({
           type: "notice",
           key: `notice:${e.seq}`,

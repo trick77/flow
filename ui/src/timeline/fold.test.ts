@@ -154,6 +154,22 @@ describe("foldEvents on the kind fixtures", () => {
 });
 
 describe("foldEvents edge cases", () => {
+  it("shows no row for the provider_session marker, but other notices", () => {
+    const f = foldEvents(
+      stateOf([
+        mk("notice", { code: "provider_session", level: "info" }, { seq: 1 }),
+        mk(
+          "notice",
+          { code: "message_may_not_have_run", level: "error" },
+          { seq: 2 },
+        ),
+      ]),
+    );
+    expect(f.items.map((i) => i.type === "notice" && i.code)).toEqual([
+      "message_may_not_have_run",
+    ]);
+  });
+
   it("appends open blocks after the log, without finished ones", () => {
     const s: StreamState = {
       ...stateOf([

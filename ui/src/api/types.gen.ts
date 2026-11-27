@@ -441,7 +441,9 @@ export interface TerminalCreate {
   projectId: string;
   /** Start in this session's directory; else in the home directory. */
   sessionId?: string;
+  /** 1 to 500. */
   cols: number;
+  /** 1 to 200. */
   rows: number;
 }
 
@@ -458,8 +460,20 @@ export interface TerminalControl {
 }
 
 export interface TerminalSize {
+  /** 1 to 500; others are ignored. */
   cols: number;
+  /** 1 to 200; others are ignored. */
   rows: number;
+}
+
+/** Text frame from the server on a terminal WebSocket. exit is the last frame before a normal close. */
+export interface TerminalEvent {
+  exit?: TerminalExit;
+}
+
+export interface TerminalExit {
+  /** The shell's exit code, or 128 + the signal that ended it. */
+  code: number;
 }
 
 export interface Preview {

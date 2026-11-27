@@ -139,6 +139,8 @@ export const timeline = {
       "That request was no longer open. The reply was not delivered.",
     github_token_expired:
       "The GitHub token expired. Flow renews it; git and gh fail until then.",
+    message_may_not_have_run:
+      "The agent stopped during this message. It may not have run, or only in part. Send it again if needed.",
   },
   noticeUnknown: "Notice: {{code}}",
 };
