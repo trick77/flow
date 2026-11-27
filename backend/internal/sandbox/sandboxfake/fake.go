@@ -48,6 +48,10 @@ type Runtime struct {
 	Starts int
 	// Now is the clock; time.Now by default.
 	Now func() time.Time
+	// InUse is the working set MemoryInUse reports for a running instance by name (70 MiB when not set; a negative
+	// value leaves the instance out, unmeasured); InUseErr fails MemoryInUse.
+	InUse    map[string]int64
+	InUseErr error
 }
 
 var _ sandbox.Runtime = (*Runtime)(nil)
@@ -319,12 +323,35 @@ func (r *Runtime) State(_ context.Context, name string) (sandbox.State, error) {
 
 func (r *Runtime) state(in *Instance) sandbox.State {
 	s := sandbox.State{Name: in.Spec.Name, Status: in.Status, Arch: r.Arch, IPv4: in.IPv4, CreatedAt: in.Created,
-		Address: in.NIC.Address.Addr(), MemoryLimitBytes: in.Limits.MemoryBytes}
+		Address: in.NIC.Address.Addr()}
 	if in.Status == sandbox.StatusRunning {
 		s.MAC, s.HostIface = "00:16:3e:00:00:01", in.HostIface
 		s.MemoryBytes, s.Processes = 114<<20, 14
 	}
 	return s
+}
+
+// MemoryInUse implements sandbox.Runtime: InUse for each running instance.
+func (r *Runtime) MemoryInUse(_ context.Context) (map[string]int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.InUseErr != nil {
+		return nil, r.InUseErr
+	}
+	out := map[string]int64{}
+	for name, in := range r.instances {
+		if in.Status != sandbox.StatusRunning {
+			continue
+		}
+		v, ok := r.InUse[name]
+		if !ok {
+			v = 70 << 20
+		}
+		if v >= 0 {
+			out[name] = v
+		}
+	}
+	return out, nil
 }
 
 // List implements sandbox.Runtime, sorted by name.

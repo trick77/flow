@@ -83,10 +83,9 @@ func TestEnsure_homeVolume(t *testing.T) {
 	}
 }
 
-// Limits are the settings', set before every start: the ceiling counts what the instance will run with.
-func TestStart_setsLimitsBeforeTheCeiling(t *testing.T) {
+// Limits are the settings', set before every start, so a changed setting reaches a stopped sandbox.
+func TestStart_setsLimits(t *testing.T) {
 	r := newRig(t)
-	r.secondProject(t)
 	ctx := t.Context()
 	if _, err := r.m.Ensure(ctx, pid); err != nil {
 		t.Fatal(err)
@@ -94,16 +93,12 @@ func TestStart_setsLimitsBeforeTheCeiling(t *testing.T) {
 	if err := r.m.Stop(ctx, pid); err != nil {
 		t.Fatal(err)
 	}
-	r.m.Memory, r.m.CPUs, r.m.MemoryTotal = 6<<30, 4, 10<<30
+	r.m.Memory, r.m.CPUs = 6<<30, 4
 	if _, err := r.m.Ensure(ctx, pid); err != nil {
 		t.Fatal(err)
 	}
 	if in, _ := r.rt.Instance("flow-b679dbb3324e"); in.Limits != (sandbox.Limits{MemoryBytes: 6 << 30, CPUs: 4}) {
 		t.Errorf("limits %+v", in.Limits)
-	}
-	// 6 GiB running, another 6 GiB do not fit in 10.
-	if _, err := r.m.Ensure(ctx, pid2); err == nil || !strings.Contains(err.Error(), "memory") {
-		t.Errorf("second sandbox past the ceiling: %v", err)
 	}
 }
 

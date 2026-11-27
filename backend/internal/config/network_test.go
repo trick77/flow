@@ -24,8 +24,34 @@ func TestSandboxNetwork_defaults(t *testing.T) {
 		n.Gateway.String() != "172.30.0.1" || len(n.Resolvers) != 2 || n.Resolvers[1].String() != "9.9.9.9" {
 		t.Errorf("network %+v", n)
 	}
-	if !n.Configured() || cfg.SandboxMemoryTotal != 14<<30 {
-		t.Errorf("configured %v, total %d", n.Configured(), cfg.SandboxMemoryTotal)
+	if !n.Configured() || cfg.SandboxMemoryTotal != 14<<30 || cfg.SandboxMemoryHeadroom != 6<<30 {
+		t.Errorf("configured %v, total %d, headroom %d", n.Configured(), cfg.SandboxMemoryTotal,
+			cfg.SandboxMemoryHeadroom)
+	}
+}
+
+// The headroom follows the sandbox's limit unless set; a total of 0 turns the admission check off.
+func TestSandboxMemoryHeadroom(t *testing.T) {
+	for name, c := range map[string]struct {
+		vars            map[string]string
+		total, headroom int64
+	}{
+		"follows the limit":   {map[string]string{"BACKEND_SANDBOX_MEMORY_MIB": "2048"}, 14 << 30, 2 << 30},
+		"no limit":            {map[string]string{"BACKEND_SANDBOX_MEMORY_MIB": "0", "BACKEND_SESSION_MEMORY_MIB": "0"}, 14 << 30, 6 << 30},
+		"set":                 {map[string]string{"BACKEND_SANDBOX_MEMORY_HEADROOM_MIB": "1024"}, 14 << 30, 1 << 30},
+		"no check":            {map[string]string{"BACKEND_SANDBOX_MEMORY_TOTAL_MIB": "0"}, 0, 6 << 30},
+		"total under a limit": {map[string]string{"BACKEND_SANDBOX_MEMORY_TOTAL_MIB": "4096", "BACKEND_SANDBOX_MEMORY_HEADROOM_MIB": "2048"}, 4 << 30, 2 << 30},
+	} {
+		cfg, err := Load(lookup(devVars(c.vars)))
+		if err != nil || cfg.SandboxMemoryTotal != c.total || cfg.SandboxMemoryHeadroom != c.headroom {
+			t.Errorf("%s: total %d, headroom %d, %v", name, cfg.SandboxMemoryTotal, cfg.SandboxMemoryHeadroom, err)
+		}
+	}
+	for _, vars := range []map[string]string{{"BACKEND_SANDBOX_MEMORY_TOTAL_MIB": "-1"},
+		{"BACKEND_SANDBOX_MEMORY_HEADROOM_MIB": "-1"}} {
+		if _, err := Load(lookup(devVars(vars))); err == nil {
+			t.Errorf("%v: no error", vars)
+		}
 	}
 }
 

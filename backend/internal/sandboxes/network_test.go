@@ -346,23 +346,63 @@ func TestEnsure_recreatedInstanceGetsFlowdAtOnce(t *testing.T) {
 	}
 }
 
-func TestEnsure_memoryCeiling(t *testing.T) {
+// Admission counts what running sandboxes use, not their limits: three sandboxes of a 6 GiB limit run under a
+// 14 GiB total while they are idle.
+func TestEnsure_memoryMeasuredNotLimits(t *testing.T) {
+	r := newRig(t)
+	r.secondProject(t)
+	const pid3 = "01a21998-5a4f-7828-81be-00000000cafe"
+	if err := r.ps.Create(t.Context(), projects.Project{ID: pid3, Name: "third"},
+		[]projects.Repo{{ID: "r3", FullName: "trick77/loom", DefaultBranch: "master"}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	r.m.Memory, r.m.MemoryTotal, r.m.MemoryHeadroom = 6<<30, 14<<30, 6<<30
+	for _, p := range []string{pid, pid2, pid3} {
+		if _, err := r.m.Ensure(ctx, p); err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+	}
+	if in, _ := r.rt.Instance(InstanceName(pid3)); in.Status != sandbox.StatusRunning || in.Limits.MemoryBytes != 6<<30 {
+		t.Errorf("third sandbox %s, limits %+v: the per-sandbox limit stays", in.Status, in.Limits)
+	}
+}
+
+// A start is refused while the measured use plus the headroom passes the total; a refused new sandbox is refused
+// before its instance is made. Stopping a sandbox, or its use dropping, makes room.
+func TestEnsure_memoryFull(t *testing.T) {
 	r := newRig(t)
 	r.secondProject(t)
 	ctx := t.Context()
-	r.m.MemoryTotal = 3 << 29 // 1.5 GiB: one sandbox of 1 GiB fits
+	r.m.MemoryTotal, r.m.MemoryHeadroom = 4<<30, 1<<30
+	r.rt.InUse = map[string]int64{InstanceName(pid): 3<<30 + 1}
 	if _, err := r.m.Ensure(ctx, pid); err != nil {
 		t.Fatal(err)
 	}
 	_, err := r.m.Ensure(ctx, pid2)
 	if err == nil || !strings.Contains(err.Error(), "memory ceiling") {
-		t.Fatalf("second sandbox past the ceiling: %v", err)
+		t.Fatalf("second sandbox past the total: %v", err)
 	}
 	if d := r.m.Describe(ctx, pid2); d.State != "failed" || d.ErrorCode != "sandbox_memory_full" {
-		t.Errorf("Describe past the ceiling = %+v", d)
+		t.Errorf("Describe past the total = %+v", d)
 	}
-	if _, ok := r.rt.Instance(InstanceName(pid2)); !ok {
-		t.Error("the stopped instance should exist: only starting is refused")
+	if _, ok := r.rt.Instance(InstanceName(pid2)); ok {
+		t.Error("the refused sandbox's instance was made")
+	}
+	r.rt.InUse[InstanceName(pid)] = 3 << 30 // exactly fits: 3 + 1 of 4 GiB
+	if _, err := r.m.Ensure(ctx, pid2); err != nil {
+		t.Fatalf("use dropped: %v", err)
+	}
+	// An existing instance is refused at its start: stopped, it stays stopped.
+	if err := r.m.Stop(ctx, pid2); err != nil {
+		t.Fatal(err)
+	}
+	r.rt.InUse[InstanceName(pid)] = 4 << 30
+	if _, err := r.m.Ensure(ctx, pid2); err == nil {
+		t.Fatal("stopped sandbox started past the total")
+	}
+	if in, _ := r.rt.Instance(InstanceName(pid2)); in.Status != sandbox.StatusStopped {
+		t.Errorf("refused start left %s", in.Status)
 	}
 	if err := r.m.Stop(ctx, pid); err != nil {
 		t.Fatal(err)
@@ -372,7 +412,28 @@ func TestEnsure_memoryCeiling(t *testing.T) {
 	}
 	r.m.MemoryTotal = 0
 	if _, err := r.m.Ensure(ctx, pid); err != nil {
-		t.Errorf("no ceiling: %v", err)
+		t.Errorf("no check: %v", err)
+	}
+}
+
+// A failed measurement neither admits everything nor blocks: an unmeasured running instance counts with its
+// usage page cache included (the fake reports 114 MiB).
+func TestEnsure_memoryUnmeasured(t *testing.T) {
+	r := newRig(t)
+	r.secondProject(t)
+	ctx := t.Context()
+	if _, err := r.m.Ensure(ctx, pid); err != nil {
+		t.Fatal(err)
+	}
+	r.rt.InUseErr = errors.New("metrics: 403")
+	r.m.MemoryHeadroom = 1 << 30
+	r.m.MemoryTotal = 1<<30 + 100<<20 // the 70 MiB working set would fit, the 114 MiB usage does not
+	if _, err := r.m.Ensure(ctx, pid2); err == nil || !strings.Contains(err.Error(), "memory ceiling") {
+		t.Fatalf("unmeasured use not counted: %v", err)
+	}
+	r.m.MemoryTotal = 1<<30 + 120<<20
+	if _, err := r.m.Ensure(ctx, pid2); err != nil {
+		t.Errorf("unmeasured use blocks for good: %v", err)
 	}
 }
 

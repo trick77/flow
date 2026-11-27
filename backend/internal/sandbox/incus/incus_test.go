@@ -41,6 +41,8 @@ type fake struct {
 	projects  []string
 	// bridges are the host bridges and their ports; a NIC's parent not in it is missing.
 	bridges map[string][]string
+	// metrics is what /1.0/metrics serves; "" answers 403 as Incus does to a certificate without access.
+	metrics string
 }
 
 type fakeInst struct {
@@ -103,6 +105,13 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 	switch {
+	case parts[0] == "metrics":
+		if f.metrics == "" {
+			fail(w, 403, "Forbidden")
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = io.WriteString(w, f.metrics)
 	case parts[0] == "operations" && len(parts) == 3 && parts[2] == "wait":
 		op, ok := f.ops[parts[1]]
 		if !ok {
@@ -369,7 +378,7 @@ func TestLifecycle(t *testing.T) {
 	}
 	st, err := c.State(ctx, "sb1")
 	if err != nil || st.Status != sandbox.StatusRunning || st.IPv4 != "172.30.128.1" || st.Arch != "arm64" ||
-		st.DiskBytes != 5 || st.Address.String() != "172.30.128.1" || st.HostIface != "veth0" || st.MemoryLimitBytes != 1<<30 {
+		st.DiskBytes != 5 || st.Address.String() != "172.30.128.1" || st.HostIface != "veth0" {
 		t.Fatalf("State = %+v, %v", st, err)
 	}
 	if err := c.SetNIC(ctx, "sb1", testNIC("172.30.128.2")); !errors.Is(err, sandbox.ErrState) {
@@ -476,6 +485,38 @@ func testNIC(addr string) sandbox.NIC {
 }
 
 // A missing bridge is ErrNetworkMissing both when asked for and when Incus refuses a start for it.
+// The working set is memory.current (MemTotal less MemFree) less the inactive file cache; the lines are as Incus
+// 6.0.4 served them for an idle sandbox (cgroup at that moment: current 114 MiB, inactive_file 44 MiB).
+func TestMemoryInUse(t *testing.T) {
+	f := newFake()
+	_, c := serve(t, f)
+	ctx := context.Background()
+	if _, err := c.MemoryInUse(ctx); err == nil {
+		t.Error("refused metrics: no error")
+	}
+	f.metrics = `# HELP incus_memory_MemTotal_bytes The amount of used memory.
+# TYPE incus_memory_MemTotal_bytes gauge
+incus_memory_Active_file_bytes{name="sb1",project="flow",type="container"} 1.2795904e+07
+incus_memory_Inactive_file_bytes{name="sb1",project="flow",type="container"} 3.9276544e+07
+incus_memory_MemAvailable_bytes{name="sb1",project="flow",type="container"} 6.384873472e+09
+incus_memory_MemFree_bytes{name="sb1",project="flow",type="container"} 6.33266176e+09
+incus_memory_MemTotal_bytes{name="sb1",project="flow",type="container"} 6.442450944e+09
+incus_memory_MemFree_bytes{name="sb2",project="flow",type="container"} 1e+09
+incus_memory_MemTotal_bytes{name="sb2",project="flow",type="container"} 2e+09
+incus_cpu_seconds_total{cpu="0",mode="user",name="sb1",project="flow",type="container"} 0.2
+`
+	got, err := c.MemoryInUse(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]int64{"sb1": 6442450944 - 6332661760 - 39276544}; !maps.Equal(got, want) {
+		t.Errorf("MemoryInUse = %v, want %v (sb2 lacks its cache figure: not measured)", got, want)
+	}
+	if !slices.Contains(f.projects, "flow") {
+		t.Error("metrics not asked for Flow's project")
+	}
+}
+
 func TestBridge(t *testing.T) {
 	f := newFake()
 	_, c := serve(t, f)

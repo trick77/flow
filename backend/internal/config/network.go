@@ -90,14 +90,27 @@ func behindHost(a netip.Addr) bool {
 	return false
 }
 
-// loadSandboxMemoryTotal reads BACKEND_SANDBOX_MEMORY_TOTAL_MIB: at least one sandbox must fit.
-func loadSandboxMemoryTotal(r *env.Reader, perSandbox int64) int64 {
-	total := int64(r.Int("BACKEND_SANDBOX_MEMORY_TOTAL_MIB", DefaultSandboxMemoryTotalMiB)) << 20
-	if total <= 0 || total < perSandbox {
-		r.Fail("BACKEND_SANDBOX_MEMORY_TOTAL_MIB: %d MiB holds not even one sandbox of BACKEND_SANDBOX_MEMORY_MIB %d MiB",
-			total>>20, perSandbox>>20)
+// loadSandboxMemoryTotal reads BACKEND_SANDBOX_MEMORY_TOTAL_MIB (0: no admission check) and
+// BACKEND_SANDBOX_MEMORY_HEADROOM_MIB, the room a start needs above the running sandboxes' measured memory: by
+// default one sandbox's limit (BACKEND_SANDBOX_MEMORY_MIB, or its default when that is 0), room for one full build
+// to begin. The headroom alone must fit under the total, or no sandbox could ever start.
+func loadSandboxMemoryTotal(r *env.Reader, perSandbox int64) (total, headroom int64) {
+	total = int64(r.Int("BACKEND_SANDBOX_MEMORY_TOTAL_MIB", DefaultSandboxMemoryTotalMiB)) << 20
+	defHeadroom := int(perSandbox >> 20)
+	if defHeadroom <= 0 {
+		defHeadroom = DefaultSandboxMemoryMiB
 	}
-	return total
+	headroom = int64(r.Int("BACKEND_SANDBOX_MEMORY_HEADROOM_MIB", defHeadroom)) << 20
+	switch {
+	case total < 0:
+		r.Fail("BACKEND_SANDBOX_MEMORY_TOTAL_MIB: want 0 (no check) or more")
+	case headroom < 0:
+		r.Fail("BACKEND_SANDBOX_MEMORY_HEADROOM_MIB: want 0 or more")
+	case total > 0 && headroom > total:
+		r.Fail("BACKEND_SANDBOX_MEMORY_TOTAL_MIB: %d MiB holds not even one sandbox's headroom "+
+			"(BACKEND_SANDBOX_MEMORY_HEADROOM_MIB %d MiB)", total>>20, headroom>>20)
+	}
+	return total, headroom
 }
 
 // checkAddrOffSandboxNetwork refuses a listen address on the sandbox subnet: sandboxes reach everything on it.
