@@ -91,6 +91,10 @@ func TestRemoteDefaultBranch(t *testing.T) {
 				"0100abc HEAD\x00multi_ack symref=HEAD:refs/heads/trunk agent=git/2\n0000"))
 		case "/a/nohead.git/info/refs":
 			_, _ = w.Write([]byte("0000"))
+		case "/a/emptyhead.git/info/refs": // the symref names no branch: an error, not a panic
+			_, _ = w.Write([]byte("0100abc HEAD\x00symref=HEAD:refs/heads/\x00agent=git/2\n0000"))
+		case "/a/bare.git/info/refs":
+			_, _ = w.Write([]byte("0100abc HEAD\x00symref=HEAD:refs/heads/\n0000"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -100,7 +104,7 @@ func TestRemoteDefaultBranch(t *testing.T) {
 	if b, err := f(t.Context(), "a/b"); err != nil || b != "trunk" {
 		t.Errorf("branch = %q, %v", b, err)
 	}
-	for _, repo := range []string{"a/nohead", "a/missing"} {
+	for _, repo := range []string{"a/nohead", "a/emptyhead", "a/bare", "a/missing"} {
 		if _, err := f(t.Context(), repo); err == nil {
 			t.Errorf("%s: no error", repo)
 		}
