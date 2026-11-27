@@ -75,6 +75,14 @@ reports its own cost, not the session's. Readers take `turn.ended.model`, else `
 `session.started` model. `usage`, `costUsd` and `durationMs` stay as they are; an absent `costUsd` means the
 provider reported none, not a free turn (the generator binds optional numbers as Go pointers for this).
 
+The effort goes the same way (`effort`, `Effort`): `turn.started` always carries it, `default` included, so a turn
+back on the agent's own effort is never read as the last turn's level; an absent one (logs from before) reads as
+`default`. In `settings.set` / `session.settings` an absent effort means no change and `default` the agent's own.
+Claude: `default` passes no `effort` option; a running query changes by `applyFlagSettings({effortLevel})` (`null`
+for default: the model's own), there is no setter. Metering records the effort Flow asked for: Claude Code lowers a
+level the model lacks without saying so (`max` runs as `high`). **Provisional:** that the mid-session change keeps
+the flag-settings file layer (`settings` path) and takes effect from the next request is not verified.
+
 ## Status
 
 The host derives `session.status` and writes it on change; Flow mirrors it into `sessions.status`. A sandbox stop
@@ -173,6 +181,7 @@ no sentence depends on them. Codes in use:
 | `auth_required` | error | sidecar | Claude Code is not signed in or its credential was refused (`error`) |
 | `provider_error` | error | sidecar | any other assistant message error (`error`) |
 | `mode_change_failed`, `model_change_failed` | error | sidecar | `setPermissionMode` / `setModel` failed; a `session.settings` with the mode or model in force follows (`mode` / `model`) |
+| `effort_change_failed` | error | sidecar | `applyFlagSettings` refused the effort; a `session.settings` with the effort in force follows, `default` included (`effort`) |
 | `draft_too_large` | warning | sidecar | a draft stayed over the line limit even shortened and was replaced by this notice (`kind`) |
 | `request_too_large` | error | sidecar | a permission, question or plan request too large to show; the agent was answered no (`requestId`, `tool`) |
 | `sidecar_translate_failed` | warning | sidecar | the mapping failed on a message; it follows as `provider.passthrough` (`name`) |
@@ -182,7 +191,7 @@ no sentence depends on them. Codes in use:
 | `sidecar_busy` | error | sidecar | a `message.send` while a turn runs: the host's queue should have held it (`messageId`) |
 | `sidecar_reply_not_pending` | warning | sidecar | a reply to a request the sidecar no longer holds (`requestId`, `reason`: `answered`, `unknown`, or `withdrawn` for one the SDK withdrew while it was shown) |
 | `github_token_expired` | error | flowd | the session's git asked for the GitHub token and flowd's copy had expired with no renewed one pushed (Flow unreachable, or its renewal failing); at most once per 10 minutes (docs/architecture.md, credentials) |
-| `github_disconnected` | error | flowd | the session's git asked for the GitHub token and GitHub is not connected, or must be connected again: the UI offers "connect GitHub"; at most once per 10 minutes |
+| `github_disconnected` | error | flowd | the session's git asked for the GitHub token and GitHub is not connected, or must be connected again: the row says to connect it in Settings (notice rows carry no action); at most once per 10 minutes, a notice the host did not log counts for nothing |
 | `message_may_not_have_run` | error | host (Claude adapter) | the sidecar exited or its pipe broke during a turn; the message is never re-sent by itself (`messageId`) |
 | `provider_session` | info | host (Claude adapter) | the provider has the session (the first `system/init` of a turn): the marker resume and `priorCostUsd` are read from; readers show no row for it |
 
@@ -221,7 +230,7 @@ sessions (the plan arrives as text).
 | `message.send_now`, `message.remove` | Flow | send now: `message.queued {front}` again under the message's id (it moves to the head; the queue holds each id once, where its last `message.queued` put it), interrupt + deliver; remove: drop it |
 | `turn.interrupt` | Flow | `interrupt()` / OpenCode interrupt |
 | `permission.reply`, `question.reply`, `plan.reply` | Flow (owner only) | resolve the open request |
-| `settings.set` | Flow | `setModel`/`setPermissionMode`, `session.settings` |
+| `settings.set` | Flow | `setModel`/`applyFlagSettings` (effort)/`setPermissionMode`, `session.settings` |
 | `gate.update` | Flow's gate queue | `gate.*`, status `queued`/`working` |
 | `child.start`, `child.report`, `report.sent` | Flow | `child.started`, queued `child.reported` + message, `session.reported` |
 | `worktree.add`, `pull_requests.set` | Flow | `worktree.added`, `pull_requests.updated` |
