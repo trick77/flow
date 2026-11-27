@@ -1,11 +1,18 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 
 import { App } from "./App";
 import type { Project, SessionSummary } from "./api/types.gen";
 import { resources } from "./i18n/resources";
 import { FakeWebSocket } from "./terminal/fakeSocket";
 import { FakeEventSource } from "./test/fakeEventSource";
-import { fixtureLines } from "./test/flowEvents";
+import { fixtureLines, mk } from "./test/flowEvents";
 
 const en = resources.en;
 
@@ -42,8 +49,11 @@ interface Server {
   projectsStatus?: number;
   // archive answers DELETE /api/sessions/{id}: 204 or an error code.
   archive?: string[];
-  // created answers POST /api/sessions.
+  // created answers POST /api/sessions, once createGate (if any) settles.
   created?: SessionSummary;
+  createGate?: Promise<void>;
+  // patchCode refuses PATCH /api/sessions/{id}; else it answers the change.
+  patchCode?: string;
   calls: string[];
 }
 
@@ -57,6 +67,29 @@ function serve(server: Server) {
         return code
           ? new Response(JSON.stringify({ code }), { status: 409 })
           : new Response(null, { status: 204 });
+      }
+      if (init?.method === "PATCH" && url.startsWith("/api/sessions/")) {
+        const body = String(init.body);
+        server.calls.push(`PATCH ${url} ${body}`);
+        if (server.patchCode) {
+          return new Response(JSON.stringify({ code: server.patchCode }), {
+            status: 501,
+          });
+        }
+        const id = decodeURIComponent(url.slice("/api/sessions/".length));
+        const s = server.sessions.find((x) => x.id === id);
+        return new Response(
+          JSON.stringify({
+            summary: { ...s, ...JSON.parse(body) },
+            dir: "/w",
+            worktrees: [],
+            lastSeq: 0,
+          }),
+        );
+      }
+      if (init?.method === "POST" && url.endsWith("/seen")) {
+        server.calls.push(`SEEN ${url} ${String(init.body)}`);
+        return new Response(null, { status: 204 });
       }
       if (url === "/api/agents") {
         return new Response(
@@ -80,6 +113,7 @@ function serve(server: Server) {
         server.created
       ) {
         server.calls.push("POST /api/sessions");
+        await server.createGate;
         return new Response(
           JSON.stringify({
             summary: server.created,
@@ -180,9 +214,11 @@ describe("App", () => {
     serve(server);
     render(<App EventSource={FakeEventSource} />);
     await screen.findByRole("heading", { level: 2, name: summary({}).title });
-    // The composer names the model from the catalog.
+    // The composer names the model from the catalog, as a picker.
     expect(
-      await screen.findByRole("img", { name: "Model: Claude Code, Opus 5.5" }),
+      await screen.findByRole("button", {
+        name: "Model: Claude Code, Opus 5.5",
+      }),
     ).toBeInTheDocument();
 
     const newButton = screen.getByRole("button", {
@@ -202,7 +238,9 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(server.calls).toContain("POST /api/sessions");
     expect(newButton).not.toHaveAttribute("aria-current");
-    const row = screen.getByRole("button", { name: /Clamp the width/ });
+    const row = within(
+      screen.getByRole("navigation", { name: en.sidebar.listLabel }),
+    ).getByRole("button", { name: /Clamp the width/ });
     expect(row).toHaveAttribute("aria-current", "true");
     expect(FakeEventSource.forUrl("/api/sessions/s-new/events")).toHaveLength(
       1,
@@ -531,5 +569,201 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { level: 2, name: "Second one" }),
     ).toBeInTheDocument();
+  });
+
+  const withRepo: Project = {
+    ...project,
+    repos: [{ id: "r1", fullName: "dev/scener", defaultBranch: "master" }],
+  };
+
+  it("keeps the New session draft while another view shows", async () => {
+    window.localStorage.clear();
+    serve({ sessions: [summary({})], projects: [withRepo], calls: [] });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    fireEvent.click(
+      screen.getByRole("button", { name: en.sidebar.newSession }),
+    );
+    fireEvent.change(
+      await screen.findByLabelText(en.composer.startPlaceholder),
+      { target: { value: "half a task" } },
+    );
+    fireEvent.click(
+      screen.getAllByRole("button", { name: en.shell.settings })[0],
+    );
+    expect(
+      screen.getByRole("heading", { level: 1, name: en.settings.title }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: en.sidebar.newSession }),
+    );
+    expect(screen.getByLabelText(en.composer.startPlaceholder)).toHaveValue(
+      "half a task",
+    );
+  });
+
+  it("lists a session started from a hidden New session without switching to it", async () => {
+    window.localStorage.clear();
+    let open!: () => void;
+    const server: Server = {
+      sessions: [summary({}), summary({ id: "s2", title: "Second one" })],
+      projects: [withRepo],
+      created: summary({
+        id: "s-new",
+        title: "Clamp the width",
+        status: "working",
+      }),
+      createGate: new Promise((r) => (open = r)),
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    fireEvent.click(
+      screen.getByRole("button", { name: en.sidebar.newSession }),
+    );
+    const box = await screen.findByLabelText(en.composer.startPlaceholder);
+    fireEvent.change(box, { target: { value: "Clamp the width" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(server.calls).toContain("POST /api/sessions"));
+    // Another session is opened while the start runs.
+    const list = screen.getByRole("navigation", { name: en.sidebar.listLabel });
+    fireEvent.click(within(list).getByText("Second one"));
+    await act(async () => open());
+    expect(
+      await within(list).findByRole("button", { name: /Clamp the width/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Second one" }),
+    ).toBeInTheDocument();
+    // The next New session starts empty.
+    fireEvent.click(
+      screen.getByRole("button", { name: en.sidebar.newSession }),
+    );
+    expect(
+      await screen.findByLabelText(en.composer.startPlaceholder),
+    ).toHaveValue("");
+  });
+
+  it("renames the open session from its header", async () => {
+    const server: Server = {
+      sessions: [summary({})],
+      projects: [project],
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    const title = await screen.findByRole("button", {
+      name: "Persist the sidebar width",
+      description: en.shell.rename,
+    });
+    fireEvent.click(title);
+    const field = screen.getByRole("textbox", { name: en.shell.renameLabel });
+    fireEvent.change(field, { target: { value: "  Clamp the width  " } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    // Shown at once, kept from the answer.
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Clamp the width" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(server.calls).toContain(
+        'PATCH /api/sessions/s-done {"title":"Clamp the width"}',
+      ),
+    );
+    const list = screen.getByRole("navigation", { name: en.sidebar.listLabel });
+    expect(
+      await within(list).findByText("Clamp the width"),
+    ).toBeInTheDocument();
+  });
+
+  it("puts the old title back when a rename is refused", async () => {
+    serve({
+      sessions: [summary({})],
+      projects: [project],
+      patchCode: "not_implemented",
+      calls: [],
+    });
+    render(<App EventSource={FakeEventSource} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Persist the sidebar width" }),
+    );
+    const field = screen.getByRole("textbox", { name: en.shell.renameLabel });
+    fireEvent.change(field, { target: { value: "Other" } });
+    fireEvent.blur(field);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(en.shell.renameFailed);
+    expect(alert).toHaveTextContent(en.errors.not_implemented);
+    expect(
+      screen.getByRole("heading", {
+        level: 2,
+        name: "Persist the sidebar width",
+      }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: en.shell.dismiss }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("hands a waiting question to the composer", async () => {
+    serve({ sessions: [summary({})], projects: [project], calls: [] });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByRole("heading", { level: 2, name: summary({}).title });
+    const es = FakeEventSource.forUrl("/api/sessions/s-done/events")[0];
+    act(() => {
+      es.open();
+      es.emit(
+        "flow",
+        mk("turn.started", { messageId: "m" }, { seq: 1, turn: "t" }),
+      );
+      es.emit(
+        "flow",
+        mk(
+          "question.asked",
+          {
+            requestId: "q",
+            questions: [
+              {
+                id: "a",
+                text: "Which key?",
+                multiSelect: false,
+                options: [{ id: "o", label: "SHA" }],
+              },
+            ],
+          },
+          { seq: 2, turn: "t" },
+        ),
+      );
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: en.timeline.answerInComposer }),
+    );
+    expect(screen.getByLabelText(en.composer.answerPlaceholder)).toHaveFocus();
+  });
+
+  it("marks the open session seen and clears its bold title", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const server: Server = {
+      sessions: [summary({ unseen: true })],
+      projects: [project],
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    const list = await screen.findByRole("navigation", {
+      name: en.sidebar.listLabel,
+    });
+    const row = await within(list).findByRole("button", {
+      name: /Persist the sidebar width/,
+    });
+    expect(row).toHaveClass("unseen");
+    emitDemo(FakeEventSource.forUrl("/api/sessions/s-done/events")[0], 3);
+    await waitFor(
+      () =>
+        expect(server.calls).toContain(
+          'SEEN /api/sessions/s-done/seen {"seq":3}',
+        ),
+      { timeout: 3000 },
+    );
+    await waitFor(() => expect(row).not.toHaveClass("unseen"));
+    vi.restoreAllMocks();
   });
 });

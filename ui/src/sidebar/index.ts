@@ -3,4 +3,8 @@
 // Owner: shell and sidebar area (docs/ownership.md).
 export { groupSessions, orderSessions, sectionOf } from "./group";
 export { Sidebar } from "./Sidebar";
-export { useSessions, type SessionsState } from "./useSessions";
+export {
+  useSessions,
+  type SessionPatch,
+  type SessionsState,
+} from "./useSessions";

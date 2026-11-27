@@ -1,10 +1,11 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
   archiveSession,
   errorCode,
   sandboxAction,
+  updateSession,
   type EventSourceCtor,
 } from "../api";
 import type {
@@ -15,7 +16,8 @@ import type {
   SessionStatus,
   SessionSummary,
 } from "../api/types.gen";
-import { Composer, modelLabel } from "../composer";
+import { Composer } from "../composer";
+import type { SessionPatch } from "../sidebar";
 import {
   TerminalDrawer,
   TerminalToggle,
@@ -25,6 +27,7 @@ import {
 import { foldEvents, Timeline, useSessionStream } from "../timeline";
 import { Header } from "./Header";
 import { Icon } from "./Icon";
+import { useMarkSeen } from "./useMarkSeen";
 
 // SandboxNotice stands in for a session's history while its sandbox does not
 // run: the log lives in the sandbox, so the timeline stays empty until it
@@ -93,13 +96,20 @@ export function SessionView({
   WebSocket,
   createEmulator,
   onStatus,
+  onSeen,
+  onUpdated,
   onArchived,
   nav,
   hidden,
   catalog,
 }: {
-  // catalog names the session's model; without it the model id shows.
+  // catalog names the session's model and offers the models and modes to
+  // change to; without it the model id shows, read-only.
   catalog?: AgentCatalog;
+  // onSeen is told when the server took a seen mark for the session.
+  onSeen?: () => void;
+  // onUpdated gets the fields of an accepted rename, model or mode change.
+  onUpdated?: (fields: SessionPatch) => void;
   session: SessionSummary;
   // sandbox is the project's, as the app stream keeps it.
   sandbox?: Sandbox;
@@ -128,6 +138,31 @@ export function SessionView({
   });
   const folded = useMemo(() => foldEvents(stream), [stream]);
   const status = down ? session.status : (folded.status ?? session.status);
+  useMarkSeen({
+    sessionId: session.id,
+    lastSeq: stream.lastSeq,
+    unseen: session.unseen,
+    shown: !hidden,
+    onSeen,
+  });
+  const composerInput = useRef<HTMLTextAreaElement>(null);
+  // A rename under way shows at once; a refusal puts the old title back.
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<ErrorCode | null>(null);
+  const rename = (title: string) => {
+    setRenaming(title);
+    setRenameError(null);
+    updateSession(session.id, { title }).then(
+      (s) => {
+        setRenaming(null);
+        onUpdated?.({ title: s.summary.title });
+      },
+      (err: unknown) => {
+        setRenaming(null);
+        setRenameError(errorCode(err));
+      },
+    );
+  };
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [asking, setAsking] = useState(false);
   const [archiving, setArchiving] = useState(false);
@@ -160,7 +195,8 @@ export function SessionView({
     <section className="view" aria-label={t("session")} hidden={hidden}>
       <Header
         project={projectName}
-        title={session.title}
+        title={renaming ?? session.title}
+        onRename={renaming === null ? rename : undefined}
         branch={session.branch}
         actions={
           <>
@@ -185,6 +221,20 @@ export function SessionView({
           </>
         }
       />
+      {renameError && (
+        <div className="confirm hdr-confirm" role="alert">
+          {t("renameFailed")} {t(renameError, { ns: "errors" })}
+          <div className="row-inline">
+            <button
+              type="button"
+              className="btn sm ghost"
+              onClick={() => setRenameError(null)}
+            >
+              {t("dismiss")}
+            </button>
+          </div>
+        </div>
+      )}
       {asking && (
         <div
           className="confirm hdr-confirm"
@@ -230,14 +280,23 @@ export function SessionView({
           folded={folded}
           working={status === "working"}
           provider={session.provider}
+          modes={catalog?.modes}
+          modeCap={session.modeCap}
+          mode={session.mode}
+          onAnswerInComposer={() => composerInput.current?.focus()}
         />
         <Composer
           sessionId={session.id}
           provider={session.provider}
           model={session.model}
-          modelLabel={modelLabel(catalog, session.provider, session.model)}
           mode={session.mode}
+          modeCap={session.modeCap}
+          catalog={catalog}
           projectName={projectName}
+          queue={folded.queue}
+          questionId={folded.pendingQuestion?.request.requestId}
+          inputRef={composerInput}
+          onUpdated={onUpdated}
           running={
             down
               ? status === "working"

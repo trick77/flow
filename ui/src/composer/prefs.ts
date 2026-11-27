@@ -1,10 +1,13 @@
-import type { PermissionMode } from "../api/types.gen";
+import type { PermissionMode, Provider } from "../api/types.gen";
 
 // What a new session starts with, as this browser last used it. Only a
 // convenience: storage may be missing, full, blocked or hold anything, and
 // every value is checked against the live lists before it is used.
 export interface StartPrefs {
   projectId?: string;
+  // The model's provider: two agents may offer the same model id. Prefs
+  // stored before it was kept have none; the model then goes by id alone.
+  provider?: Provider;
   model?: string;
   mode?: PermissionMode;
 }
@@ -20,6 +23,7 @@ export function loadPrefs(storage?: Storage): StartPrefs {
     const str = (x: unknown) => (typeof x === "string" ? x : undefined);
     return {
       projectId: str(o.projectId),
+      provider: str(o.provider) as Provider | undefined,
       model: str(o.model),
       mode: str(o.mode) as PermissionMode | undefined,
     };

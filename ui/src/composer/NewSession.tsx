@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useId,
   useRef,
   useState,
@@ -8,7 +9,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
-import { createSession, errorCode } from "../api";
+import { answerLost, createSession, errorCode } from "../api";
 import type {
   AgentCatalog,
   ClaudeAuth,
@@ -21,11 +22,14 @@ import { AgentPill, useAgentName } from "../shell/AgentPill";
 import { projectBadge } from "../shell/badge";
 import { Icon } from "../shell/Icon";
 import {
+  choiceKey,
   defaultAuth,
   defaultChoice,
   defaultMode,
   defaultProject,
   findModel,
+  parseChoiceKey,
+  refreshCatalog,
   useCatalog,
 } from "./catalog";
 import "./composer.css";
@@ -36,22 +40,37 @@ import { loadPrefs, savePrefs } from "./prefs";
 // NewSession starts a session: the project, its repositories (all picked at
 // first), the model, the permission mode and the first message. The models
 // and modes come from the agent catalog; without an agent that can run it
-// points to Settings instead. The last project, model and mode used in this
-// browser are the defaults next time. onCreated gets the session the moment
-// the server has made it.
+// points to Settings instead. The project of the session on screen is the
+// default, else the one used last in this browser; the last model and mode
+// used are the defaults next time. onCreated gets the session the moment the
+// server has made it.
+//
+// The app keeps it mounted while another view shows (hidden): the draft and
+// a start under way survive a look elsewhere.
 export function NewSession({
   projects,
+  projectsLoaded = true,
+  projectsError = null,
   currentProjectId,
   nav,
+  hidden = false,
   onCreated,
+  onAnswerLost,
   onOpenSettings,
   onOpenProjects,
 }: {
   projects: readonly Project[];
-  // The project of the session on screen, the default after the remembered.
+  // The project list has answered; projectsError is its failure.
+  projectsLoaded?: boolean;
+  projectsError?: ErrorCode | null;
+  // The project of the session on screen, the default project.
   currentProjectId?: string;
   nav?: ReactNode;
+  hidden?: boolean;
   onCreated: (session: Session) => void;
+  // A start whose answer was lost may have made the session: the app reloads
+  // its session list, so the session shows before a retry is offered.
+  onAnswerLost?: () => Promise<void>;
   onOpenSettings: () => void;
   onOpenProjects: () => void;
 }) {
@@ -63,22 +82,36 @@ export function NewSession({
   // Repositories left out, per project: a project switched to starts with
   // all of its repositories.
   const [left, setLeft] = useState<Record<string, string[]>>({});
+  // The picked model, as choiceKey(provider, model id).
   const [model, setModel] = useState<string>();
   const [mode, setMode] = useState<PermissionMode>();
   const [auth, setAuth] = useState<ClaudeAuth>();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  // checking: the answer was lost and the session list is being reloaded.
+  const [checking, setChecking] = useState(false);
   const [error, setError] = useState<ErrorCode | null>(null);
+  const [lost, setLost] = useState(false);
   const draftId = useRef<string | null>(null);
   const inputId = useId();
+
+  // Each time it shows again, the catalog is asked again: a credential may
+  // have been added in Settings meanwhile (the mount asks by itself).
+  const shown = useRef(!hidden);
+  useEffect(() => {
+    if (!hidden && !shown.current) refreshCatalog();
+    shown.current = !hidden;
+  }, [hidden]);
 
   const project =
     projects.find((p) => p.id === projectId) ??
     defaultProject(projects, prefs, currentProjectId);
   const catalog: AgentCatalog | undefined =
     catalogState.state === "ready" ? catalogState.catalog : undefined;
+  const picked = model ? parseChoiceKey(model) : undefined;
   const choice = catalog
-    ? (findModel(catalog, model) ?? defaultChoice(catalog, prefs))
+    ? (findModel(catalog, picked?.model, picked?.provider) ??
+      defaultChoice(catalog, prefs))
     : undefined;
   const modes = (catalog?.modes ?? []).filter((m) => m in modeKeys);
   const chosenMode =
@@ -106,14 +139,25 @@ export function NewSession({
   };
 
   const ready =
-    !!project && !!choice && !!chosenMode && repoIds.length > 0 && !busy;
+    !!project &&
+    !!choice &&
+    !!chosenMode &&
+    repoIds.length > 0 &&
+    !busy &&
+    !checking;
 
   const start = () => {
     const body = text.trim();
     if (!ready || !project || !choice || !chosenMode || body === "") return;
     setBusy(true);
     setError(null);
+    setLost(false);
+    // One client id per draft, kept across retries: the server makes one
+    // session per message.clientId, so a retry after a lost answer does not
+    // start a second one. A new text is a new draft.
     draftId.current ??= crypto.randomUUID();
+    // The draft's project stays as started, whatever is opened meanwhile.
+    setProjectId(project.id);
     createSession({
       projectId: project.id,
       repoIds,
@@ -126,6 +170,7 @@ export function NewSession({
       (session) => {
         savePrefs({
           projectId: project.id,
+          provider: choice.provider.provider,
           model: choice.model.id,
           mode: chosenMode,
         });
@@ -134,6 +179,13 @@ export function NewSession({
       (err: unknown) => {
         setError(errorCode(err));
         setBusy(false);
+        if (!answerLost(err) || !onAnswerLost) return;
+        // The session may exist: show it in the list before a retry.
+        setLost(true);
+        setChecking(true);
+        onAnswerLost()
+          .catch(() => {})
+          .finally(() => setChecking(false));
       },
     );
   };
@@ -162,7 +214,7 @@ export function NewSession({
     catalog?.providers ?? []
   ).flatMap((p) =>
     p.models.map((m) => ({
-      value: m.id,
+      value: choiceKey(p.provider, m.id),
       label: m.label,
       description: p.available ? (m.via ?? undefined) : t("agentUnavailable"),
       disabled: !p.available,
@@ -180,7 +232,21 @@ export function NewSession({
     .map((a) => ({ value: a, label: t(authKeys[a]) }));
 
   let dock: ReactNode;
-  if (!project) {
+  if (!project && !projectsLoaded) {
+    dock = (
+      <p className="start-notice" role="status">
+        {t("projectsLoading")}
+      </p>
+    );
+  } else if (!project && projectsError) {
+    dock = (
+      <div className="start-notice" role="alert">
+        <p>
+          {t("projectsFailed")} {t(projectsError, { ns: "errors" })}
+        </p>
+      </div>
+    );
+  } else if (!project) {
     dock = (
       <div className="start-notice" role="status">
         <p>{t("noProject")}</p>
@@ -236,6 +302,10 @@ export function NewSession({
             autoFocus
             onChange={(e) => {
               draftId.current = null;
+              setLost(false);
+              // A draft keeps its project: opening a session of another
+              // project meanwhile must not move it there.
+              if (projectId === undefined) setProjectId(project.id);
               setText(e.target.value);
             }}
             onKeyDown={onKeyDown}
@@ -246,7 +316,7 @@ export function NewSession({
                 agent: agentName(choice.provider.provider),
                 model: choice.model.label,
               })}
-              value={choice.model.id}
+              value={choiceKey(choice.provider.provider, choice.model.id)}
               options={modelOptions}
               onChange={setModel}
             >
@@ -298,6 +368,7 @@ export function NewSession({
         {error && (
           <p className="comp-error" role="alert">
             {t(error, { ns: "errors" })}
+            {lost && <> {checking ? t("startLostChecking") : t("startLost")}</>}
           </p>
         )}
         <p className="comp-note">{t("runsIn", { project: project.name })}</p>
@@ -306,7 +377,7 @@ export function NewSession({
   }
 
   return (
-    <section className="view" aria-label={t("newTitle")}>
+    <section className="view" aria-label={t("newTitle")} hidden={hidden}>
       <header className="hdr">
         <div className="crumb">
           {project && projects.length > 0 && (

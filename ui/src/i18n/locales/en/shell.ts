@@ -6,6 +6,11 @@ export const shell = {
   session: "Session",
   crumbSeparator: "/",
   branch: "Branch",
+  // Renaming the open session from its header title.
+  rename: "Rename session",
+  renameLabel: "Session title",
+  renameFailed: "The session was not renamed.",
+  dismiss: "Dismiss",
   signInHint: "Sign in to continue.",
   signIn: "Sign in",
   signInFailed: "Sign-in did not work. Try again.",

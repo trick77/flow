@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 
 import type { Project, SessionSummary } from "../api/types.gen";
+import { formatNumber } from "../i18n/format";
 import { SearchPalette } from "./SearchPalette";
 import { Sidebar } from "./Sidebar";
 
@@ -113,6 +114,18 @@ describe("SearchPalette", () => {
     expect(screen.getByRole("status")).toHaveTextContent("No session matches.");
     expect(input()).not.toHaveAttribute("aria-activedescendant");
     expect(input()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("counts every match when it lists only the first ones", () => {
+    const many = Array.from({ length: 1203 }, (_, i) =>
+      s(`m${i}`, `flow task ${i}`, "2026-11-01T00:00:00Z"),
+    );
+    palette({ sessions: many });
+    fireEvent.change(input(), { target: { value: "flow" } });
+    expect(
+      screen.getByText(`First 50 of ${formatNumber(1203)} matches`),
+    ).toBeInTheDocument();
+    expect(options()).toHaveLength(50);
   });
 
   it("moves with the arrows, wraps, and opens with Enter", () => {
@@ -231,6 +244,39 @@ describe("Sidebar search", () => {
     expect(elsewhere).toHaveFocus();
     fireEvent.keyDown(elsewhere, { key: "k" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("ignores the repeats of a held shortcut", () => {
+    sidebar();
+    const elsewhere = screen.getByRole("button", { name: "elsewhere" });
+    fireEvent.keyDown(elsewhere, { key: "k", metaKey: true });
+    const repeat = new KeyboardEvent("keydown", {
+      key: "k",
+      metaKey: true,
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    expect(fireEvent(input(), repeat)).toBe(false);
+    expect(fireEvent(input(), repeat)).toBe(false);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("sets an unseen session's title in bold", () => {
+    render(
+      <Sidebar
+        sessions={[{ ...sessions[2], unseen: true }, sessions[1]]}
+        projects={projects}
+        onSelect={vi.fn()}
+        loaded
+        error={null}
+      />,
+    );
+    const unseen = screen.getByRole("button", { name: /Tidy imports/ });
+    expect(unseen).toHaveClass("srow", "unseen");
+    expect(unseen).toHaveAttribute("aria-description", "New activity");
+    const seen = screen.getByRole("button", { name: /Persist sidebar/ });
+    expect(seen).not.toHaveClass("unseen");
   });
 
   it("shows each row's project badge and agent pill", () => {

@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -104,6 +105,22 @@ describe("NewSession", () => {
     return props;
   }
 
+  type Props = Parameters<typeof NewSession>[0];
+  function viewWithRerender(over: Partial<Props> = {}) {
+    const props: Props = {
+      projects,
+      onCreated: vi.fn(),
+      onOpenSettings: vi.fn(),
+      onOpenProjects: vi.fn(),
+      ...over,
+    };
+    const r = render(<NewSession {...props} />);
+    return {
+      props,
+      rerender: (p: Props) => r.rerender(<NewSession {...p} />),
+    };
+  }
+
   const box = () => screen.findByLabelText(en.composer.startPlaceholder);
   const startButton = () =>
     screen.getByRole("button", { name: en.composer.start });
@@ -154,6 +171,7 @@ describe("NewSession", () => {
     expect(props.onCreated.mock.calls[0][0].summary.id).toBe("s-new");
     expect(JSON.parse(window.localStorage.getItem(PREFS_KEY)!)).toEqual({
       projectId: "p1",
+      provider: "claude",
       model: "claude-opus-5-5",
       mode: "ask",
     });
@@ -217,8 +235,9 @@ describe("NewSession", () => {
       }),
     );
     serve();
-    view({ currentProjectId: "p1" });
+    view();
     await box();
+    // Without a session on screen the remembered project applies.
     expect(
       screen.getByRole("button", { name: "Project: harbor" }),
     ).toBeInTheDocument();
@@ -228,6 +247,172 @@ describe("NewSession", () => {
     expect(
       screen.getByRole("button", { name: "Permission mode: Plan" }),
     ).toBeInTheDocument();
+  });
+
+  it("takes the project of the session on screen over the remembered one", async () => {
+    window.localStorage.setItem(PREFS_KEY, JSON.stringify({ projectId: "p2" }));
+    serve();
+    const { rerender, props } = viewWithRerender({ currentProjectId: "p1" });
+    await box();
+    expect(
+      screen.getByRole("button", { name: "Project: riptide" }),
+    ).toBeInTheDocument();
+    // An empty draft follows the session on screen.
+    rerender({ ...props, currentProjectId: "p2" });
+    expect(
+      screen.getByRole("button", { name: "Project: harbor" }),
+    ).toBeInTheDocument();
+    // A draft keeps its project whatever is opened meanwhile.
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    rerender({ ...props, currentProjectId: "p1" });
+    expect(
+      screen.getByRole("button", { name: "Project: harbor" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keys the model by its agent: the same id from two agents", async () => {
+    window.localStorage.setItem(
+      PREFS_KEY,
+      JSON.stringify({ provider: "opencode", model: "claude-opus-5-5" }),
+    );
+    const twin: AgentCatalog = {
+      ...catalog,
+      providers: [
+        catalog.providers[0],
+        {
+          provider: "opencode",
+          available: true,
+          models: [
+            { id: "claude-opus-5-5", label: "Opus 5.5", via: "openrouter" },
+          ],
+        },
+      ],
+    };
+    serve(twin);
+    const props = view();
+    await box();
+    expect(
+      screen.getByRole("button", { name: "Model: OpenCode, Opus 5.5" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Model:/ }));
+    const opts = within(screen.getByRole("menu")).getAllByRole(
+      "menuitemradio",
+      { name: /Opus 5.5/ },
+    );
+    expect(opts).toHaveLength(2);
+    // Only the OpenCode row is checked, not every row with the id.
+    expect(
+      opts.filter((o) => o.getAttribute("aria-checked") === "true"),
+    ).toEqual([opts[1]]);
+    fireEvent.click(opts[0]);
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
+    expect(posted()).toMatchObject({
+      provider: "claude",
+      model: "claude-opus-5-5",
+    });
+  });
+
+  it("says when the projects are loading or failed, not to create one", async () => {
+    serve();
+    const { rerender, props } = viewWithRerender({
+      projects: [],
+      projectsLoaded: false,
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      en.composer.projectsLoading,
+    );
+    rerender({
+      ...props,
+      projects: [],
+      projectsLoaded: true,
+      projectsError: "internal",
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      en.composer.projectsFailed,
+    );
+    expect(screen.queryByText(en.composer.noProject)).toBeNull();
+  });
+
+  it("keeps the client id across retries and reloads the list after a lost answer", async () => {
+    let calls = 0;
+    const ids: string[] = [];
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/agents") return json(200, catalog);
+      if (url === "/api/sessions" && init?.method === "POST") {
+        ids.push(JSON.parse(String(init.body)).message.clientId);
+        calls++;
+        if (calls === 1) throw new TypeError("network");
+        return json(201, {
+          summary: { id: "s-new", projectId: "p1" },
+          worktrees: [],
+          dir: "/w",
+          lastSeq: 0,
+        });
+      }
+      return json(404, { code: "not_found" });
+    });
+    const uuids = vi.spyOn(crypto, "randomUUID");
+    uuids.mockReturnValueOnce("0193a8f2-0000-7000-8000-00000000000a");
+    uuids.mockReturnValueOnce("0193a8f2-0000-7000-8000-00000000000b");
+    let settle!: () => void;
+    const onAnswerLost = vi.fn(
+      () => new Promise<void>((resolve) => (settle = resolve)),
+    );
+    const props = view({ onAnswerLost });
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      en.composer.startLostChecking,
+    );
+    expect(onAnswerLost).toHaveBeenCalledTimes(1);
+    // No retry while the list is being reloaded.
+    expect(startButton()).toBeDisabled();
+    act(() => settle());
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        en.composer.startLost,
+      ),
+    );
+    expect(startButton()).toBeEnabled();
+    fireEvent.click(startButton());
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
+    expect(ids).toEqual([
+      "0193a8f2-0000-7000-8000-00000000000a",
+      "0193a8f2-0000-7000-8000-00000000000a",
+    ]);
+  });
+
+  it("does not reload the list after a plain refusal", async () => {
+    fetchMock.mockImplementation(async (input) =>
+      String(input) === "/api/agents"
+        ? json(200, catalog)
+        : json(501, { code: "not_implemented" }),
+    );
+    const onAnswerLost = vi.fn(() => Promise.resolve());
+    view({ onAnswerLost });
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      en.errors.not_implemented,
+    );
+    expect(onAnswerLost).not.toHaveBeenCalled();
+  });
+
+  it("asks for the catalog again when it shows again", async () => {
+    serve();
+    const { rerender, props } = viewWithRerender();
+    await box();
+    const agents = () =>
+      fetchMock.mock.calls.filter(([u]) => u === "/api/agents").length;
+    expect(agents()).toBe(1);
+    rerender({ ...props, hidden: true });
+    expect(screen.getByRole("region", { hidden: true })).not.toBeVisible();
+    expect(agents()).toBe(1);
+    rerender({ ...props, hidden: false });
+    await waitFor(() => expect(agents()).toBe(2));
   });
 
   it("ignores remembered values the lists no longer hold", async () => {

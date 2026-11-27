@@ -132,29 +132,65 @@ describe("Composer", () => {
     );
   });
 
-  it("shows the session's agent, model and mode, not as pickers", () => {
+  it("shows the session's agent, model and mode read-only without a catalog", () => {
     render(
       <Composer
         sessionId="s1"
         running={false}
         provider="claude"
         model="claude-opus-5-5"
-        modelLabel="Opus 5.5"
         mode="accept_edits"
         projectName="riptide"
       />,
     );
     expect(screen.getByText("Runs in the riptide sandbox")).toBeInTheDocument();
     expect(
-      screen.getByRole("img", { name: "Model: Claude Code, Opus 5.5" }),
-    ).toHaveTextContent("Opus 5.5");
+      screen.getByRole("img", { name: "Model: Claude Code, claude-opus-5-5" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("img", { name: "Permission mode: Accept edits" }),
-    ).toHaveAttribute("title", en.composer.fixedHint);
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Model/ })).toBeNull();
   });
 
-  it("shows the model id without a label and skips an unknown mode", () => {
+  it("answers the waiting question instead of sending a message", async () => {
+    fetchMock.mockResolvedValueOnce(
+      reply(409, { code: "request_not_pending" }),
+    );
+    fetchMock.mockResolvedValueOnce(reply(204));
+    render(<Composer sessionId="s1" running questionId="req 1" />);
+    const box = screen.getByLabelText(en.composer.answerPlaceholder);
+    fireEvent.change(box, { target: { value: " Key on the tree " } });
+    fireEvent.click(screen.getByRole("button", { name: en.composer.answer }));
+    // A refusal keeps the draft.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      en.errors.request_not_pending,
+    );
+    expect(box).toHaveValue(" Key on the tree ");
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(box).toHaveValue(""));
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      "/api/sessions/s1/questions/req%201",
+      "/api/sessions/s1/questions/req%201",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      text: "Key on the tree",
+    });
+  });
+
+  it("lists the queue above the box", () => {
+    render(
+      <Composer
+        sessionId="s1"
+        running
+        queue={[{ messageId: "m1", text: "Then open a draft PR" }]}
+      />,
+    );
+    const group = screen.getByRole("group", { name: en.composer.queueLabel });
+    expect(group).toHaveTextContent("Then open a draft PR");
+  });
+
+  it("shows the model id without a catalog and skips an unknown mode", () => {
     render(
       <Composer
         sessionId="s1"

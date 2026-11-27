@@ -23,15 +23,31 @@ export function terms(query: string): string[] {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
 
+const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// matcher finds a term case-insensitively in the original text, so its
+// offsets are the text's own (lowercasing can change a string's length: "İ"
+// becomes two code units).
+function matcher(word: string): RegExp {
+  return new RegExp(escape(word), "giu");
+}
+
+// contains: the term occurs in text, by the same rule highlight marks it.
+export function contains(text: string, word: string): boolean {
+  return matcher(word).test(text);
+}
+
 // highlight cuts text into parts, the occurrences of the terms marked as hits
 // (case-insensitive; overlapping occurrences merge into one hit).
 export function highlight(text: string, words: readonly string[]): Part[] {
-  const lower = text.toLowerCase();
-  // hit[i]: character i is inside an occurrence of a term.
+  // hit[i]: code unit i is inside an occurrence of a term.
   const hit = new Array<boolean>(text.length).fill(false);
   for (const w of words) {
-    for (let i = lower.indexOf(w); i >= 0; i = lower.indexOf(w, i + 1)) {
-      hit.fill(true, i, i + w.length);
+    const re = matcher(w);
+    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+      hit.fill(true, m.index, m.index + m[0].length);
+      // Overlapping occurrences: look again one past this one's start.
+      re.lastIndex = m.index + 1;
     }
   }
   const parts: Part[] = [];
@@ -48,6 +64,13 @@ const recency = (a: SessionSummary, b: SessionSummary) =>
   Date.parse(b.lastActivityAt) - Date.parse(a.lastActivityAt) ||
   a.id.localeCompare(b.id);
 
+// The palette's list and how many sessions matched in all (items holds at
+// most MATCH_LIMIT of them).
+export interface SearchResults {
+  items: SearchResult[];
+  total: number;
+}
+
 // searchSessions is the palette's list. Without terms: the most recently
 // active sessions. With terms: the sessions where every term occurs in the
 // title, the project name or the branch (case-insensitive); those with more
@@ -56,7 +79,7 @@ export function searchSessions(
   sessions: readonly SessionSummary[],
   projectName: (projectId: string) => string,
   query: string,
-): SearchResult[] {
+): SearchResults {
   const words = terms(query);
   const result = (s: SessionSummary): SearchResult => ({
     session: s,
@@ -65,20 +88,29 @@ export function searchSessions(
     branch: highlight(s.branch, words),
   });
   if (words.length === 0) {
-    return [...sessions].sort(recency).slice(0, RECENT_LIMIT).map(result);
+    const items = [...sessions]
+      .sort(recency)
+      .slice(0, RECENT_LIMIT)
+      .map(result);
+    return { items, total: items.length };
   }
   const scored: { s: SessionSummary; inTitle: number }[] = [];
   for (const s of sessions) {
-    const title = s.title.toLowerCase();
-    const rest = `${projectName(s.projectId)}\n${s.branch}`.toLowerCase();
-    if (words.every((w) => title.includes(w) || rest.includes(w))) {
-      scored.push({
-        s,
-        inTitle: words.filter((w) => title.includes(w)).length,
-      });
+    const project = projectName(s.projectId);
+    const inTitle = words.filter((w) => contains(s.title, w)).length;
+    if (
+      words.every(
+        (w) =>
+          contains(s.title, w) || contains(project, w) || contains(s.branch, w),
+      )
+    ) {
+      scored.push({ s, inTitle });
     }
   }
   // More of the terms in the title ranks higher; ties go by recency.
   scored.sort((a, b) => b.inTitle - a.inTitle || recency(a.s, b.s));
-  return scored.slice(0, MATCH_LIMIT).map(({ s }) => result(s));
+  return {
+    items: scored.slice(0, MATCH_LIMIT).map(({ s }) => result(s)),
+    total: scored.length,
+  };
 }

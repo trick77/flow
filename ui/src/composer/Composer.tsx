@@ -4,47 +4,65 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type Ref,
 } from "react";
 import { useTranslation } from "react-i18next";
 
-import { errorCode, interruptTurn, sendMessage } from "../api";
-import type { ErrorCode, PermissionMode, Provider } from "../api/types.gen";
-import { AgentPill, useAgentName } from "../shell/AgentPill";
+import { errorCode, interruptTurn, replyQuestion, sendMessage } from "../api";
+import type {
+  AgentCatalog,
+  ErrorCode,
+  PermissionMode,
+  Provider,
+} from "../api/types.gen";
 import { Icon } from "../shell/Icon";
 import "./composer.css";
-import { modeKeys } from "./modes";
+import { QueueBar, type Queued } from "./QueueBar";
+import { SessionPickers, type SettingsPatch } from "./SessionPickers";
 
 // Composer: the message box of a session. Enter sends, Shift+Enter breaks
 // the line. While a turn runs a message queues (the server decides) and a
-// stop button interrupts the turn.
+// stop button interrupts the turn; the queue shows above the box. While the
+// agent waits on a question, the message answers it instead (the reply's
+// text, docs/events.md "question with options, Answer in the composer").
 export function Composer({
   sessionId,
   running,
   provider,
   model,
-  modelLabel,
   mode,
+  modeCap,
+  catalog,
   projectName,
+  queue = [],
+  questionId,
+  inputRef,
+  onUpdated,
 }: {
   sessionId: string;
   running: boolean;
   // projectName names the sandbox in the note under the box.
   projectName?: string;
-  // The session's agent, model and permission mode, shown in the bar. The
-  // API cannot change them yet (PATCH /api/sessions/{id} is not built), so
-  // they are not pickers.
+  // The session's agent, model and permission mode: pickers in the bar.
   provider?: Provider;
   model?: string;
-  modelLabel?: string;
   mode?: PermissionMode;
+  modeCap?: PermissionMode;
+  catalog?: AgentCatalog;
+  queue?: readonly Queued[];
+  // The request id of the question waiting for an answer, if any.
+  questionId?: string;
+  inputRef?: Ref<HTMLTextAreaElement>;
+  // A model or mode change the server accepted.
+  onUpdated?: (fields: SettingsPatch) => void;
 }) {
   const { t } = useTranslation("composer");
-  const agentName = useAgentName();
   const inputId = useId();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<ErrorCode | null>(null);
+  const [settingsError, setSettingsError] = useState<ErrorCode | null>(null);
   // One client id per draft: a retry after a lost answer reuses it, so the
   // server acknowledges it as a duplicate instead of sending the message twice.
   // It is renewed after a send succeeds and whenever the text changes.
@@ -60,8 +78,15 @@ export function Composer({
     if (body === "" || sending) return;
     setSending(true);
     setError(null);
-    draftId.current ??= crypto.randomUUID();
-    sendMessage(sessionId, { clientId: draftId.current, text: body })
+    // An answer to the waiting question goes to it, never as a message too.
+    // On a refusal (already answered, expired) the draft stays for sending.
+    const call = questionId
+      ? replyQuestion(sessionId, questionId, { text: body })
+      : sendMessage(sessionId, {
+          clientId: (draftId.current ??= crypto.randomUUID()),
+          text: body,
+        });
+    call
       .then(() => edit(""))
       .catch((err: unknown) => setError(errorCode(err)))
       .finally(() => setSending(false));
@@ -87,17 +112,20 @@ export function Composer({
     }
   };
 
+  const placeholder = questionId ? t("answerPlaceholder") : t("placeholder");
   return (
     <div className="dock">
       <div className="dock-in">
+        <QueueBar sessionId={sessionId} queue={queue} />
         <form className="composer" onSubmit={onSubmit}>
           <label className="sr" htmlFor={inputId}>
-            {t("placeholder")}
+            {placeholder}
           </label>
           <textarea
             id={inputId}
+            ref={inputRef}
             rows={2}
-            placeholder={t("placeholder")}
+            placeholder={placeholder}
             value={text}
             readOnly={sending}
             aria-busy={sending}
@@ -105,35 +133,18 @@ export function Composer({
             onKeyDown={onKeyDown}
           />
           <div className="comp-bar">
-            {provider && model && (
-              <span
-                className="picker picker-ro"
-                role="img"
-                aria-label={t("modelOf", {
-                  agent: agentName(provider),
-                  model: modelLabel ?? model,
-                })}
-                title={t("fixedHint")}
-              >
-                <AgentPill provider={provider} />
-                <span aria-hidden="true">
-                  <span className="long">
-                    {t("agentPrefix", { agent: agentName(provider) })}
-                  </span>
-                  {modelLabel ?? model}
-                </span>
-              </span>
-            )}
-            {mode && mode in modeKeys && (
-              <span
-                className="picker picker-ro"
-                role="img"
-                aria-label={t("modeOf", { mode: t(modeKeys[mode].label) })}
-                title={t("fixedHint")}
-              >
-                <Icon name="shield" />
-                <span aria-hidden="true">{t(modeKeys[mode].label)}</span>
-              </span>
+            {provider && model && mode && (
+              <SessionPickers
+                sessionId={sessionId}
+                provider={provider}
+                model={model}
+                mode={mode}
+                modeCap={modeCap}
+                catalog={catalog}
+                turnRunning={running}
+                onUpdated={onUpdated}
+                onError={setSettingsError}
+              />
             )}
             <span className="grow" />
             {running && (
@@ -151,7 +162,9 @@ export function Composer({
             <button
               className="send"
               type="submit"
-              aria-label={running ? t("queue") : t("send")}
+              aria-label={
+                questionId ? t("answer") : running ? t("queue") : t("send")
+              }
               disabled={sending || text.trim() === ""}
             >
               <Icon name="arrowUp" />
@@ -161,6 +174,11 @@ export function Composer({
         {error && (
           <p className="comp-error" role="alert">
             {t(error, { ns: "errors" })}
+          </p>
+        )}
+        {settingsError && (
+          <p className="comp-error" role="alert">
+            {t("settingsFailed")} {t(settingsError, { ns: "errors" })}
           </p>
         )}
         {projectName && (

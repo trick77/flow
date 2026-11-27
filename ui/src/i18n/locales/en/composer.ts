@@ -7,8 +7,12 @@ export const composer = {
   stop: "Stop the running turn",
   stopLabel: "Stop",
   queued: "Queued",
+  queueLabel: "Queued messages",
   sendNow: "Send now",
   remove: "Remove",
+  // While the agent waits on a question, the composer answers it.
+  answerPlaceholder: "Answer the question",
+  answer: "Send answer",
   modePlan: "Plan",
   modeAsk: "Ask",
   modeAcceptEdits: "Accept edits",
@@ -19,12 +23,14 @@ export const composer = {
   modeAcceptEditsHint: "Edits apply, commands still ask",
   modeAutoHint: "Safe commands run, risky ones ask",
   modeFullAccessHint: "Nothing asks. Sandbox limits still apply",
-  // The model and mode of a running session; changing them is not built.
+  // The model and mode pickers.
   model: "Model",
   modelOf: "Model: {{agent}}, {{model}}",
   mode: "Permission mode",
   modeOf: "Permission mode: {{mode}}",
-  fixedHint: "Set when the session started",
+  modeCapped: "Capped by the parent session",
+  modelBetweenTurns: "The model changes between turns",
+  settingsFailed: "The change was not applied.",
   // Starting a new session.
   newTitle: "New session",
   project: "Project",
@@ -45,6 +51,12 @@ export const composer = {
   openSettings: "Open Settings",
   noProject:
     "Create a project first: a session works in a project's repositories.",
+  projectsLoading: "Loading projects…",
+  projectsFailed: "The projects could not be loaded.",
+  // After a start whose answer did not arrive (the session may exist).
+  startLostChecking: "Checking whether the session started…",
+  startLost:
+    "If the session started, it is in the list now. Sending again does not start it twice.",
   openProjects: "Open Projects",
   catalogLoading: "Loading agents…",
   catalogFailed: "The agents could not be loaded.",

@@ -4,8 +4,18 @@ describe("start prefs", () => {
   beforeEach(() => window.localStorage.clear());
 
   it("round-trips through localStorage", () => {
-    savePrefs({ projectId: "p1", model: "m", mode: "auto" });
-    expect(loadPrefs()).toEqual({ projectId: "p1", model: "m", mode: "auto" });
+    savePrefs({
+      projectId: "p1",
+      provider: "opencode",
+      model: "m",
+      mode: "auto",
+    });
+    expect(loadPrefs()).toEqual({
+      projectId: "p1",
+      provider: "opencode",
+      model: "m",
+      mode: "auto",
+    });
   });
 
   it("reads nothing from an empty, broken or odd store", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 import { errorCode, listAgents } from "../api";
 import type {
@@ -13,17 +13,44 @@ import type {
 } from "../api/types.gen";
 import type { StartPrefs } from "./prefs";
 
+export type CatalogState =
+  | { state: "loading" }
+  | { state: "failed"; error: ErrorCode }
+  | { state: "ready"; catalog: AgentCatalog };
+
+// One catalog for the whole app: every composer and New session read the
+// same state, so a load that succeeds anywhere names the models everywhere.
 let cached: Promise<AgentCatalog> | null = null;
+let current: CatalogState = { state: "loading" };
+// The last catalog that loaded: a later failed refresh keeps it naming the
+// models in the composers.
+let known: AgentCatalog | undefined;
+const listeners = new Set<() => void>();
+
+function publish(next: CatalogState) {
+  current = next;
+  if (next.state === "ready") known = next.catalog;
+  listeners.forEach((fn) => fn());
+}
 
 // loadCatalog asks GET /api/agents once and keeps the answer; fresh asks
-// again (a credential may have been added since). A failure is not kept.
+// again (a credential may have been added since). A failure is not kept. A
+// fresh ask over a loaded catalog keeps showing it until the answer is in.
 export function loadCatalog(fresh = false): Promise<AgentCatalog> {
   if (!cached || fresh) {
     const p = listAgents();
     cached = p;
-    p.catch(() => {
-      if (cached === p) cached = null;
-    });
+    if (current.state !== "ready") publish({ state: "loading" });
+    p.then(
+      (catalog) => {
+        if (cached === p) publish({ state: "ready", catalog });
+      },
+      (err: unknown) => {
+        if (cached !== p) return;
+        cached = null;
+        publish({ state: "failed", error: errorCode(err) });
+      },
+    );
   }
   return cached;
 }
@@ -31,33 +58,46 @@ export function loadCatalog(fresh = false): Promise<AgentCatalog> {
 // resetCatalog drops the kept answer (tests).
 export function resetCatalog(): void {
   cached = null;
+  known = undefined;
+  current = { state: "loading" };
+  listeners.forEach((fn) => fn());
 }
 
-export type CatalogState =
-  | { state: "loading" }
-  | { state: "failed"; error: ErrorCode }
-  | { state: "ready"; catalog: AgentCatalog };
+function subscribe(fn: () => void): () => void {
+  listeners.add(fn);
+  return () => {
+    listeners.delete(fn);
+  };
+}
 
-// useCatalog is the agent catalog for a component; retry asks again.
+// useCatalog is the shared catalog state, loaded on first use (asked again
+// on mount when fresh); retry asks again.
 export function useCatalog(fresh = false): [CatalogState, () => void] {
-  const [state, setState] = useState<CatalogState>({ state: "loading" });
-  const [attempt, setAttempt] = useState(0);
+  const state = useSyncExternalStore(subscribe, () => current);
   useEffect(() => {
-    let live = true;
-    loadCatalog(fresh || attempt > 0).then(
-      (catalog) => live && setState({ state: "ready", catalog }),
-      (err: unknown) =>
-        live && setState({ state: "failed", error: errorCode(err) }),
-    );
-    return () => {
-      live = false;
-    };
-  }, [fresh, attempt]);
+    // A rejection is in the state already.
+    loadCatalog(fresh).catch(() => {});
+  }, [fresh]);
   const retry = () => {
-    setState({ state: "loading" });
-    setAttempt((a) => a + 1);
+    loadCatalog(true).catch(() => {});
   };
   return [state, retry];
+}
+
+// useKnownCatalog is the last catalog that loaded, for naming models; it
+// asks for one when there is none yet.
+export function useKnownCatalog(): AgentCatalog | undefined {
+  useSyncExternalStore(subscribe, () => current);
+  useEffect(() => {
+    loadCatalog().catch(() => {});
+  }, []);
+  return known;
+}
+
+// refreshCatalog asks again in the background (New session on show: a
+// credential may have been added in Settings meanwhile).
+export function refreshCatalog(): void {
+  loadCatalog(true).catch(() => {});
 }
 
 // modelLabel is a model's name from the catalog, else its id.
@@ -75,15 +115,32 @@ export interface Choice {
   model: ModelInfo;
 }
 
-// findModel is the available provider offering the model.
+// choiceKey identifies a model across providers: two agents may offer the
+// same model id. Provider names hold no colon, so the first one splits.
+export function choiceKey(provider: Provider, model: string): string {
+  return `${provider}:${model}`;
+}
+
+export function parseChoiceKey(
+  key: string,
+): { provider: Provider; model: string } | undefined {
+  const i = key.indexOf(":");
+  if (i <= 0) return undefined;
+  return { provider: key.slice(0, i) as Provider, model: key.slice(i + 1) };
+}
+
+// findModel is the model offered by an available provider: that provider's
+// when one is given, else the first that offers it.
 export function findModel(
   catalog: AgentCatalog,
   model: string | undefined,
+  provider?: Provider,
 ): Choice | undefined {
-  for (const provider of catalog.providers) {
-    if (!provider.available) continue;
-    const m = provider.models.find((x) => x.id === model);
-    if (m) return { provider, model: m };
+  for (const p of catalog.providers) {
+    if (!p.available) continue;
+    if (provider !== undefined && p.provider !== provider) continue;
+    const m = p.models.find((x) => x.id === model);
+    if (m) return { provider: p, model: m };
   }
   return undefined;
 }
@@ -95,7 +152,7 @@ export function defaultChoice(
   catalog: AgentCatalog,
   prefs: StartPrefs,
 ): Choice | undefined {
-  const remembered = findModel(catalog, prefs.model);
+  const remembered = findModel(catalog, prefs.model, prefs.provider);
   if (remembered) return remembered;
   const provider = catalog.providers.find(
     (p) => p.available && p.models.length > 0,
@@ -126,16 +183,29 @@ export function defaultAuth(provider: ProviderInfo): ClaudeAuth | undefined {
   return auths[0];
 }
 
-// defaultProject is the remembered project while it exists, else the one
-// given (the session on screen), else the first.
+// defaultProject is the project of the session on screen (current), else the
+// remembered one while it exists, else the first.
 export function defaultProject(
   projects: readonly Project[],
   prefs: StartPrefs,
   current?: string,
 ): Project | undefined {
   return (
-    projects.find((p) => p.id === prefs.projectId) ??
     projects.find((p) => p.id === current) ??
+    projects.find((p) => p.id === prefs.projectId) ??
     projects[0]
   );
+}
+
+// aboveCap: mode is more permissive than cap in the catalog's order (least
+// to most permissive). Without a cap, or a mode the list lacks, nothing is.
+export function aboveCap(
+  modes: readonly PermissionMode[],
+  mode: PermissionMode,
+  cap: PermissionMode | undefined,
+): boolean {
+  if (!cap) return false;
+  const at = modes.indexOf(mode);
+  const capAt = modes.indexOf(cap);
+  return at >= 0 && capAt >= 0 && at > capAt;
 }

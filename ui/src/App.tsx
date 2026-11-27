@@ -1,27 +1,49 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { EventSourceCtor } from "./api";
 import type { Session, SessionStatus } from "./api/types.gen";
-import { NewSession, useCatalog } from "./composer";
+import { NewSession, useKnownCatalog } from "./composer";
 import { ProjectsPage, SettingsPage } from "./pages";
 import { Nav, SessionView, type View } from "./shell";
-import { orderSessions, Sidebar, useSessions } from "./sidebar";
+import {
+  orderSessions,
+  Sidebar,
+  useSessions,
+  type SessionPatch,
+} from "./sidebar";
 
 // The app: the session sidebar and, in the centre, the selected session, the
 // start of a new one, or one of the pages the header's Projects and Settings
 // buttons open. EventSource is injectable for tests (jsdom has none).
 export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
   const { t } = useTranslation("shell");
-  const { sessions, projects, loaded, error, projectsError, setStatus, apply } =
-    useSessions(EventSource);
+  const {
+    sessions,
+    projects,
+    loaded,
+    error,
+    projectsError,
+    setStatus,
+    setSeen,
+    patch,
+    apply,
+    reload,
+  } = useSessions(EventSource);
   const [picked, setPicked] = useState<string | null>(null);
   const [view, setView] = useState<View>("session");
-  // The catalog names the models in the composers; a failure only leaves
-  // the model ids showing.
-  const [catalogState] = useCatalog();
-  const catalog =
-    catalogState.state === "ready" ? catalogState.catalog : undefined;
+  // New session mounts on first open and then stays mounted, hidden under
+  // the other views: its draft and a start under way survive a look
+  // elsewhere. A new key after a start begins the next one empty.
+  const [newOpened, setNewOpened] = useState(false);
+  const [newKey, setNewKey] = useState(0);
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+  });
+  // The catalog names the models in the composers; one shared state, so a
+  // load that succeeds anywhere (New session) names them here too.
+  const catalog = useKnownCatalog();
 
   // The picked session while it exists, else the first row in the sidebar.
   const ordered = useMemo(() => orderSessions(sessions), [sessions]);
@@ -38,12 +60,23 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     },
     [selectedId, setStatus],
   );
+  const onSeen = useCallback(() => {
+    if (selectedId) setSeen(selectedId);
+  }, [selectedId, setSeen]);
+  const onUpdated = useCallback(
+    (fields: SessionPatch) => {
+      if (selectedId) patch(selectedId, fields);
+    },
+    [selectedId, patch],
+  );
   // Picking a session in the sidebar shows it, from any page.
   const onSelect = useCallback((id: string) => {
     setPicked(id);
     setView("session");
   }, []);
-  // A session just started opens at once, before the stream announces it.
+  // A session just started is listed at once, before the stream announces
+  // it, and opens if New session is still on screen; started from a hidden
+  // New session it stays in the list and the view stays as it is.
   const onCreated = useCallback(
     (s: Session) => {
       apply({
@@ -51,7 +84,8 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
         session: s.summary,
         sessionId: s.summary.id,
       });
-      onSelect(s.summary.id);
+      if (viewRef.current === "new") onSelect(s.summary.id);
+      setNewKey((k) => k + 1);
     },
     [apply, onSelect],
   );
@@ -70,7 +104,10 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     for (const s of sessions) n[s.projectId] = (n[s.projectId] ?? 0) + 1;
     return n;
   }, [sessions]);
-  const startNew = () => setView("new");
+  const startNew = () => {
+    setNewOpened(true);
+    setView("new");
+  };
   return (
     <div className="app">
       <Sidebar
@@ -84,12 +121,17 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
         error={error}
       />
       <main className="main">
-        {view === "new" && (
+        {newOpened && (
           <NewSession
+            key={newKey}
+            hidden={view !== "new"}
             projects={projects}
+            projectsLoaded={loaded}
+            projectsError={projectsError ?? error}
             currentProjectId={selected?.projectId}
             nav={nav}
             onCreated={onCreated}
+            onAnswerLost={reload}
             onOpenSettings={() => setView("settings")}
             onOpenProjects={() => setView("projects")}
           />
@@ -117,6 +159,8 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
             catalog={catalog}
             EventSource={EventSource}
             onStatus={onStatus}
+            onSeen={onSeen}
+            onUpdated={onUpdated}
             onArchived={onArchived}
             nav={nav}
             hidden={view !== "session"}

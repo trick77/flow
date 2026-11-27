@@ -4,7 +4,11 @@ import type {
   NoticeLevel,
   PermissionDecision,
   PermissionRequested,
+  PlanProposed,
+  PlanResolved,
   Provider,
+  QuestionAsked,
+  QuestionResolved,
   SessionStatus,
   TodoItem,
   ToolKind,
@@ -110,6 +114,38 @@ export interface PermissionItem {
   decision?: PermissionDecision;
 }
 
+// The agent's questions (question.asked) and, once there, how they were
+// resolved (question.resolved).
+export interface QuestionItem {
+  type: "question";
+  key: string;
+  request: QuestionAsked;
+  // The turn it was asked in: a question is only answerable while it runs.
+  turn?: string;
+  resolved?: QuestionResolved;
+  // Still answerable: no resolution and its turn has not ended.
+  open: boolean;
+}
+
+// A plan the agent presents for approval (plan.proposed) and its outcome
+// (plan.resolved).
+export interface PlanItem {
+  type: "plan";
+  key: string;
+  request: PlanProposed;
+  turn?: string;
+  resolved?: PlanResolved;
+  open: boolean;
+}
+
+// A message waiting in the session's queue (message.queued until its
+// message.dequeued).
+export interface QueuedMessage {
+  messageId: string;
+  text: string;
+  origin: MessageOrigin;
+}
+
 export interface FilesItem {
   type: "files";
   key: string;
@@ -137,6 +173,8 @@ export type TimelineItem =
   | TextItem
   | TodoListItem
   | PermissionItem
+  | QuestionItem
+  | PlanItem
   | FilesItem
   | ResumedItem
   | NoticeItem;
@@ -150,6 +188,22 @@ export interface Folded {
   // The tool the open turn runs right now, for the working indicator.
   openTool?: ToolRow;
   provider?: Provider;
+  // The queue, head first.
+  queue: QueuedMessage[];
+  // The question waiting for an answer: unresolved and its turn still
+  // running. A message typed in the composer answers it.
+  pendingQuestion?: QuestionItem;
+}
+
+// open: a request of this turn that has no resolution yet. A request whose
+// turn ended (an interrupt, a lost turn) can no longer be answered even
+// without its resolved event.
+export function stillOpen(
+  item: { turn?: string; resolved?: unknown },
+  ended: ReadonlySet<string>,
+): boolean {
+  if (item.resolved !== undefined) return false;
+  return item.turn === undefined || !ended.has(item.turn);
 }
 
 // foldEvents turns a session's stream into timeline items. Pure: the same
@@ -164,7 +218,13 @@ export function foldEvents(state: StreamState): Folded {
   const todos = new Map<string, TodoListItem>();
   const texts = new Map<string, TextItem>();
   const gates: GateRow[] = [];
-  const out: Folded = { items, turnOpen: false };
+  const questions = new Map<string, QuestionItem>();
+  const plans = new Map<string, PlanItem>();
+  const ended = new Set<string>();
+  // The queue by message id, in insertion order; the head is moved to the
+  // front by rebuilding.
+  let queue: QueuedMessage[] = [];
+  const out: Folded = { items, turnOpen: false, queue };
 
   // foldFor finds the fold of the event's turn, created where the turn's
   // first event sits. Events outside a turn share a fold with the turnless
@@ -219,7 +279,24 @@ export function foldEvents(state: StreamState): Folded {
       case "session.status":
         out.status = e.data.status;
         break;
+      case "message.queued": {
+        // The queue holds each id once, where its last message.queued put
+        // it: at the head with front, else at the tail.
+        const m: QueuedMessage = {
+          messageId: e.data.messageId,
+          text: e.data.text,
+          origin: e.data.origin,
+        };
+        const rest = queue.filter((q) => q.messageId !== m.messageId);
+        queue = e.data.front ? [m, ...rest] : [...rest, m];
+        break;
+      }
+      case "message.dequeued":
+        queue = queue.filter((q) => q.messageId !== e.data.messageId);
+        break;
       case "message.user":
+        // Delivered: no longer waiting, whatever the dequeue said.
+        queue = queue.filter((q) => q.messageId !== e.data.messageId);
         items.push({
           type: "user",
           key: `msg:${e.data.messageId}:${e.seq}`,
@@ -241,6 +318,7 @@ export function foldEvents(state: StreamState): Folded {
         f.durationMs = e.data.durationMs;
         f.outcome = e.data.outcome;
         out.turnOpen = false;
+        if (e.turn !== undefined) ended.add(e.turn);
         break;
       }
       case "assistant.text": {
@@ -327,6 +405,42 @@ export function foldEvents(state: StreamState): Folded {
         if (p) p.decision = e.data.decision;
         break;
       }
+      case "question.asked": {
+        if (questions.has(e.data.requestId)) break;
+        const q: QuestionItem = {
+          type: "question",
+          key: `question:${e.data.requestId}`,
+          request: e.data,
+          turn: e.turn,
+          open: true,
+        };
+        questions.set(e.data.requestId, q);
+        items.push(q);
+        break;
+      }
+      case "question.resolved": {
+        const q = questions.get(e.data.requestId);
+        if (q) q.resolved = e.data;
+        break;
+      }
+      case "plan.proposed": {
+        if (plans.has(e.data.requestId)) break;
+        const p: PlanItem = {
+          type: "plan",
+          key: `plan:${e.data.requestId}`,
+          request: e.data,
+          turn: e.turn,
+          open: true,
+        };
+        plans.set(e.data.requestId, p);
+        items.push(p);
+        break;
+      }
+      case "plan.resolved": {
+        const p = plans.get(e.data.requestId);
+        if (p) p.resolved = e.data;
+        break;
+      }
       case "todo.updated": {
         const k = e.turn ?? "";
         const prev = todos.get(k);
@@ -386,11 +500,18 @@ export function foldEvents(state: StreamState): Folded {
         break;
       }
       default:
-        // No row: settings, queue, worktrees, thinking, questions, plans,
-        // started sessions, pull requests (later areas).
+        // No row: settings, worktrees, thinking, started sessions, pull
+        // requests (later areas).
         break;
     }
   }
+
+  out.queue = queue;
+  for (const q of questions.values()) {
+    q.open = stillOpen(q, ended);
+    if (q.open) out.pendingQuestion = q;
+  }
+  for (const p of plans.values()) p.open = stillOpen(p, ended);
 
   for (const b of state.live) {
     if (texts.has(b.blockId)) continue;
