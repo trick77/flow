@@ -18,18 +18,19 @@ var _ Store = SQL{}
 
 const cols = `id, project_id, parent_id, name, title, title_source, provider, claude_auth, provider_session_id, model,
 	mode, mode_cap, branch, status, status_at, unseen, seen_seq, last_seq, turn_started_at, last_activity_at,
-	archived_at, cleanup_pending, created_at, updated_at`
+	archived_at, cleanup_pending, client_id, created_at, updated_at`
 
 func scan(sc interface{ Scan(...any) error }) (Session, error) {
 	var s Session
-	var parent, turn, archived sql.NullString
+	var parent, turn, archived, clientID sql.NullString
 	var statusAt, activity, created, updated string
 	err := sc.Scan(&s.ID, &s.ProjectID, &parent, &s.Name, &s.Title, &s.TitleSource, &s.Provider, &s.ClaudeAuth,
 		&s.ProviderSessionID, &s.Model, &s.Mode, &s.ModeCap, &s.Branch, &s.Status, &statusAt, &s.Unseen, &s.SeenSeq,
-		&s.LastSeq, &turn, &activity, &archived, &s.CleanupPending, &created, &updated)
+		&s.LastSeq, &turn, &activity, &archived, &s.CleanupPending, &clientID, &created, &updated)
 	if parent.Valid {
 		s.ParentID = &parent.String
 	}
+	s.ClientID = clientID.String
 	s.TurnStartedAt, s.ArchivedAt = store.ParseNull(turn), store.ParseNull(archived)
 	s.StatusAt, s.LastActivityAt = store.Parse(statusAt), store.Parse(activity)
 	s.CreatedAt, s.UpdatedAt = store.Parse(created), store.Parse(updated)
@@ -85,6 +86,12 @@ func (s SQL) Get(ctx context.Context, id string) (Session, error) {
 	return se, notFound(err, "session "+id)
 }
 
+// ByClientID implements Store.
+func (s SQL) ByClientID(ctx context.Context, clientID string) (Session, error) {
+	se, err := scan(s.DB.QueryRowContext(ctx, `SELECT `+cols+` FROM sessions WHERE client_id = ?`, clientID))
+	return se, notFound(err, "session of client id "+clientID)
+}
+
 // Create implements Store: the session and its worktrees in one transaction.
 func (s SQL) Create(ctx context.Context, se Session, worktrees []Worktree) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -98,11 +105,19 @@ func (s SQL) Create(ctx context.Context, se Session, worktrees []Worktree) error
 	if se.Status == "" {
 		se.Status = "idle"
 	}
+	var clientID sql.NullString
+	if se.ClientID != "" {
+		clientID = sql.NullString{String: se.ClientID, Valid: true}
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO sessions (id, project_id, parent_id, name, title, title_source, provider,
-		claude_auth, provider_session_id, model, mode, mode_cap, branch, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		claude_auth, provider_session_id, model, mode, mode_cap, branch, status, client_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		se.ID, se.ProjectID, se.ParentID, se.Name, se.Title, se.TitleSource, se.Provider, se.ClaudeAuth,
-		se.ProviderSessionID, se.Model, se.Mode, se.ModeCap, se.Branch, se.Status)
+		se.ProviderSessionID, se.Model, se.Mode, se.ModeCap, se.Branch, se.Status, clientID)
 	if err != nil {
+		if strings.Contains(err.Error(), "sessions.client_id") {
+			return fmt.Errorf("%w: %w", ErrClientIDTaken, err)
+		}
 		return err
 	}
 	for _, w := range worktrees {
@@ -153,6 +168,15 @@ func (s SQL) ApplyMirror(ctx context.Context, id string, m Mirror) error {
 	}
 	if m.TurnEnded {
 		q += `, turn_started_at = NULL`
+	}
+	if m.Model != "" {
+		q, args = q+`, model = ?`, append(args, m.Model)
+	}
+	if m.Mode != "" {
+		q, args = q+`, mode = ?`, append(args, m.Mode)
+	}
+	if m.ModeCap != "" {
+		q, args = q+`, mode_cap = ?`, append(args, m.ModeCap)
 	}
 	res, err := s.DB.ExecContext(ctx, q+` WHERE id = ?`, append(args, id)...)
 	return affected(res, err, "session "+id)

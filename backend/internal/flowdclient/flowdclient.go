@@ -1,5 +1,5 @@
 // Package flowdclient is Flow's HTTP implementation of flowdproto.API and flowdproto.Dialer (bearer token,
-// Flow-Protocol header, SSE with Last-Event-ID, terminals over WebSocket). Jobs, diffs, control and ports are not
+// Flow-Protocol header, SSE with Last-Event-ID, terminals over WebSocket, diffs). Jobs, control and ports are not
 // part of the walking skeleton and answer ErrUnsupported. Owner: flowd runtime area (docs/ownership.md).
 package flowdclient
 
@@ -248,9 +248,11 @@ func (c *Client) Events(ctx context.Context, sessionID string, after int64) iter
 	}
 }
 
-// Diff implements flowdproto.API.
-func (c *Client) Diff(context.Context, string, string) (apitypes.Diff, error) {
-	return apitypes.Diff{}, ErrUnsupported
+// Diff implements flowdproto.API: repo is owner/name.
+func (c *Client) Diff(ctx context.Context, sessionID, repo string) (apitypes.Diff, error) {
+	var d apitypes.Diff
+	return d, c.call(ctx, http.MethodGet, "/v1/sessions/"+url.PathEscape(sessionID)+"/diff?repo="+url.QueryEscape(repo),
+		nil, &d)
 }
 
 // Control implements flowdproto.API.

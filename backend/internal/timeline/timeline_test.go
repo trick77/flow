@@ -35,6 +35,7 @@ type flaky struct {
 	mu     sync.Mutex
 	broken bool
 	dials  []int64
+	sent   []event.Command
 }
 
 func (f *flaky) Events(ctx context.Context, id string, after int64) iter.Seq2[event.Event, error] {
@@ -59,10 +60,23 @@ func (f *flaky) Events(ctx context.Context, id string, after int64) iter.Seq2[ev
 }
 
 func (f *flaky) Command(ctx context.Context, c event.Command) (flowdproto.CommandResult, error) {
-	if c.Kind == event.CmdPermissionReply && strings.Contains(string(c.Data), `"gone"`) {
+	f.mu.Lock()
+	f.sent = append(f.sent, c)
+	f.mu.Unlock()
+	if strings.Contains(string(c.Data), `"gone"`) {
 		return flowdproto.CommandResult{}, flowdproto.ErrNotPending
 	}
 	return f.Fake.Command(ctx, c)
+}
+
+// last is the last command sent to flowd.
+func (f *flaky) last() event.Command {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sent) == 0 {
+		return event.Command{}
+	}
+	return f.sent[len(f.sent)-1]
 }
 
 var errNotWarm = sbx.ErrNotWarm
@@ -167,6 +181,11 @@ func newRig(t *testing.T) *rig {
 	mux.HandleFunc("POST /s/{sessionId}/messages", a.SendMessage)
 	mux.HandleFunc("POST /s/{sessionId}/interrupt", a.InterruptTurn)
 	mux.HandleFunc("POST /s/{sessionId}/permissions/{requestId}", a.ReplyPermission)
+	mux.HandleFunc("POST /s/{sessionId}/questions/{requestId}", a.ReplyQuestion)
+	mux.HandleFunc("POST /s/{sessionId}/plans/{requestId}", a.ReplyPlan)
+	mux.HandleFunc("POST /s/{sessionId}/queue/{messageId}/send-now", a.SendQueuedNow)
+	mux.HandleFunc("DELETE /s/{sessionId}/queue/{messageId}", a.RemoveQueued)
+	mux.HandleFunc("GET /s/{sessionId}/log", a.ReadSessionLog)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &rig{api: a, fake: fake, sb: sb, srv: srv, id: s.Summary.ID, hub: hub}

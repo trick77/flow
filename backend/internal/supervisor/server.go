@@ -91,6 +91,10 @@ func (s *Supervisor) Handler(token string) http.Handler {
 			reply(w, res, err)
 		}
 	})
+	mux.HandleFunc(flowdproto.RouteDiff, func(w http.ResponseWriter, r *http.Request) {
+		d, err := s.Diff(r.Context(), r.PathValue("id"), r.URL.Query().Get("repo"))
+		reply(w, d, err)
+	})
 	mux.HandleFunc(flowdproto.RouteEvents, s.events)
 	s.terminalRoutes(mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

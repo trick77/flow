@@ -104,6 +104,8 @@ type fakeShell struct {
 	exit   chan int
 	hungUp chan struct{}
 	once   sync.Once
+	// ignoreHup: the shell traps SIGHUP; only Kill ends it.
+	ignoreHup bool
 }
 
 func newFakeShell() *fakeShell {
@@ -128,7 +130,14 @@ func (f *fakeShell) Resize(cols, rows int) error {
 func (f *fakeShell) Wait() int { return <-f.exit }
 func (f *fakeShell) Pid() int  { return 42 }
 func (f *fakeShell) Hangup() {
+	if f.ignoreHup {
+		return
+	}
 	f.once.Do(func() { close(f.hungUp); f.end(129) })
+}
+
+func (f *fakeShell) Kill() {
+	f.once.Do(func() { close(f.hungUp); f.end(137) })
 }
 
 // end makes the shell exit: output ends, then the process.
@@ -495,6 +504,37 @@ func TestExitFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if e, ok := ReadExit(file); !ok || e.Code != 7 {
+		t.Fatalf("exit = %+v %v", e, ok)
+	}
+}
+
+// A shell that ignores SIGHUP is killed after hangupWait, and its exit is recorded: the stop never waits for
+// systemd's own timeout.
+func TestRun_killsAShellThatIgnoresTheHangup(t *testing.T) {
+	sh := newFakeShell()
+	sh.ignoreHup = true
+	old, oldWait := StartShell, hangupWait
+	StartShell = func(ShellSpec) (Shell, error) { return sh, nil }
+	hangupWait = 50 * time.Millisecond
+	t.Cleanup(func() { StartShell, hangupWait = old, oldWait })
+	sock := filepath.Join(shortTemp(t), "t2.sock")
+	exitFile := strings.TrimSuffix(sock, ".sock") + ".exit"
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, []string{"--id", "t2", "--dir", "/work", "--socket", sock, "--exit-file", exitFile}, discard())
+	}()
+	waitFor(t, func() bool { _, err := Query(context.Background(), sock); return err == nil })
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop hangs on a shell that ignores SIGHUP")
+	}
+	if e, ok := ReadExit(exitFile); !ok || e.Code != 137 {
 		t.Fatalf("exit = %+v %v", e, ok)
 	}
 }

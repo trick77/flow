@@ -28,8 +28,11 @@ type Session struct {
 	LastActivityAt    time.Time
 	ArchivedAt        *time.Time
 	CleanupPending    bool
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// ClientID is the clientId of the message the session was created with ("" without one): a repeated create with
+	// it answers this session.
+	ClientID  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Worktree is one repository of a session, on the session's branch, with its pull request.

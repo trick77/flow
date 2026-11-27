@@ -27,6 +27,22 @@ type Cmd struct {
 	Dir     string
 	AsAgent bool
 	Env     []string
+	// Limit, when set, bounds the output kept: stdout only (stderr goes into the error), at most Limit+1 bytes, so
+	// a caller sees it was cut by a result longer than Limit. The command still runs to its end.
+	Limit int
+}
+
+// capped keeps the first max bytes written to it and drops the rest.
+type capped struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	if room := c.max - c.buf.Len(); room > 0 {
+		c.buf.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
 }
 
 // ExecRunner is the Runner on the real machine.
@@ -41,6 +57,15 @@ func (ExecRunner) Run(ctx context.Context, c Cmd) ([]byte, error) {
 	if c.AsAgent && os.Geteuid() == 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: layout.AgentUID, Gid: layout.AgentGID}}
 		cmd.Env = append(cmd.Env, "HOME="+layout.Home, "USER="+layout.AgentUser)
+	}
+	if c.Limit > 0 {
+		out, errOut := &capped{max: c.Limit + 1}, &capped{max: 4 << 10}
+		cmd.Stdout, cmd.Stderr = out, errOut
+		if err := cmd.Run(); err != nil {
+			return out.buf.Bytes(), fmt.Errorf("%s %s: %w: %s", c.Name, strings.Join(c.Args, " "), err,
+				strings.TrimSpace(errOut.buf.String()))
+		}
+		return out.buf.Bytes(), nil
 	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out

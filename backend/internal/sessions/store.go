@@ -11,6 +11,9 @@ import (
 // ErrNotFound means no such session.
 var ErrNotFound = errors.New("sessions: not found")
 
+// ErrClientIDTaken means Create found a session made with the same message clientId.
+var ErrClientIDTaken = errors.New("sessions: client id taken")
+
 // ListFilter narrows List; zero values match everything that is not archived.
 type ListFilter struct {
 	ProjectID string
@@ -28,12 +31,19 @@ type Mirror struct {
 	ProviderSessionID string
 	TurnStarted       bool
 	TurnEnded         bool
+	// Model, Mode and ModeCap: the settings the log changed (session.settings, an approved plan's mode); "" keeps.
+	Model   string
+	Mode    string
+	ModeCap string
 }
 
 // Store keeps session and worktree rows.
 type Store interface {
 	List(ctx context.Context, f ListFilter) ([]Session, error)
 	Get(ctx context.Context, id string) (Session, error)
+	// ByClientID is the session created with this message clientId (ErrNotFound: none).
+	ByClientID(ctx context.Context, clientID string) (Session, error)
+	// Create inserts the session and its worktrees; ErrClientIDTaken when a session holds its ClientID.
 	Create(ctx context.Context, s Session, worktrees []Worktree) error
 	Update(ctx context.Context, s Session) error
 	// ApplyMirror records progress through the log; it never moves LastSeq backwards.

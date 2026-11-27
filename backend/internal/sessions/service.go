@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/trick77/ship/kit/sse"
@@ -179,9 +180,22 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	if strings.TrimSpace(in.Model) == "" {
 		return apitypes.Session{}, invalid("model")
 	}
-	if in.Message != nil && (in.Message.ClientID == "" || strings.TrimSpace(in.Message.Text) == "" ||
-		!event.TextFits(in.Message.Text)) {
+	if in.Message != nil && (in.Message.ClientID == "" || len(in.Message.ClientID) > 64 ||
+		strings.TrimSpace(in.Message.Text) == "" || !event.TextFits(in.Message.Text)) {
 		return apitypes.Session{}, invalid("message")
+	}
+	// A create with a first message is idempotent by its clientId: a retry after a lost response (or a second
+	// identical request at the same moment, which waits here for the first) answers the session the first made, never
+	// a second one running the same message. One whose first call failed was taken back out (undo): it is made anew.
+	if in.Message != nil {
+		defer s.Lock("create-" + in.Message.ClientID)()
+		se, err := s.Store.ByClientID(ctx, in.Message.ClientID)
+		if err == nil {
+			return s.Describe(ctx, se)
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return apitypes.Session{}, err
+		}
 	}
 	if _, err := s.Projects.Get(ctx, in.ProjectID); err != nil {
 		if errors.Is(err, projects.ErrNotFound) {
@@ -216,6 +230,9 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 	}
 	se := Session{ID: store.NewID(), ProjectID: in.ProjectID, Title: title, Provider: string(in.Provider),
 		Model: in.Model, Mode: string(in.Mode), Status: string(event.SessionStatusIdle)}
+	if in.Message != nil {
+		se.ClientID = in.Message.ClientID
+	}
 	if in.Provider == apitypes.ProviderClaude {
 		se.ClaudeAuth = string(apitypes.ClaudeAuthSubscriptionToken)
 		if in.ClaudeAuth != "" {
@@ -235,6 +252,13 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 		err := s.Store.Create(ctx, se, wts)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, ErrClientIDTaken) {
+			// Made by another process between the look above and this insert: that one is the answer.
+			if other, gerr := s.Store.ByClientID(ctx, se.ClientID); gerr == nil {
+				return s.Describe(ctx, other)
+			}
+			return apitypes.Session{}, err
 		}
 		if !strings.Contains(err.Error(), "sessions.name") || attempt >= 10 {
 			return apitypes.Session{}, err
@@ -272,6 +296,96 @@ func (s *Service) Create(ctx context.Context, in apitypes.SessionCreate) (apityp
 		return apitypes.Session{}, err
 	}
 	return s.Describe(ctx, se)
+}
+
+// modeRank orders the modes from least to most permissive (the contract's order).
+func modeRank(m event.PermissionMode) int { return slices.Index(event.PermissionModeValues, m) }
+
+// clean reports whether text has no control character (it reaches the log, the spec and the agent).
+func clean(text string) bool {
+	return !strings.ContainsFunc(text, func(r rune) bool { return r < 0x20 || r == 0x7f })
+}
+
+// Update changes a session's title, model or permission mode; absent (empty) fields stay. A mode above the session's
+// cap is mode_above_cap. A model or mode change goes to the agent as settings.set (the host logs session.settings,
+// the sidecar calls setModel / setPermissionMode on a running query, or starts its next one with them): the log is
+// the record a restarted host takes its settings from, over the spec, so a change only written to the row would be
+// undone at the next start. It therefore starts a stopped sandbox and host, as sending a message does. A title
+// change alone touches only the row.
+func (s *Service) Update(ctx context.Context, id string, in apitypes.SessionUpdate) (apitypes.Session, error) {
+	se, err := s.Store.Get(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return apitypes.Session{}, apitypes.Fail(apitypes.ErrorCodeNotFound, "")
+	}
+	if err != nil {
+		return apitypes.Session{}, err
+	}
+	if se.ArchivedAt != nil {
+		return apitypes.Session{}, apitypes.Fail(apitypes.ErrorCodeSessionArchived, "")
+	}
+	title := cut(strings.TrimSpace(in.Title), 80)
+	if in.Title != "" && (title == "" || !clean(title)) {
+		return apitypes.Session{}, invalid("title")
+	}
+	model := in.Model
+	if model != "" && (len(model) > 200 || strings.ContainsFunc(model, unicode.IsSpace) || !clean(model)) {
+		return apitypes.Session{}, invalid("model")
+	}
+	mode := event.PermissionMode(in.Mode)
+	if mode != "" && modeRank(mode) < 0 {
+		return apitypes.Session{}, invalid("mode")
+	}
+	if mode != "" && se.ModeCap != "" && modeRank(mode) > modeRank(event.PermissionMode(se.ModeCap)) {
+		return apitypes.Session{}, apitypes.Fail(apitypes.ErrorCodeModeAboveCap, "")
+	}
+	var set event.SettingsSet
+	if model != "" && model != se.Model {
+		set.Model = model
+	}
+	if mode != "" && string(mode) != se.Mode {
+		set.Mode = mode
+	}
+	if set.Model != "" || set.Mode != "" {
+		// Held: a host started for it must not first send queued messages under the old settings.
+		if _, _, err := s.CommandHeld(ctx, id, "settings-"+store.NewID(), event.CmdSettingsSet, set, true, true); err != nil {
+			return apitypes.Session{}, err
+		}
+	}
+	unlock := s.Lock(id)
+	se, err = s.Store.Get(ctx, id)
+	if err == nil {
+		if title != "" {
+			se.Title, se.TitleSource = title, "owner"
+		}
+		if set.Model != "" {
+			se.Model = set.Model
+		}
+		if set.Mode != "" {
+			se.Mode = string(set.Mode)
+		}
+		err = s.Store.Update(ctx, se)
+	}
+	unlock()
+	if err != nil {
+		return apitypes.Session{}, err
+	}
+	s.Publish(ctx, id)
+	return s.Describe(ctx, se)
+}
+
+// MarkSeen records that the owner has seen the session up to seq; unseen clears once that reaches its last seq.
+func (s *Service) MarkSeen(ctx context.Context, id string, seq int64) error {
+	if seq < 0 {
+		return invalid("seq")
+	}
+	if err := s.Store.MarkSeen(ctx, id, seq); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return apitypes.Fail(apitypes.ErrorCodeNotFound, "")
+		}
+		return err
+	}
+	s.Publish(ctx, id)
+	return nil
 }
 
 // uniqueName is the first free name of base, base-2, base-3, …, and its suffix (1 for base itself).
@@ -321,21 +435,29 @@ func (s *Service) Spec(ctx context.Context, se Session) (flowdproto.SessionSpec,
 // session's Lock: an Archive waits for it, or it finds the session archived.
 func (s *Service) Host(ctx context.Context, id string) (flowdproto.API, error) {
 	defer s.Lock(id)()
+	api, _, err := s.ensureHost(ctx, id, "")
+	return api, err
+}
+
+// ensureHost is Host without the lock (callers hold it): reason goes into a started host's session.resumed, and
+// sandbox_start has it leave its queue as it is. started: this call started the host.
+func (s *Service) ensureHost(ctx context.Context, id string, reason event.ResumeReason) (flowdproto.API, bool, error) {
 	se, err := s.Store.Get(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if se.ArchivedAt != nil {
-		return nil, apitypes.Fail(apitypes.ErrorCodeSessionArchived, "")
+		return nil, false, apitypes.Fail(apitypes.ErrorCodeSessionArchived, "")
 	}
 	spec, err := s.Spec(ctx, se)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	spec.ResumeReason = reason
 	for attempt := 0; ; attempt++ {
 		api, err := s.Sandboxes.Ensure(ctx, se.ProjectID)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		st, err := api.EnsureSession(ctx, spec)
 		if errors.Is(err, flowdproto.ErrUnavailable) && attempt == 0 {
@@ -343,14 +465,54 @@ func (s *Service) Host(ctx context.Context, id string) (flowdproto.API, error) {
 			continue
 		}
 		if errors.Is(err, flowdproto.ErrNotImplemented) {
-			return nil, apitypes.Fail(apitypes.ErrorCodeNotImplemented, err.Error())
+			return nil, false, apitypes.Fail(apitypes.ErrorCodeNotImplemented, err.Error())
 		}
 		if err != nil {
-			return nil, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+			return nil, false, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
 		}
 		s.recordWorktrees(ctx, se.ID, st.Worktrees)
-		return api, nil
+		return api, st.Started, nil
 	}
+}
+
+// CommandHeld sends a command that must not set the session's queue moving. A host Command starts drains the queue
+// first (its head runs before the command arrives): a removal would send the very message it removes, a send-now
+// would interrupt whatever ran first, a settings change would come after queued turns started under the old ones.
+// So a host that is down is started as for a lost turn (it leaves the queue as it is), gets the command, and, with
+// stopAfter, is stopped again when this call started it: the next message's start then drains the queue in order.
+// Under the session's lock throughout. Like Command it starts a stopped sandbox; mayStart false sends nothing
+// there (ran false), as CommandIfRunning.
+func (s *Service) CommandHeld(ctx context.Context, id, cmdID string, kind event.CommandKind, payload any,
+	mayStart, stopAfter bool) (flowdproto.CommandResult, bool, error) {
+	c, err := event.NewCommand(cmdID, id, kind, payload)
+	if err != nil {
+		return flowdproto.CommandResult{}, false, err
+	}
+	if !mayStart {
+		se, err := s.Store.Get(ctx, id)
+		if err != nil {
+			return flowdproto.CommandResult{}, false, err
+		}
+		_, err = s.Sandboxes.Warm(ctx, se.ProjectID)
+		if errors.Is(err, sandboxes.ErrNotWarm) || errors.Is(err, sandboxes.ErrNotFound) {
+			return flowdproto.CommandResult{}, false, nil
+		}
+		if err != nil {
+			return flowdproto.CommandResult{}, false, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+		}
+	}
+	defer s.Lock(id)()
+	api, started, err := s.ensureHost(ctx, id, event.ResumeReasonSandboxStart)
+	if err != nil {
+		return flowdproto.CommandResult{}, false, err
+	}
+	res, err := api.Command(ctx, c)
+	if started && stopAfter {
+		if serr := api.StopSession(ctx, id, false); serr != nil && !errors.Is(serr, flowdproto.ErrNotFound) {
+			s.Log.Warn("stopping the host started for a command", "session", id, "err", serr)
+		}
+	}
+	return res, true, commandError(err)
 }
 
 // stop closes the session's terminals and stops its host (remove: also its worktrees and directory claim). A
@@ -526,19 +688,24 @@ func (s *Service) Command(ctx context.Context, id, cmdID string, kind event.Comm
 			res, err = api.Command(ctx, c)
 		}
 	}
+	return res, commandError(err)
+}
+
+// commandError maps flowd's answer to a command onto the API's codes.
+func commandError(err error) error {
 	switch {
+	case err == nil:
+		return nil
 	case errors.Is(err, flowdproto.ErrNotPending):
-		return res, apitypes.Fail(apitypes.ErrorCodeRequestNotPending, "")
+		return apitypes.Fail(apitypes.ErrorCodeRequestNotPending, "")
 	case errors.Is(err, flowdproto.ErrInvalid):
-		return res, apitypes.Fail(apitypes.ErrorCodeInvalidRequest, err.Error())
-	case err != nil:
-		var ae *apitypes.Error
-		if errors.As(err, &ae) {
-			return res, err
-		}
-		return res, apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
+		return apitypes.Fail(apitypes.ErrorCodeInvalidRequest, err.Error())
 	}
-	return res, nil
+	var ae *apitypes.Error
+	if errors.As(err, &ae) {
+		return err
+	}
+	return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
 }
 
 // CommandIfRunning sends a command that only matters to a running session (an interrupt, a reply): a stopped
@@ -731,6 +898,20 @@ func (s *Service) mirror(ctx context.Context, api flowdproto.API, se Session) {
 		case event.KindSessionStarted:
 			if p, err := e.Payload(); err == nil {
 				m.ProviderSessionID = p.(*event.SessionStarted).ProviderSessionID
+			}
+		case event.KindSessionSettings:
+			// What the session runs with now: the owner's change as the host applied it (held to the cap), or the
+			// agent's correction (a mode the SDK put in force, a failed change put back).
+			if p, err := e.Payload(); err == nil {
+				st := p.(*event.SessionSettings)
+				m.Model, m.Mode, m.ModeCap = st.Model, string(st.Mode), string(st.ModeCap)
+				publish = true
+			}
+		case event.KindPlanResolved:
+			if p, err := e.Payload(); err == nil {
+				if pr := p.(*event.PlanResolved); pr.Decision == event.PlanDecisionApproved && pr.Mode != "" {
+					m.Mode, publish = string(pr.Mode), true
+				}
 			}
 		}
 		if s.Meter != nil {

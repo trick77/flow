@@ -390,6 +390,39 @@ func TestOtherCommandsAndDrafts(t *testing.T) {
 	}
 }
 
+// Status after check runs follows docs/events.md: a run finished while the turn waited in the queue puts it back to
+// working, and a turn whose last run failed ends failed although the turn itself completed.
+func TestGate_statusFollowsTheDocs(t *testing.T) {
+	f := newFake()
+	r := start(t, filepath.Join(t.TempDir(), "events.jsonl"), f)
+	_, _ = r.h.Command(send(t, "m1", "hi"))
+	<-f.got
+	for _, c := range []event.Command{
+		cmd(t, "g1", event.CmdGateUpdate, event.GateUpdate{State: event.GateStateQueued, Position: 1}),
+		cmd(t, "g2", event.CmdGateUpdate, event.GateUpdate{State: event.GateStateFinished, ExitCode: 2}),
+	} {
+		if _, err := r.h.Command(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st := r.h.Hello(0).Status; st != event.SessionStatusWorking {
+		t.Errorf("status after a withdrawn wait %s, want working", st)
+	}
+	f.out <- event.EventDraft{Kind: event.KindTurnEnded, Data: []byte(`{"outcome":"completed","durationMs":1}`)}
+	r.waitKind(event.KindTurnEnded, 1)
+	if st := r.h.Hello(0).Status; st != event.SessionStatusFailed {
+		t.Errorf("status after a turn whose check failed %s, want failed", st)
+	}
+	_, _ = r.h.Command(send(t, "m2", "again"))
+	<-f.got
+	_, _ = r.h.Command(cmd(t, "g3", event.CmdGateUpdate, event.GateUpdate{State: event.GateStateFinished}))
+	f.out <- event.EventDraft{Kind: event.KindTurnEnded, Data: []byte(`{"outcome":"completed","durationMs":1}`)}
+	r.waitKind(event.KindTurnEnded, 2)
+	if st := r.h.Hello(0).Status; st != event.SessionStatusDone {
+		t.Errorf("status after a passing check %s, want done", st)
+	}
+}
+
 // Request ids never repeat in a log, also across host restarts: Flow's reply command id is "reply-<requestId>", so a
 // repeated request id would make the new request's reply a duplicate of the old one, never answered.
 func TestReplay_idsStayUniqueAcrossRestarts(t *testing.T) {

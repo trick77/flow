@@ -184,6 +184,27 @@ func TestEnsure(t *testing.T) {
 	}
 }
 
+// The catalog's Claude login comes from flowd's Hello: unknown before any sandbox answered, then what a warm
+// sandbox reports now (a login made in its terminal after the bring-up shows without another one).
+func TestClaudeSignedIn(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	r.d.fake.SetClaudeSignedIn(true)
+	if r.m.ClaudeSignedIn(ctx) {
+		t.Error("signed in before any sandbox answered")
+	}
+	if _, err := r.m.Ensure(ctx, pid); err != nil {
+		t.Fatal(err)
+	}
+	if !r.m.ClaudeSignedIn(ctx) {
+		t.Error("the warm sandbox's login not reported")
+	}
+	r.d.fake.SetClaudeSignedIn(false)
+	if r.m.ClaudeSignedIn(ctx) {
+		t.Error("a logout in the warm sandbox not reported")
+	}
+}
+
 // Warm never boots a sandbox, even one Flow's records call warm (after a host reboot, say).
 // Forget only drops a cache entry: it must not wait for a bring-up that holds the project's lock for minutes (the
 // start endpoint calls it and is documented to answer at once).

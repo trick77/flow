@@ -165,6 +165,11 @@ function round(n: number): number {
   return Math.round(n * 1e9) / 1e9;
 }
 
+// COST_TOLERANCE is how far a cumulative total may lie below the last one and
+// still count as no spend rather than a reset (USD; totals are rounded to
+// 1e-9, so a millionth of a dollar is well above their noise).
+const COST_TOLERANCE = 1e-6;
+
 export class Translator {
   private readonly cfg: TranslatorConfig;
   private readonly now: () => number;
@@ -661,13 +666,16 @@ export class Translator {
   }
 
   // costDelta is this result's share of the SDK's cumulative total_cost_usd.
-  // A total below the last one is a reset (/clear) and counts from zero.
+  // Only a clear drop below the last total is a reset (/clear) and counts from
+  // zero: a total a hair below it (the host's rounded sum after a resume, or
+  // float noise) is no spend, never the whole session billed again.
   private costDelta(total: unknown): number | undefined {
     if (typeof total !== "number") return undefined;
     const prev = this.costTotal;
     this.costTotal = total;
     if (prev === undefined) return undefined;
-    return round(total >= prev ? total - prev : total);
+    if (total < prev - COST_TOLERANCE) return round(total);
+    return round(Math.max(0, total - prev));
   }
 
   // turnModel is the model that carried most of this result's cost, from the

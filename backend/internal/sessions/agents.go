@@ -29,11 +29,11 @@ type Keys interface {
 	Keys(ctx context.Context) ([]apitypes.ApiKey, error)
 }
 
-// Catalog is the agent catalog: Claude with the credential modes the stored keys allow. OpenCode is left out until
-// its adapter exists (flowd refuses its sessions with not_implemented); the contract's available=false means "no
-// key", not "not built". A login on the home volume (subscription_login) is not listed: Flow cannot see it without
-// asking a sandbox.
-func Catalog(ctx context.Context, keys Keys) (apitypes.AgentCatalog, error) {
+// Catalog is the agent catalog: Claude with the credential modes the stored keys allow, and subscription_login when
+// signedIn says the home volume holds a login (flowd's Hello; nil: not known). OpenCode is left out until its
+// adapter exists (flowd refuses its sessions with not_implemented); the contract's available=false means "no key",
+// not "not built".
+func Catalog(ctx context.Context, keys Keys, signedIn func(context.Context) bool) (apitypes.AgentCatalog, error) {
 	claude := apitypes.ProviderInfo{Provider: apitypes.ProviderClaude, Models: claudeModels,
 		DefaultModel: claudeDefaultModel}
 	if keys != nil {
@@ -53,13 +53,16 @@ func Catalog(ctx context.Context, keys Keys) (apitypes.AgentCatalog, error) {
 			claude.ClaudeAuths = append(claude.ClaudeAuths, apitypes.ClaudeAuthAPIKey)
 		}
 	}
+	if signedIn != nil && signedIn(ctx) {
+		claude.ClaudeAuths = append(claude.ClaudeAuths, apitypes.ClaudeAuthSubscriptionLogin)
+	}
 	claude.Available = len(claude.ClaudeAuths) > 0
 	return apitypes.AgentCatalog{Providers: []apitypes.ProviderInfo{claude}, Modes: catalogModes}, nil
 }
 
 // ListAgents implements httpapi.Sessions.
 func (a *API) ListAgents(w http.ResponseWriter, r *http.Request) {
-	out, err := Catalog(r.Context(), a.Keys)
+	out, err := Catalog(r.Context(), a.Keys, a.ClaudeSignedIn)
 	if err != nil {
 		httpapi.WriteError(w, err)
 		return

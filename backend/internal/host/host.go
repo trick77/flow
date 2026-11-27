@@ -98,8 +98,10 @@ type Host struct {
 	blockOrder   []string
 	subs         map[chan hostproto.Frame]struct{}
 	shutdownIdle bool
-	stop         chan struct{}
-	stopped      bool
+	// gateFailed: the open turn's last check run (gate.finished) had a non-zero exit, so the turn ends failed.
+	gateFailed bool
+	stop       chan struct{}
+	stopped    bool
 	// replying counts command replies not yet written: a stop waits for them, so a host.shutdown's own reply is
 	// not cut off by the connection closing.
 	replying atomic.Int64
@@ -179,10 +181,12 @@ func (h *Host) recover(events []event.Event) {
 			h.status = p.Status
 		case *event.TurnStarted:
 			h.turns++
-			h.turn, h.turnStart = e.Turn, e.TS
+			h.turn, h.turnStart, h.gateFailed = e.Turn, e.TS, false
 		case *event.TurnEnded:
-			h.turn = ""
+			h.turn, h.gateFailed = "", false
 			h.pendingID, h.pendingKind = "", ""
+		case *event.GateFinished:
+			h.gateFailed = p.ExitCode != 0
 		case *event.PermissionRequested:
 			h.pendingID, h.pendingKind = p.RequestID, e.Kind
 		case *event.QuestionAsked:
@@ -571,6 +575,17 @@ func (h *Host) gate(cmd string, p *event.GateUpdate) {
 	default:
 		h.append(event.KindGateFinished, cmd, event.GateFinished{Repo: p.Repo, ExitCode: p.ExitCode,
 			DurationMs: p.DurationMs})
+		// docs/events.md, Status: a turn's last check run decides done or failed with its outcome. A run that finishes
+		// while the turn waits in the queue (withdrawn, never started) puts it back to working.
+		h.gateFailed = p.ExitCode != 0
+		switch {
+		case h.turn != "" && h.status == event.SessionStatusQueued:
+			h.setStatus(event.SessionStatusWorking)
+		case h.turn == "" && h.gateFailed:
+			h.setStatus(event.SessionStatusFailed)
+		case h.turn == "" && (h.status == event.SessionStatusQueued || h.status == event.SessionStatusWorking):
+			h.setStatus(event.SessionStatusDone) // a run outside a turn (a terminal's make) leaves nothing working
+		}
 	}
 }
 
@@ -607,7 +622,7 @@ func (h *Host) startTurn(cmd string, m event.MessageSend) error {
 		return &CommandError{Code: hostproto.CodeInvalid, Detail: err.Error()}
 	}
 	h.turns++
-	h.turn = turn
+	h.turn, h.gateFailed = turn, false
 	h.turnStart = h.cfg.Now()
 	h.append(event.KindTurnStarted, cmd, event.TurnStarted{MessageID: m.MessageID, Provider: h.cfg.Spec.Session.Provider,
 		Model: h.model})
@@ -676,9 +691,10 @@ func (h *Host) endTurn(t event.TurnEnded, cmd string) {
 	h.turn, h.interruptCmd = "", ""
 	h.blocks, h.blockOrder = map[string]string{}, nil
 	status := event.SessionStatusDone
-	if t.Outcome == event.TurnOutcomeError || t.Outcome == event.TurnOutcomeLost {
+	if t.Outcome == event.TurnOutcomeError || t.Outcome == event.TurnOutcomeLost || h.gateFailed {
 		status = event.SessionStatusFailed
 	}
+	h.gateFailed = false
 	h.setStatus(status)
 }
 

@@ -29,6 +29,7 @@ import (
 	"github.com/trick77/flow/internal/metering"
 	"github.com/trick77/flow/internal/profile"
 	"github.com/trick77/flow/internal/projects"
+	"github.com/trick77/flow/internal/review"
 	"github.com/trick77/flow/internal/sandbox"
 	"github.com/trick77/flow/internal/sandbox/incus"
 	"github.com/trick77/flow/internal/sandboxes"
@@ -185,8 +186,9 @@ func wire(ctx context.Context, cfg config.Config, db *sql.DB, hub *sse.Hub[apity
 		DefaultBranch:  projects.RemoteDefaultBranch("https://github.com/", &http.Client{Timeout: 30 * time.Second}),
 		ActiveSessions: active, Publish: publish}
 	areas.Sandboxes = &sandboxes.API{Manager: manager, ActiveSessions: active}
-	areas.Sessions = &sessions.API{Service: svc, Keys: creds}
+	areas.Sessions = &sessions.API{Service: svc, Keys: creds, ClaudeSignedIn: manager.ClaudeSignedIn}
 	areas.Timeline = &timeline.API{Sessions: svc, Hub: hub}
+	areas.Review = &review.API{Sessions: svc}
 	areas.Terminals = &terminals.API{Sessions: svc.Store, Projects: projectStore, Sandboxes: manager, Lock: svc.Lock}
 	return nil
 }

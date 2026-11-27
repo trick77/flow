@@ -71,7 +71,6 @@ func TestUnsupportedAndErrors(t *testing.T) {
 		}
 	}
 	unsupported := []error{
-		func() error { _, err := c.Diff(ctx, "s", "r"); return err }(),
 		c.ReplyControl(ctx, flowdproto.ControlReply{}),
 		func() error { _, err := c.StartJob(ctx, flowdproto.JobSpec{}); return err }(),
 		func() error { _, err := c.Job(ctx, "j"); return err }(),
