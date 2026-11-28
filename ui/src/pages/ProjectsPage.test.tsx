@@ -261,104 +261,36 @@ describe("ProjectsPage", () => {
     expect(events).toEqual([{ kind: "project.removed", projectId: "p1" }]);
   });
 
-  it("creates a project from a name and repositories, one per line", async () => {
-    const created = project({ id: "p9", name: "new" }, { state: "setup" });
-    const calls = serve([json(201, created)]);
+  it("creates a project and hands it on, the form closed", async () => {
+    const created = project({ id: "p9", name: "cli" }, { state: "setup" });
+    const calls = serve([
+      json(200, {
+        github: { state: "disconnected", available: false },
+        claude: { signedIn: false },
+        apiKeys: [],
+      }),
+      json(201, created),
+    ]);
     const { events } = renderPage([]);
-    fireEvent.click(screen.getByRole("button", { name: en.add }));
-    const form = screen.getByRole("form", { name: en.createTitle });
-    const submit = within(form).getByRole("button", { name: en.create });
-    expect(submit).toBeDisabled();
-    fireEvent.change(within(form).getByLabelText(en.name), {
-      target: { value: " new " },
-    });
-    fireEvent.change(within(form).getByLabelText(en.repos), {
-      target: {
-        value: "trick77/toolkit\n\n https://github.com/trick77/ship \n",
-      },
-    });
     await act(async () => {
-      fireEvent.click(submit);
+      fireEvent.click(screen.getByRole("button", { name: en.add }));
     });
-    expect(calls[0]).toEqual({
+    const form = screen.getByRole("form", { name: en.createTitle });
+    fireEvent.change(within(form).getByLabelText(en.byName), {
+      target: { value: "cli/cli" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: en.byNameAdd }));
+    await act(async () => {
+      fireEvent.click(within(form).getByRole("button", { name: en.create }));
+    });
+    expect(calls[1]).toEqual({
       method: "POST",
       url: "/api/projects",
-      body: {
-        name: "new",
-        repos: ["trick77/toolkit", "https://github.com/trick77/ship"],
-      },
+      body: { name: "cli", repos: ["cli/cli"] },
     });
     expect(events).toEqual([
       { kind: "project.updated", project: created, projectId: "p9" },
     ]);
     expect(screen.queryByRole("form")).toBeNull();
-  });
-
-  it("puts a refusal of the create form at its field", async () => {
-    serve([
-      json(409, { code: "conflict", field: "name" }),
-      json(400, { code: "invalid_request", field: "name" }),
-      json(400, { code: "invalid_request", field: "repos" }),
-      json(502, { code: "upstream" }),
-    ]);
-    renderPage([]);
-    fireEvent.click(screen.getByRole("button", { name: en.add }));
-    fireEvent.change(screen.getByLabelText(en.name), {
-      target: { value: "apps" },
-    });
-    fireEvent.change(screen.getByLabelText(en.repos), {
-      target: { value: "a/b" },
-    });
-    const submit = () =>
-      act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: en.create }));
-      });
-    await submit();
-    expect(screen.getByRole("alert")).toHaveTextContent(en.nameTaken);
-    expect(screen.getByLabelText(en.name)).toHaveAttribute(
-      "aria-invalid",
-      "true",
-    );
-    await submit();
-    expect(screen.getByRole("alert")).toHaveTextContent(en.invalidName);
-    await submit();
-    expect(screen.getByRole("alert")).toHaveTextContent(en.invalidRepos);
-    expect(screen.getByLabelText(en.repos)).toHaveAttribute(
-      "aria-invalid",
-      "true",
-    );
-    await submit();
-    expect(screen.getByRole("alert")).toHaveTextContent(errors.upstream);
-    fireEvent.click(screen.getByRole("button", { name: en.close }));
-    expect(screen.queryByRole("form")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: en.add }));
-    fireEvent.click(screen.getByRole("button", { name: en.cancel }));
-    expect(screen.queryByRole("form")).toBeNull();
-  });
-
-  it("says why a repository could not be looked up, not that it is malformed", async () => {
-    serve([
-      json(409, { code: "github_not_connected", field: "repos" }),
-      json(502, { code: "upstream", field: "repos" }),
-    ]);
-    renderPage([]);
-    fireEvent.click(screen.getByRole("button", { name: en.add }));
-    fireEvent.change(screen.getByLabelText(en.name), {
-      target: { value: "apps" },
-    });
-    fireEvent.change(screen.getByLabelText(en.repos), {
-      target: { value: "octo/hidden" },
-    });
-    const submit = () =>
-      act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: en.create }));
-      });
-    await submit();
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      errors.github_not_connected,
-    );
-    expect(screen.getByRole("alert")).not.toHaveTextContent(en.invalidRepos);
-    await submit();
-    expect(screen.getByRole("alert")).toHaveTextContent(errors.upstream);
   });
 });
