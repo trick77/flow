@@ -46,6 +46,11 @@ type fakeGitHub struct {
 	// private repositories the installations hold, by installation; public repositories only the anonymous
 	// lookup knows.
 	installations map[int64][]Repo
+	// paged serves installation repositories page by page (per_page, page); repoPages counts those requests and
+	// onRepos runs at each (under mu).
+	paged     bool
+	repoPages int
+	onRepos   func()
 	// userFails answers that many GET /user with 502; repoStatus answers GET /repos/{name} with a bare status.
 	userFails  int
 	repoStatus map[string]int
@@ -187,7 +192,20 @@ func (f *fakeGitHub) rest(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/user/installations/"):
 		id, _ := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/user/installations/"),
 			"/repositories"), 10, 64)
-		list := f.installations[id]
+		list := f.installations[id] // f.mu is held by serve
+		f.repoPages++
+		if f.onRepos != nil {
+			f.onRepos()
+		}
+		if f.paged {
+			// GitHub's paging: per_page from page.
+			per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			from := min(len(list), (page-1)*per)
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(list),
+				"repositories": list[from:min(len(list), from+per)]})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(list), "repositories": list})
 	case strings.HasPrefix(r.URL.Path, "/repos/"):
 		name := strings.TrimPrefix(r.URL.Path, "/repos/")
@@ -775,6 +793,66 @@ func TestListRepos_aQueryReachesPastTheCap(t *testing.T) {
 	// The cap counts matches: every big/ one (1'201) is cut at maxRepos, the others not read as matches.
 	if got := list("big/"); len(got) != maxRepos {
 		t.Errorf("matches capped: %d", len(got))
+	}
+}
+
+func TestListRepos_searchesReuseOneRead(t *testing.T) {
+	h := newHarness(t)
+	h.connect(t)
+	list := func(q string) []apitypes.GitHubRepo {
+		w := httptest.NewRecorder()
+		h.s.ListRepos(w, httptest.NewRequest(http.MethodGet, "/api/github/repos?query="+q, nil))
+		var out apitypes.GitHubRepoList
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out.Items
+	}
+	pages := func() int { h.f.mu.Lock(); defer h.f.mu.Unlock(); return h.f.repoPages }
+	// The description matches as in the picker's own search.
+	if got := list("FIRST"); len(got) != 1 || got[0].FullName != "octo/Alpha" {
+		t.Errorf("by description: %+v", got)
+	}
+	read := pages()
+	list("zeta")
+	list("mid")
+	if pages() != read {
+		t.Errorf("searches within %s read again: %d pages after %d", scanTTL, pages(), read)
+	}
+	h.clock.add(scanTTL)
+	list("zeta")
+	if pages() == read {
+		t.Error("a search after scanTTL used the old read")
+	}
+}
+
+func TestListRepos_aCancelledSearchStopsPaging(t *testing.T) {
+	h := newHarness(t)
+	h.connect(t)
+	many := make([]Repo, 0, 1000)
+	for i := range 1000 {
+		many = append(many, Repo{FullName: fmt.Sprintf("big/r%04d", i), DefaultBranch: "main"})
+	}
+	h.f.installations[1] = many
+	h.f.paged = true
+	ctx, cancel := context.WithCancel(t.Context())
+	// The browser gives up (a newer search) while the first page is read.
+	h.f.onRepos = cancel
+	w := httptest.NewRecorder()
+	h.s.ListRepos(w, httptest.NewRequest(http.MethodGet, "/api/github/repos?query=r0999", nil).WithContext(ctx))
+	h.f.mu.Lock()
+	pages := h.f.repoPages
+	h.f.mu.Unlock()
+	if pages != 1 {
+		t.Errorf("%d pages read after the cancel, want 1 of 10", pages)
+	}
+	if w.Code == http.StatusOK {
+		t.Errorf("a cancelled search answered %d %s", w.Code, w.Body)
+	}
+	// Not kept: the next search reads again, all of it.
+	h.f.onRepos = nil
+	w = httptest.NewRecorder()
+	h.s.ListRepos(w, httptest.NewRequest(http.MethodGet, "/api/github/repos?query=r0999", nil))
+	if !strings.Contains(w.Body.String(), "big/r0999") {
+		t.Errorf("after: %s", w.Body)
 	}
 }
 
