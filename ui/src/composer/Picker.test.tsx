@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import { MultiPicker, Picker } from "./Picker";
+import { fitPopup, MultiPicker, Picker } from "./Picker";
 
 function picker(onChange = vi.fn()) {
   render(
@@ -216,11 +216,29 @@ describe("Picker", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(open).toHaveFocus();
     fireEvent.click(open);
-    // A click on the padding keeps the focus; a click on All does not.
+    // A click anywhere in the menu, All and None included, keeps the focus
+    // in the field; only the field itself takes a click.
     expect(fireEvent.mouseDown(screen.getByRole("dialog"))).toBe(false);
     expect(
       fireEvent.mouseDown(screen.getByRole("button", { name: "All" })),
-    ).toBe(true);
+    ).toBe(false);
+    expect(fireEvent.mouseDown(screen.getByRole("combobox"))).toBe(true);
+    // Safari: a click on a button focuses nothing, the blur goes nowhere
+    // (relatedTarget null) before the click. The menu stays and the click
+    // acts.
+    fireEvent.blur(screen.getByRole("combobox"), { relatedTarget: null });
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
+    expect(onChange).toHaveBeenLastCalledWith(["a", "b"]);
+    fireEvent.blur(screen.getByRole("combobox"), { relatedTarget: null });
+    fireEvent.click(screen.getByRole("button", { name: "None" }));
+    expect(onChange).toHaveBeenLastCalledWith([]);
+    // The same on the trigger: the click closes the menu, not the blur.
+    fireEvent.blur(screen.getByRole("combobox"), { relatedTarget: null });
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    fireEvent.click(open);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    fireEvent.click(open);
     fireEvent.click(screen.getByRole("option", { name: "Berry" }));
     expect(onChange).toHaveBeenLastCalledWith(["a", "b"]);
     fireEvent.click(screen.getByRole("option", { name: "Apple" }));
@@ -262,5 +280,42 @@ describe("Picker", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Mode" }));
     expect(screen.getByText("Capped")).toBeInTheDocument();
+  });
+});
+
+describe("fitPopup", () => {
+  const rect = (top: number, bottom: number) =>
+    ({
+      top,
+      bottom,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: bottom - top,
+    }) as DOMRect;
+
+  function place(buttonTop: number, buttonBottom: number) {
+    const scroller = document.createElement("div");
+    scroller.style.overflowY = "auto";
+    const el = document.createElement("button");
+    scroller.append(el);
+    document.body.append(scroller);
+    scroller.getBoundingClientRect = () => rect(50, 650);
+    el.getBoundingClientRect = () => rect(buttonTop, buttonBottom);
+    const got = fitPopup(el);
+    scroller.remove();
+    return got;
+  }
+
+  it("opens below down to where the scrolling area ends", () => {
+    expect(place(100, 130)).toEqual({ placement: "down", maxHeight: 506 });
+  });
+
+  it("opens above when the room below is short and above is larger", () => {
+    expect(place(500, 530)).toEqual({ placement: "up", maxHeight: 436 });
+  });
+
+  it("stays below when above is no better", () => {
+    expect(place(200, 500)).toEqual({ placement: "down", maxHeight: 136 });
   });
 });

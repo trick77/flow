@@ -51,6 +51,37 @@ function usePopup(): [
   return [open, setOpen, wrap];
 }
 
+// The least height a menu is given below its button before it opens above
+// instead, in px.
+const MIN_BELOW = 220;
+
+// fitPopup is where a menu opened under el fits: the room between el and
+// the bottom of the nearest clipping ancestor (the timeline ends at the
+// composer) or, when that is short and the room above is larger, above el.
+export function fitPopup(el: HTMLElement): {
+  placement: "up" | "down";
+  maxHeight: number;
+} {
+  const r = el.getBoundingClientRect();
+  let top = 0;
+  let bottom = window.innerHeight;
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    const s = getComputedStyle(a);
+    if (/(auto|scroll|hidden|clip)/.test(s.overflowY)) {
+      const ar = a.getBoundingClientRect();
+      top = Math.max(top, ar.top);
+      bottom = Math.min(bottom, ar.bottom);
+      break;
+    }
+  }
+  const gap = 14;
+  const below = bottom - r.bottom - gap;
+  const above = r.top - top - gap;
+  return below >= MIN_BELOW || below >= above
+    ? { placement: "down", maxHeight: Math.max(below, 0) }
+    : { placement: "up", maxHeight: Math.max(above, 0) };
+}
+
 // matches: every word of the query occurs in the option's label or
 // description, ignoring case.
 function matches(o: PickerOption<string>, query: string): boolean {
@@ -432,7 +463,6 @@ export function MultiPicker<T extends string>({
   none,
   disabled = false,
   className = "picker",
-  placement = "down",
 }: {
   label: string;
   values: readonly T[];
@@ -445,11 +475,20 @@ export function MultiPicker<T extends string>({
   none: string;
   disabled?: boolean;
   className?: string;
-  placement?: "up" | "down";
 }) {
   const [open, setOpen, wrap] = usePopup();
   const button = useRef<HTMLButtonElement>(null);
   const menuId = useId();
+  // Where the menu fits, measured as it opens: below the button down to
+  // where the scrolling area ends, or above it when that room is short.
+  const [fit, setFit] = useState<ReturnType<typeof fitPopup>>({
+    placement: "down",
+    maxHeight: 0,
+  });
+  const show = () => {
+    if (button.current) setFit(fitPopup(button.current));
+    setOpen(true);
+  };
   const close = () => {
     setOpen(false);
     button.current?.focus();
@@ -463,9 +502,12 @@ export function MultiPicker<T extends string>({
         ? values.filter((x) => x !== v)
         : inOrder([...values, v]),
     );
-  // Focus that leaves the menu for elsewhere (Tab past None) closes it.
+  // Focus that moves to another element (Tab past None) closes it. A blur
+  // to nowhere does not: Safari focuses no button on a click, and a switch
+  // to another window is no choice; a click outside closes it (usePopup).
   const onBlur = (e: FocusEvent<HTMLDivElement>) => {
-    if (!wrap.current?.contains(e.relatedTarget as Node | null)) setOpen(false);
+    const to = e.relatedTarget as Node | null;
+    if (to && !wrap.current?.contains(to)) setOpen(false);
   };
   return (
     <div className="pick-wrap" ref={wrap}>
@@ -478,11 +520,11 @@ export function MultiPicker<T extends string>({
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => (open ? setOpen(false) : show())}
         onKeyDown={(e) => {
           if (e.key === "ArrowDown" || e.key === "ArrowUp") {
             e.preventDefault();
-            setOpen(true);
+            show();
           }
         }}
       >
@@ -491,7 +533,8 @@ export function MultiPicker<T extends string>({
       </button>
       {open && (
         <div
-          className={`pop ${placement} pop-find`}
+          className={`pop ${fit.placement} pop-find`}
+          style={fit.maxHeight > 0 ? { maxHeight: fit.maxHeight } : undefined}
           role="dialog"
           id={menuId}
           aria-label={label}
@@ -502,9 +545,11 @@ export function MultiPicker<T extends string>({
             e.stopPropagation();
             close();
           }}
+          // Focus stays in the search field on a click anywhere in the menu,
+          // select all and none included (their click still acts), the
+          // same in every browser.
           onMouseDown={(e) => {
-            const el = e.target as HTMLElement;
-            if (!el.closest("input, button")) e.preventDefault();
+            if (!(e.target instanceof HTMLInputElement)) e.preventDefault();
           }}
         >
           <SearchList
