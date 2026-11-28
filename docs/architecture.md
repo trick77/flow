@@ -478,9 +478,9 @@ ban or intrusion-prevention tool's), tables of its own. Measured in the lab `flo
   firewalld zone of its own for `flowbr0` (conflicts with Docker's runtime zone membership).
 - **Host additions**, by the owner's hand with `deploy/host-setup.sh` (preconditions in its header; baseline, dry
   run, verified diff, `OTHER_CHURN` names others' churn to show but not count; a third party's chain kept
-  first in FORWARD, when the host has one, first before and after: detected as FORWARD's first rule jumping to a
-  chain that is not Docker's (no name assumed), or named by `BAN_CHAIN` (empty: none); one named or recorded by the
-  setup must exist, `BAN_REQUIRE=1` refuses a host where none is found) and reversed by `deploy/host-teardown.sh`: firewalld policies `flow-sb-host` (range → host rejected),
+  first in FORWARD is never guessed: while FORWARD jumps to a chain that is not Docker's and nothing is recorded,
+  the setup refuses and asks for `BAN_CHAIN=<name>` (kept first before and after) or `BAN_CHAIN=` (none), and
+  records the answer; a recorded name must exist and be first, `BAN_REQUIRE=1` refuses without a name) and reversed by `deploy/host-teardown.sh`: firewalld policies `flow-sb-host` (range → host rejected),
   `flow-sb-docker` (range → other Docker bridges, also the routed hairpin back
   to another sandbox) and `flow-sb-lan` (range → 10/8, 172.16/12, 192.168/16, 169.254/16 with cloud metadata,
   100.64/10 behind the host, which it forwards otherwise: measured; so resolvers must be public or on the sandbox
