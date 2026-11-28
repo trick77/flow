@@ -520,7 +520,9 @@ and without a ban chain, then end to end with Flow itself.
   `flow` at L2: the host has no `br_netfilter`, so bridged frames meet no firewall (the lab blocks them only
   because its kernel has it). Hence: Flow's browser API is never served there
   (`sandboxes.OffSandboxNetwork`, which also refuses IPv6 link-local addresses, and the config refuses a
-  `BACKEND_ADDR` on the subnet), and everything listening
+  `BACKEND_ADDR` on the subnet; it judges addresses, not the interface a request came in on, so global IPv6 on
+  Flow's `flow` leg would pass: the bridge's IPv6 drop and Docker's `disable_ipv6` on that leg are the bar), and
+  everything listening
   on `flow` authenticates; flowd's own API takes only Flow's per-sandbox token. The guard judges the local address
   as well, so Flow's container must also be on the reverse proxy's network and the proxy must reach it there
   (Traefik: label `traefik.docker.network` naming the proxy's network, else Traefik may pick the `flow` address):
