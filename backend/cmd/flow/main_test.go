@@ -144,7 +144,17 @@ func TestSerialChanges(t *testing.T) {
 	read := make(chan struct{}, 2)
 	hold := make(chan struct{})
 	first := true
-	lookup := func(context.Context, string) (apitypes.Sandbox, error) {
+	var others []string
+	lookup := func(ctx context.Context, id string) (apitypes.Sandbox, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("the lookup has no deadline")
+		}
+		if id != "p1" {
+			mu.Lock()
+			others = append(others, id)
+			mu.Unlock()
+			return apitypes.Sandbox{State: apitypes.SandboxStateWarm}, nil
+		}
 		mu.Lock()
 		sb := apitypes.Sandbox{State: apitypes.SandboxStateSetup, Busy: busy}
 		wait := first
@@ -159,13 +169,23 @@ func TestSerialChanges(t *testing.T) {
 	publish := func(e apitypes.AppEvent) {
 		mu.Lock()
 		defer mu.Unlock()
-		published = append(published, e.Sandbox.Busy)
+		if e.ProjectID == "p1" {
+			published = append(published, e.Sandbox.Busy)
+		}
 	}
 	changed := serialChanges(lookup, publish)
 
 	done := make(chan struct{})
 	go func() { changed("p1"); done <- struct{}{} }()
 	<-read // the older change read busy false and is held
+	// Another project's change does not wait for it.
+	other := make(chan struct{})
+	go func() { changed("p2"); close(other) }()
+	select {
+	case <-other:
+	case <-time.After(5 * time.Second):
+		t.Fatal("another project's change waited for p1's")
+	}
 	mu.Lock()
 	busy = true
 	mu.Unlock()
@@ -182,5 +202,8 @@ func TestSerialChanges(t *testing.T) {
 	defer mu.Unlock()
 	if len(published) != 2 || published[0] || !published[1] {
 		t.Errorf("published busy %v, want [false true]", published)
+	}
+	if len(others) != 1 {
+		t.Errorf("p2's changes %v", others)
 	}
 }
