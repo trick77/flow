@@ -21,7 +21,9 @@ import (
 //
 // IPv6 link-local addresses (remote or local) are refused too: the sandbox network has no IPv6 subnet to judge
 // by, and a sandbox that got IPv6 frames through to Flow's leg on it would speak link-local there (the proxy never
-// does). Host-setup drops all IPv6 on the bridge and Docker leaves the leg without IPv6; this holds without both.
+// does). Judged by address only, not by the interface a request came in on: two global IPv6 addresses (a leg
+// that took a SLAAC address from a sandbox's router advertisement) pass. What keeps IPv6 off that leg is
+// host-setup's drop of all IPv6 on the bridge and Docker leaving the leg without IPv6.
 func OffSandboxNetwork(h http.Handler, subnet netip.Prefix) http.Handler {
 	return offSandboxNetwork(h, subnet, net.InterfaceAddrs, slog.Default())
 }
