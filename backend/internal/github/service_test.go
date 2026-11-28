@@ -744,6 +744,40 @@ func TestListRepos(t *testing.T) {
 	}
 }
 
+func TestListRepos_aQueryReachesPastTheCap(t *testing.T) {
+	h := newHarness(t)
+	h.connect(t)
+	// More than maxRepos in the first installation, the one sought behind them.
+	many := make([]Repo, 0, maxRepos+201)
+	for i := range maxRepos + 200 {
+		many = append(many, Repo{FullName: fmt.Sprintf("big/r%04d", i), DefaultBranch: "main"})
+	}
+	h.f.installations[1] = append(many, Repo{FullName: "big/needle", DefaultBranch: "main"})
+	list := func(q string) []apitypes.GitHubRepo {
+		w := httptest.NewRecorder()
+		h.s.ListRepos(w, httptest.NewRequest(http.MethodGet, "/api/github/repos?query="+q, nil))
+		var out apitypes.GitHubRepoList
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out.Items
+	}
+	all := list("")
+	if len(all) != maxRepos {
+		t.Errorf("unfiltered: %d, want the cap", len(all))
+	}
+	for _, r := range all {
+		if r.FullName == "big/needle" {
+			t.Error("the unfiltered list reached past the cap")
+		}
+	}
+	if got := list("NEEDLE"); len(got) != 1 || got[0].FullName != "big/needle" {
+		t.Errorf("query past the cap: %+v", got)
+	}
+	// The cap counts matches: every big/ one (1'201) is cut at maxRepos, the others not read as matches.
+	if got := list("big/"); len(got) != maxRepos {
+		t.Errorf("matches capped: %d", len(got))
+	}
+}
+
 func TestDefaultBranch(t *testing.T) {
 	h := newHarness(t)
 	ctx := t.Context()
