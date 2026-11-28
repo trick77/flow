@@ -40,7 +40,7 @@ services:
       traefik.docker.network: ${PROXY_NETWORK:-traefik}
       traefik.http.routers.flow.rule: Host(`${BACKEND_PUBLIC_FQDN:?set BACKEND_PUBLIC_FQDN in .env}`)
       traefik.http.routers.flow.entrypoints: websecure
-      # The host's wildcard certificate (Traefik's file provider) covers the name: no certresolver.
+      # Whatever certificate Traefik serves for the name (its own wildcard, say) covers it: no certresolver.
       traefik.http.routers.flow.tls: "true"
       traefik.http.routers.flow.service: flow
       traefik.http.services.flow.loadbalancer.server.port: "8080"
