@@ -60,6 +60,9 @@ POLICY_INCUS=flow-sb-incus
 POLICIES="$POLICY_HOST $POLICY_DOCKER $POLICY_LAN $POLICY_INCUS"
 RULE_UNIT=flow-sandbox-published.service
 RULE_UNIT_FILE=/etc/systemd/system/$RULE_UNIT
+IPV6_UNIT=flow-sandbox-ipv6.service
+IPV6_UNIT_FILE=/etc/systemd/system/$IPV6_UNIT
+IPV6_TABLE=flow_sandbox
 LISTEN_UNIT=flow-incus-listen.service
 LISTEN_UNIT_FILE=/etc/systemd/system/$LISTEN_UNIT
 DROPIN=/etc/systemd/system/incus.service.d/flow-order.conf
@@ -120,14 +123,12 @@ recorded() { grep -qxF "$*" "$MANIFEST" 2>/dev/null; }
 # pool_path_line POOL prints the path.
 pool_path_line() { sed -n "s/^pool-path $1 //p" "$MANIFEST" 2>/dev/null | tail -n 1; }
 
-# The rich rules of each policy, one per line, in firewalld's own spelling. family ipv6 needs a source
-# ("INVALID_RULE: no element, no source, no destination"), hence ::/0.
+# The rich rules of each policy, one per line, in firewalld's own spelling. IPv6 has none: it never gets past the
+# bridge (IPV6_NFT). A zone-wide IPv6 reject here would hit every Docker network (firewalld matches no interface,
+# all bridges are in zone docker): measured, it cut containers on an IPv6 network off from the host over IPv6.
 policy_rules() {
 	case "$1" in
-	"$POLICY_HOST")
-		printf 'rule family="ipv4" source address="%s" reject\n' "$RANGE"
-		printf 'rule family="ipv6" source address="::/0" reject\n'
-		;;
+	"$POLICY_HOST") printf 'rule family="ipv4" source address="%s" reject\n' "$RANGE" ;;
 	"$POLICY_DOCKER") printf 'rule family="ipv4" source address="%s" reject\n' "$RANGE" ;;
 	"$POLICY_LAN")
 		for d in $LAN_DESTINATIONS; do
@@ -186,6 +187,25 @@ trusted_fp() {
 # The DOCKER-USER rule: sandboxes may not open connections that Docker DNATs to a published port of another
 # container (firewalld accepts `ct status dnat` before any policy, so only DOCKER-USER can say no).
 RULE_SPEC="-i $BRIDGE -s $RANGE -m conntrack --ctstate DNAT -j REJECT --reject-with icmp-port-unreachable"
+
+# Sandboxes have no IPv6: Flow's table drops every IPv6 frame that enters BRIDGE from any port, before the bridge
+# forwards it to another port (Flow's container) or hands it to the host (its link-local address, multicast, routes
+# to other Docker networks, published ports). The bridge family's hooks see bridged frames without br_netfilter;
+# matched by the bridge's name, so a re-created bridge is covered too. One nft command is one transaction: loading
+# it again replaces the table, never doubles the rule. Measured without it (lab, bridge-nf-call sysctls 0): a
+# sandbox reached the host over link-local (ping, published ports through docker-proxy) once the zone-wide reject
+# was gone, and Flow's container at L2 whenever its interface on BRIDGE has IPv6. Rejected: Incus'
+# security.ipv6_filtering (refuses to start a NIC without br_netfilter: "security.ipv6_filtering requires bridge
+# netfilter: sysctl net.bridge.bridge-nf-call-ip6tables not enabled", Incus 6.0.4), narrowing the firewalld reject
+# (it can only match addresses; the open path used a link-local source, which every bridge's containers share).
+IPV6_NFT="add table bridge $IPV6_TABLE; flush table bridge $IPV6_TABLE; add chain bridge $IPV6_TABLE ipv6 { type filter hook prerouting priority filter; policy accept; }; add rule bridge $IPV6_TABLE ipv6 meta ibrname \"$BRIDGE\" ether type ip6 drop"
+ipv6_table_ok() {
+	nft list chain bridge "$IPV6_TABLE" ipv6 2>/dev/null | grep -qF "meta ibrname \"$BRIDGE\" ether type ip6 drop"
+}
+# The second layer: no IPv6 on the host's side of BRIDGE (no link-local address; the kernel discards IPv6 received
+# there before netfilter: measured, table gone and bridge-nf-call 0, nothing reached prerouting). Docker leaves it on for an IPv4-only network (measured: link-local present, disable_ipv6 0) and keeps it
+# across its restarts (measured); a re-created bridge has it on again until Docker next restarts, the table holds.
+ipv6_sysctl() { printf '/proc/sys/net/ipv6/conf/%s/disable_ipv6\n' "$BRIDGE"; }
 
 # --- address arithmetic (awk: POSIX sh has no 32-bit integers to rely on) ---
 
@@ -362,9 +382,11 @@ preflight() {
 	if [ "$(sysctl -n net.bridge.bridge-nf-call-iptables 2>/dev/null)" = 1 ]; then
 		warn "br_netfilter is active: bridged traffic passes iptables, so same-bridge results differ from a host without it"
 	fi
+	# The bridge family with meta ibrname (Incus' own filters need the family too); -c changes nothing.
+	nft -c "$IPV6_NFT" >/dev/null 2>&1 || die "nftables cannot load Flow's bridge table (bridge family, meta ibrname): $(nft -c "$IPV6_NFT" 2>&1 | head -n 1)"
 	for n in $(docker network ls -q --filter driver=bridge); do
 		if [ "$(docker network inspect -f '{{.EnableIPv6}}' "$n")" = true ]; then
-			warn "Docker network $(docker network inspect -f '{{.Name}}' "$n") has IPv6: the zone-wide IPv6 reject affects it"
+			log "Docker network $(docker network inspect -f '{{.Name}}' "$n") has IPv6: left alone, IPv6 is dropped on $BRIDGE only"
 		fi
 	done
 }
@@ -418,10 +440,10 @@ fw_lines() {
 		rich { line = $0; gsub(/^[ \t]+/, "", line); if (line != "") print pfx " rich " line }'
 }
 
-# explained LINE: a difference Flow's setup accounts for (its bridge, subnet, range, policies, rule).
+# explained LINE: a difference Flow's setup accounts for (its bridge, subnet, range, policies, rule, table).
 explained() {
 	case "$1" in
-	*"$BRIDGE"* | *flow-sb-* | *"$SUBNET"* | *"$RANGE"*) return 0 ;;
+	*"$BRIDGE"* | *flow-sb-* | *"$SUBNET"* | *"$RANGE"* | *"nft bridge $IPV6_TABLE "*) return 0 ;;
 	esac
 	return 1
 }

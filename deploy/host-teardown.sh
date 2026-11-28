@@ -106,6 +106,22 @@ if recorded "unit $RULE_UNIT"; then
 		[ "$DRY_RUN" = 1 ] && break
 	done
 fi
+# No IPv6 on the bridge: the unit (no ExecStop), its table, the bridge's sysctl back to Docker's 0 while the bridge
+# stays (a bridge the teardown removes below goes with it).
+if recorded "unit $IPV6_UNIT" && [ -f "$IPV6_UNIT_FILE" ]; then
+	log "removing $IPV6_UNIT"
+	run systemctl disable --now --quiet "$IPV6_UNIT"
+	run rm -f "$IPV6_UNIT_FILE"
+	run systemctl daemon-reload
+fi
+if recorded "nft-table $IPV6_TABLE" && nft list table bridge "$IPV6_TABLE" >/dev/null 2>&1; then
+	log "deleting nftables table bridge $IPV6_TABLE"
+	run nft delete table bridge "$IPV6_TABLE"
+fi
+if recorded "ipv6-off $BRIDGE" && [ -e "$(ipv6_sysctl)" ] && [ "$(cat "$(ipv6_sysctl)")" = 1 ]; then
+	log "switching IPv6 on $BRIDGE back on (Docker's default)"
+	run sh -c 'echo 0 >"$1"' sh "$(ipv6_sysctl)"
+fi
 # Stopping it changes nothing (no ExecStop): Incus keeps listening where it does.
 if recorded "unit $LISTEN_UNIT" && [ -f "$LISTEN_UNIT_FILE" ]; then
 	log "removing $LISTEN_UNIT"
