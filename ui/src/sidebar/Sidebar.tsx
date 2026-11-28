@@ -17,8 +17,10 @@ import { formatNumber } from "../i18n/format";
 import { AgentPill } from "../shell/AgentPill";
 import { projectBadge } from "../shell/badge";
 import { SIDEBAR_ID } from "../shell/drawer";
+import { sandboxKeys } from "../shell/Header";
 import { Icon } from "../shell/Icon";
 import { UserMenu } from "../shell/UserMenu";
+import { sandboxDot } from "./sandbox";
 import {
   groupByProject,
   groupSessions,
@@ -100,6 +102,109 @@ function SessionRow({
         <AgentPill provider={session.provider} />
       </span>
     </button>
+  );
+}
+
+// SandboxDot is a project's sandbox state as a dot, named for screen readers
+// and in its tooltip.
+function SandboxDotMark({ project }: { project: Project }) {
+  const { t } = useTranslation("shell");
+  const label = t(sandboxKeys[project.sandbox.state] ?? "sandboxChipNone");
+  return (
+    <span
+      className={`sb-dot dot-${sandboxDot(project.sandbox)}`}
+      role="img"
+      aria-label={label}
+      title={label}
+    />
+  );
+}
+
+// AddButton is the "+" that starts a new session in one project.
+function AddButton({
+  project,
+  onAdd,
+}: {
+  project: Project;
+  onAdd: (projectId: string) => void;
+}) {
+  const { t } = useTranslation("sidebar");
+  const label = t("newSessionIn", { project: project.name });
+  return (
+    <button
+      type="button"
+      className="icon-btn sb-add"
+      aria-label={label}
+      title={label}
+      onClick={() => onAdd(project.id)}
+    >
+      <Icon name="plus" />
+    </button>
+  );
+}
+
+// ProjectHead is a project with sessions in the "By project" grouping: its
+// badge, name and session count, the sandbox dot and the "+".
+function ProjectHead({
+  project,
+  count,
+  onAdd,
+}: {
+  project: Project;
+  count: number;
+  onAdd?: (projectId: string) => void;
+}) {
+  return (
+    <h2 className="sb-section-h sb-proj-h">
+      <span className="mono-badge" aria-hidden="true">
+        {projectBadge(project.name)}
+      </span>
+      <span className="nm">{project.name}</span>
+      <span className="n">{formatNumber(count)}</span>
+      <span className="grow" />
+      <SandboxDotMark project={project} />
+      {onAdd && <AddButton project={project} onAdd={onAdd} />}
+    </h2>
+  );
+}
+
+// IdleProjects is the projects without sessions, one line each after the
+// sections: a project a day old and forty never used stay a short, calm
+// list under the work that runs. A click on a line starts a session in it,
+// as its "+" does (the "+" is the keyboard's way).
+function IdleProjects({
+  projects,
+  onAdd,
+}: {
+  projects: Project[];
+  onAdd?: (projectId: string) => void;
+}) {
+  const { t } = useTranslation("sidebar");
+  return (
+    <section className="sb-section sb-idle" aria-label={t("noSessionsYet")}>
+      <h2 className="sb-section-h">
+        <span>{t("noSessionsYet")}</span>
+        <span className="n">{formatNumber(projects.length)}</span>
+      </h2>
+      <ul className="sb-plist">
+        {projects.map((p) => (
+          <li
+            key={p.id}
+            className="sb-prow"
+            onClick={(e) => {
+              if (!(e.target as HTMLElement).closest("button")) onAdd?.(p.id);
+            }}
+          >
+            <span className="mono-badge" aria-hidden="true">
+              {projectBadge(p.name)}
+            </span>
+            <span className="nm">{p.name}</span>
+            <SandboxDotMark project={p} />
+            {onAdd && <AddButton project={p} onAdd={onAdd} />}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -229,12 +334,19 @@ export function Sidebar({
   drawerOpen = false,
   onCloseDrawer,
   onOpenSettings,
+  onOpenProjects,
+  projectsError = null,
 }: {
   sessions: SessionSummary[];
   projects: Project[];
   selectedId?: string;
   onSelect: (id: string) => void;
-  onNewSession?: () => void;
+  // projectId: the project to start in (a project's "+"); without one the
+  // new session's own default.
+  onNewSession?: (projectId?: string) => void;
+  onOpenProjects?: () => void;
+  // The project list failed to load: an empty list is not "no projects".
+  projectsError?: ErrorCode | null;
   // newSessionOpen marks New session as the view shown.
   newSessionOpen?: boolean;
   loaded: boolean;
@@ -305,8 +417,14 @@ export function Sidebar({
     if (narrow) onCloseDrawer?.();
   };
   const startNew = onNewSession
+    ? (projectId?: string) => {
+        onNewSession(projectId);
+        if (narrow) onCloseDrawer?.();
+      }
+    : undefined;
+  const openProjects = onOpenProjects
     ? () => {
-        onNewSession();
+        onOpenProjects();
         if (narrow) onCloseDrawer?.();
       }
     : undefined;
@@ -344,27 +462,65 @@ export function Sidebar({
       />
     ));
 
+  // Without any project there is nothing to start: say so and point to the
+  // projects page (unless the list failed to load; the error shows then).
+  const noProjects =
+    projects.length === 0 && !projectsError ? (
+      <div className="sb-none">
+        <p className="sb-empty">{t("noProjects")}</p>
+        {openProjects && (
+          <button type="button" className="sb-link" onClick={openProjects}>
+            {t("addProject")}
+          </button>
+        )}
+      </div>
+    ) : null;
+
   const sectionList = () => {
     if (grouping === "project") {
       const groups = groupByProject(sessions, projects);
-      if (groups.length === 0) return <p className="sb-empty">{t("empty")}</p>;
-      return groups.map((g) => {
-        const label = g.name ?? t("otherProjects");
-        return (
-          <section
-            className="sb-section"
-            key={g.projectId ?? ""}
-            aria-label={label}
-          >
-            <h2 className="sb-section-h">
-              <span>{label}</span>
-              <span className="n">{formatNumber(g.sessions.length)}</span>
-            </h2>
-            {rows(g.sessions)}
-          </section>
-        );
-      });
+      if (groups.length === 0)
+        return noProjects ?? <p className="sb-empty">{t("empty")}</p>;
+      const idle = groups.flatMap((g) =>
+        g.project && g.sessions.length === 0 ? [g.project] : [],
+      );
+      return (
+        <>
+          {groups.map((g) => {
+            if (g.sessions.length === 0) return null;
+            if (!g.project) {
+              const label = t("otherProjects");
+              return (
+                <section className="sb-section" key="" aria-label={label}>
+                  <h2 className="sb-section-h">
+                    <span>{label}</span>
+                    <span className="n">{formatNumber(g.sessions.length)}</span>
+                  </h2>
+                  {rows(g.sessions)}
+                </section>
+              );
+            }
+            return (
+              <section
+                className="sb-section"
+                key={g.project.id}
+                aria-label={g.project.name}
+              >
+                <ProjectHead
+                  project={g.project}
+                  count={g.sessions.length}
+                  onAdd={startNew}
+                />
+                {rows(g.sessions)}
+              </section>
+            );
+          })}
+          {idle.length > 0 && <IdleProjects projects={idle} onAdd={startNew} />}
+        </>
+      );
     }
+    // By status stays as it was without sessions: New session sits right
+    // above, and the centre says "No sessions yet" with its own button.
     const sections = groupSessions(sessions);
     return SECTION_ORDER.map((id) => (
       <section className="sb-section" key={id} aria-label={t(sectionKeys[id])}>
@@ -426,7 +582,7 @@ export function Sidebar({
                 aria-label={t("newSession")}
                 aria-current={newSessionOpen ? "page" : undefined}
                 title={t("newSession")}
-                onClick={startNew}
+                onClick={() => startNew()}
               >
                 <Icon name="plus" />
               </button>
@@ -462,7 +618,7 @@ export function Sidebar({
                 type="button"
                 className="nav-row"
                 aria-current={newSessionOpen ? "page" : undefined}
-                onClick={startNew}
+                onClick={() => startNew()}
               >
                 <span className="plus-disc" aria-hidden="true">
                   <Icon name="plus" />
@@ -492,6 +648,7 @@ export function Sidebar({
             sessions={sessions}
             projects={projects}
             onSelect={select}
+            onNewSession={startNew}
             onClose={() => setSearching(false)}
           />,
           document.body,

@@ -83,7 +83,9 @@ function Title({
   );
 }
 
-const sandboxKeys = {
+// sandboxKeys name a sandbox's state as the header chip and the sidebar's
+// project dot say it.
+export const sandboxKeys = {
   none: "sandboxChipNone",
   setup: "sandboxChipSetup",
   warm: "sandboxChipWarm",

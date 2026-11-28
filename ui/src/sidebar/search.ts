@@ -67,6 +67,31 @@ export function highlight(text: string, words: readonly string[]): Part[] {
   return parts;
 }
 
+// How many projects the palette lists at most.
+export const PROJECT_LIMIT = 8;
+
+export interface ProjectResult {
+  projectId: string;
+  name: Part[];
+}
+
+// searchProjects is the palette's projects, to start a session in: with
+// terms, those whose name holds every term, in the list's order; without,
+// none, unless withoutQuery (no session to list: the palette would be
+// empty), then the first ones.
+export function searchProjects(
+  projects: readonly { id: string; name: string }[],
+  query: string,
+  withoutQuery = false,
+): ProjectResult[] {
+  const words = terms(query);
+  if (words.length === 0 && !withoutQuery) return [];
+  return projects
+    .filter((p) => words.every((w) => contains(p.name, w)))
+    .slice(0, PROJECT_LIMIT)
+    .map((p) => ({ projectId: p.id, name: highlight(p.name, words) }));
+}
+
 const recency = (a: SessionSummary, b: SessionSummary) =>
   Date.parse(b.lastActivityAt) - Date.parse(a.lastActivityAt) ||
   a.id.localeCompare(b.id);

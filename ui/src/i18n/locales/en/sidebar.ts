@@ -19,6 +19,8 @@ export const sidebar = {
   searchMatchesLabel: "Matching sessions",
   searchNone: "No session matches.",
   searchNoSessions: "No sessions yet.",
+  // The palette's projects, each starting a new session in it.
+  searchProjects: "Projects",
   groupLabel: "Group sessions",
   groupByStatus: "By status",
   groupByProject: "By project",
@@ -38,6 +40,12 @@ export const sidebar = {
   sectionDone: "Done",
   sectionIdle: "Idle",
   empty: "Nothing here",
+  // Grouped by project: a project without sessions, its "+" button, and the
+  // list without any project.
+  noSessionsYet: "No sessions yet",
+  newSessionIn: "New session in {{project}}",
+  noProjects: "No projects yet.",
+  addProject: "Add a project",
   loading: "Loading sessions…",
   statusApproval: "Approval",
   statusQuestion: "Question",

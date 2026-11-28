@@ -116,6 +116,54 @@ describe("SearchPalette", () => {
     expect(input()).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("finds projects to start a session in, ones without sessions too", () => {
+    const onNewSession = vi.fn();
+    const withEmpty = [
+      ...projects,
+      { ...projects[0], id: "p3", name: "ovh-restock" },
+    ];
+    const { onClose, onSelect } = palette({
+      projects: withEmpty,
+      onNewSession,
+    });
+    // No query: sessions only.
+    expect(screen.queryByText("Projects")).not.toBeInTheDocument();
+    fireEvent.change(input(), { target: { value: "ovh" } });
+    expect(screen.queryByText("No session matches.")).not.toBeInTheDocument();
+    const opt = screen.getByRole("option", {
+      name: "New session in ovh-restock",
+    });
+    expect(opt.querySelector("mark")?.textContent).toBe("ovh");
+    expect(opt).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input(), { key: "Enter" });
+    expect(onNewSession).toHaveBeenCalledWith("p3");
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("lists sessions then matching projects, arrows over both", () => {
+    const onNewSession = vi.fn();
+    palette({ onNewSession });
+    fireEvent.change(input(), { target: { value: "harbor" } });
+    const opts = options();
+    expect(opts).toHaveLength(2);
+    expect(opts[0]).toHaveTextContent("Persist sidebar width");
+    expect(opts[1]).toHaveAccessibleName("New session in harbor");
+    fireEvent.keyDown(input(), { key: "ArrowDown" });
+    expect(opts[1]).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(opts[1]);
+    expect(onNewSession).toHaveBeenCalledWith("p2");
+  });
+
+  it("lists every project while there is no session", () => {
+    palette({ sessions: [], onNewSession: vi.fn() });
+    expect(screen.getByRole("status")).toHaveTextContent("No sessions yet.");
+    expect(options().map((o) => o.getAttribute("aria-label"))).toEqual([
+      "New session in riptide",
+      "New session in harbor",
+    ]);
+  });
+
   it("counts every match when it lists only the first ones", () => {
     const many = Array.from({ length: 1203 }, (_, i) =>
       s(`m${i}`, `flow task ${i}`, "2026-11-01T00:00:00Z"),
