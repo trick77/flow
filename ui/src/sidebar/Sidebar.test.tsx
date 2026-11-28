@@ -195,6 +195,49 @@ describe("Sidebar", () => {
     expect(props.onNewSession).toHaveBeenLastCalledWith("pa");
   });
 
+  it("keeps the dot and the + out of the heading, the project out of its rows", () => {
+    renderSidebar({ grouping: "project" });
+    const alpha = screen.getByRole("region", { name: "alpha" });
+    expect(
+      within(alpha).getByRole("heading", { level: 2 }),
+    ).toHaveAccessibleName(/^alpha\s*3$/);
+    const head = within(alpha).getByRole("heading", { level: 2 });
+    expect(within(head).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(head).queryByRole("img")).not.toBeInTheDocument();
+    const row = within(alpha).getByRole("button", { name: /Needs an answer/ });
+    expect(row).toHaveClass("in-proj");
+    expect(row).not.toHaveTextContent("alpha");
+    // By status the rows keep their project.
+    cleanup();
+    renderSidebar();
+    expect(
+      screen.getByRole("button", { name: /Needs an answer/ }),
+    ).toHaveTextContent("alpha");
+  });
+
+  it("lists projects without sessions inert when nothing can start", () => {
+    renderSidebar({
+      sessions: [],
+      grouping: "project",
+      onNewSession: undefined,
+    });
+    const row = screen.getByText("alpha").closest("li");
+    expect(row).not.toHaveClass("can-add");
+    expect(screen.queryByRole("button", { name: /New session in/ })).toBeNull();
+  });
+
+  it("says nothing about projects when the session list failed", () => {
+    renderSidebar({
+      sessions: [],
+      projects: [],
+      grouping: "project",
+      error: "internal",
+    });
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.queryByText(en.noProjects)).not.toBeInTheDocument();
+    expect(screen.queryByText(en.empty)).not.toBeInTheDocument();
+  });
+
   it("closes the drawer after a + on narrow screens", () => {
     const { props } = renderSidebar({
       sessions: [],

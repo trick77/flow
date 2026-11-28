@@ -83,12 +83,30 @@
 /* Grouped by project: a project's head (badge, name, count, the sandbox
    dot and the "+" at the right), and the projects without sessions, one
    line each, at the end. */
-/* Two classes: index.css (loaded after this file) sets the head's padding. */
-.sb-section-h.sb-proj-h {
+.sb-proj-head {
+  display: flex;
+  align-items: center;
   gap: 7px;
   height: 24px;
   margin-bottom: 2px;
   padding: 0 0 0 8px;
+}
+/* Two classes: index.css (loaded after this file) sets the head's margin
+   and padding. */
+.sb-section-h.sb-proj-h {
+  flex: 1 1 auto;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+/* A session under its project's head: title and status on one line, the
+   branch below; no project line. */
+.srow.in-proj {
+  grid-template-rows: 20px 16px;
+}
+.srow.in-proj .s-title {
+  grid-column: 1;
 }
 .sb-proj-h .nm,
 .sb-prow .nm {
@@ -99,9 +117,6 @@
 }
 .sb-proj-h .n {
   flex: 0 0 auto;
-}
-.sb-proj-h .grow {
-  flex: 1 1 auto;
 }
 .sb-plist {
   margin: 0;
@@ -117,10 +132,12 @@
   border-radius: 6px;
   color: var(--color-ink-dim);
   font-size: 0.8125rem;
-  cursor: pointer;
   transition: background-color 0.12s;
 }
-.sb-prow:hover {
+.sb-prow.can-add {
+  cursor: pointer;
+}
+.sb-prow.can-add:hover {
   background: var(--color-raised);
 }
 .sb-prow .nm {
