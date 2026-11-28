@@ -18,6 +18,10 @@ import (
 // Flow's container must therefore be on the reverse proxy's network too, and the proxy must reach it there
 // (Traefik: label traefik.docker.network naming that network); a container whose only network is the sandbox
 // network refuses every request but loopback ones. That is logged as an error at start.
+//
+// IPv6 link-local addresses (remote or local) are refused too: the sandbox network has no IPv6 subnet to judge
+// by, and a sandbox that got IPv6 frames through to Flow's leg on it would speak link-local there (the proxy never
+// does). Host-setup drops all IPv6 on the bridge and Docker leaves the leg without IPv6; this holds without both.
 func OffSandboxNetwork(h http.Handler, subnet netip.Prefix) http.Handler {
 	return offSandboxNetwork(h, subnet, net.InterfaceAddrs, slog.Default())
 }
@@ -42,7 +46,7 @@ func offSandboxNetwork(h http.Handler, subnet netip.Prefix, addrs func() ([]net.
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		local, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
-		if inSubnet(subnet, r.RemoteAddr) || local != nil && inSubnet(subnet, local.String()) {
+		if onSandboxNetwork(subnet, r.RemoteAddr) || local != nil && onSandboxNetwork(subnet, local.String()) {
 			w.Header().Set("Connection", "close")
 			httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeForbidden, "not served on the sandbox network"))
 			return
@@ -51,7 +55,9 @@ func offSandboxNetwork(h http.Handler, subnet netip.Prefix, addrs func() ([]net.
 	})
 }
 
-func inSubnet(subnet netip.Prefix, hostport string) bool {
+// onSandboxNetwork: hostport lies in subnet or is IPv6 link-local (with or without a zone).
+func onSandboxNetwork(subnet netip.Prefix, hostport string) bool {
 	ap, err := netip.ParseAddrPort(hostport)
-	return err == nil && subnet.IsValid() && subnet.Contains(ap.Addr().Unmap())
+	a := ap.Addr().Unmap()
+	return err == nil && (a.Is6() && a.IsLinkLocalUnicast() || subnet.IsValid() && subnet.Contains(a))
 }
