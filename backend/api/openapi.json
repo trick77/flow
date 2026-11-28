@@ -93,7 +93,7 @@
     "/api/connections/github/device/poll": {
       "post": {
         "tags": ["connections"], "operationId": "pollGitHubDeviceFlow", "x-flow-area": "connections",
-        "summary": "Poll GitHub device flow", "description": "Pending until the owner confirmed on GitHub. Flow asks GitHub at most at GitHub's interval; a poll in between answers pending from memory. A poll while Flow holds no code answers the connection as it stands. An error answer (502, 500) means the code is over: poll no further.",
+        "summary": "Poll GitHub device flow", "description": "Pending until the owner confirmed on GitHub. Flow asks GitHub at most at GitHub's interval; a poll in between answers pending from memory. A poll while Flow holds no code answers the connection as it stands, with noCode set. An error answer (502, 500) means the code is over: poll no further.",
         "responses": { "200": { "$ref": "#/components/responses/GitHubConnection" }, "502": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
@@ -540,7 +540,7 @@
       },
       "GitHubState": {
         "type": "string",
-        "description": "disconnected: no connection (in a poll answer: the code was denied, or Flow holds no code and no connection). pending: a device code is out (in a poll answer: not confirmed yet, or confirmed and the account not read yet). connected: Flow holds a renewable authorization (in a poll answer: also when Flow holds no code but the connection exists, e.g. another tab's poll completed it). expired: the authorization can no longer be renewed, the owner connects again (in a poll answer: the device code expired, or Flow holds no code and the stored authorization is expired).",
+        "description": "disconnected: no connection (in a poll answer: the owner denied the code on GitHub; with noCode: Flow holds no code and no connection). pending: a device code is out (in a poll answer: not confirmed yet, or confirmed and the account not read yet). connected: Flow holds a renewable authorization (in a poll answer: also when Flow holds no code but the connection exists, e.g. another tab's poll completed it). expired: the authorization can no longer be renewed, the owner connects again (in a poll answer: the device code expired, or Flow holds no code and the stored authorization is expired).",
         "enum": ["disconnected", "pending", "connected", "expired"]
       },
       "GitHubConnection": {
@@ -552,7 +552,8 @@
           "connectedAt": { "type": "string", "format": "date-time", "description": "When the owner connected." },
           "tokenExpiresAt": { "type": "string", "format": "date-time", "description": "When the current 8-hour user token ends; Flow renews it before." },
           "refreshExpiresAt": { "type": "string", "format": "date-time", "description": "When the authorization ends unless renewed: the owner connects again by then." },
-          "intervalSeconds": { "type": "integer", "description": "Poll answers only: the interval in force after GitHub asked to slow down." }
+          "intervalSeconds": { "type": "integer", "description": "Poll answers only: the interval in force after GitHub asked to slow down." },
+          "noCode": { "type": "boolean", "description": "Poll answers only: Flow holds no device code (it ended: a Flow restart, another tab's poll, a disconnect); state is the connection as it stands. A disconnected answer with it is not a denial: the owner starts again." }
         }
       },
       "ClaudeSignIn": {

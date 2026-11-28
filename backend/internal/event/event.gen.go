@@ -482,6 +482,9 @@ type PermissionResolved struct {
 	Decision  PermissionDecision `json:"decision"`
 	// The owner's note with a deny, passed to the agent.
 	Message string `json:"message,omitempty"`
+	// With allow_always: the host answered by itself, the owner allowed this exact request for the session earlier
+	// (one the provider offered no rule for).
+	Remembered bool `json:"remembered,omitempty"`
 }
 
 // QuestionOption is part of the contract.
