@@ -9,8 +9,8 @@
 # What it adds (docs/architecture.md, "Sandbox network"; measured in the lab, flow-net-findings):
 #   1. Docker network $DOCKER_NETWORK on bridge $BRIDGE ($SUBNET, Docker allocating only from $DOCKER_RANGE): Docker
 #      provides forwarding, masquerading, the firewalld zone `docker` and the separation from other Docker networks.
-#   2. firewalld policies flow-sb-host (the sandbox range may not reach the host; IPv6 from the zone `docker` is
-#      rejected), flow-sb-docker (nor other Docker bridges, including a routed hairpin back onto $BRIDGE),
+#   2. firewalld policies flow-sb-host (the sandbox range may not reach the host), flow-sb-docker (nor other
+#      Docker bridges, including a routed hairpin back onto $BRIDGE),
 #      flow-sb-lan (nor $LAN_DESTINATIONS behind the host: LAN, cloud metadata; the internet stays reachable) and
 #      flow-sb-incus (no container but Flow's, $CONTAINER_ADDRESS, reaches the Incus API at $INCUS_LISTEN: every
 #      Docker bridge is in zone `docker`, and a client certificate alone was the only bar before). Matched by source
@@ -24,6 +24,10 @@
 #      Rejected: iptables-persistent (saves and restores the whole ruleset, fighting Docker and firewalld over
 #      theirs), firewalld direct rules (deprecated; applied when firewalld starts, before Docker made the chain).
 #      Docker itself never flushes DOCKER-USER (measured: restart, firewalld reload, network re-create).
+#   3b. No IPv6 on $BRIDGE (host-lib.sh, IPV6_NFT): the nftables table `bridge flow_sandbox` drops every IPv6
+#      frame entering it, without br_netfilter and before any route; the host's side of the bridge gets
+#      disable_ipv6=1. Kept by the unit flow-sandbox-ipv6.service, bound to docker.service like the rule's unit.
+#      Other Docker networks keep their IPv6 untouched (firewalld rejects no IPv6: its rules cannot name a bridge).
 #   4. Incus (containers only; installed with apt-get as incus-base when missing, before any other change, elsewhere
 #      install it first) without any managed network; the storage pool $BACKEND_INCUS_POOL (when missing); the API
 #      on $INCUS_LISTEN (default: $BRIDGE's gateway, which Flow's container reaches and sandboxes do not). The
@@ -274,8 +278,8 @@ fi
 
 # 2. firewalld policies, permanent (survive reloads, restarts and Docker restarts; measured). Each one this run
 # makes is recorded before it is made (one found is completed, not recorded) and completed piece by piece, so an
-# interrupted run leaves nothing the next run or the teardown does not know: flow-sb-host (range -> host; IPv6
-# from zone docker), flow-sb-docker (range -> other Docker bridges), flow-sb-lan (range -> private, link-local and
+# interrupted run leaves nothing the next run or the teardown does not know: flow-sb-host (range -> host),
+# flow-sb-docker (range -> other Docker bridges), flow-sb-lan (range -> private, link-local and
 # shared networks behind the host, which the host would forward; the internet stays reachable), flow-sb-incus (any container but Flow's -> the Incus API).
 reload=0
 policy() {
@@ -372,6 +376,50 @@ fi
 if ! iptables -C DOCKER-USER $RULE_SPEC 2>/dev/null; then
 	log "inserting the DOCKER-USER rule"
 	run iptables -I DOCKER-USER $RULE_SPEC
+fi
+
+# 3b. No IPv6 on the bridge, and its unit (header). The table needs no bridge; the sysctl waits for it. $$ is
+# systemd's escape for a literal $.
+if ! nft list table bridge "$IPV6_TABLE" >/dev/null 2>&1; then
+	record "nft-table $IPV6_TABLE"
+elif ! recorded "nft-table $IPV6_TABLE"; then
+	log "nftables table bridge $IPV6_TABLE exists, not made by a setup with $STATE_DIR: completed if needed, not recorded"
+fi
+sysctl_file="$(ipv6_sysctl)"
+# Docker's value was 0 (the teardown restores it while the bridge stays); recorded before the unit changes it.
+if [ ! -e "$sysctl_file" ] || [ "$(cat "$sysctl_file")" != 1 ]; then
+	record "ipv6-off $BRIDGE"
+fi
+unit6_text="[Unit]
+Description=Flow: no IPv6 on $BRIDGE (nftables table bridge $IPV6_TABLE, disable_ipv6)
+After=docker.service
+PartOf=docker.service
+Before=incus.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=nft '$IPV6_NFT'
+ExecStart=/bin/sh -c 'i=0; until [ -e $sysctl_file ]; do [ \$\$i -lt 120 ] || { echo \"$BRIDGE missing after 120s\" >&2; exit 1; }; i=\$\$((i+1)); sleep 1; done; echo 1 >$sysctl_file'
+
+[Install]
+WantedBy=docker.service"
+if put_file "$IPV6_UNIT_FILE" 0644 "$unit6_text" "unit $IPV6_UNIT"; then
+	run systemctl daemon-reload
+	run systemctl restart "$IPV6_UNIT"
+fi
+if ! systemctl is-enabled --quiet "$IPV6_UNIT" 2>/dev/null || ! systemctl is-active --quiet "$IPV6_UNIT"; then
+	log "enabling $IPV6_UNIT"
+	run systemctl enable --now --quiet "$IPV6_UNIT"
+fi
+# On every run, as for the DOCKER-USER rule: a ruleset flushed or a bridge re-created since the unit started.
+if ! ipv6_table_ok; then
+	log "loading nftables table bridge $IPV6_TABLE (IPv6 dropped on $BRIDGE)"
+	run nft "$IPV6_NFT"
+fi
+if [ -e "$sysctl_file" ] && [ "$(cat "$sysctl_file")" != 1 ]; then
+	log "switching IPv6 off on $BRIDGE"
+	run sh -c 'echo 1 >"$1"' sh "$sysctl_file"
 fi
 
 # 5. Incus after Docker's bridge: wait up to 120 s for it, then start anyway (Flow reports the missing bridge).
@@ -509,6 +557,10 @@ have_fp="$(trusted_fp)"
 # shellcheck disable=SC2086 # RULE_SPEC is a list of arguments
 iptables -C DOCKER-USER $RULE_SPEC 2>/dev/null || fail "the DOCKER-USER rule is missing"
 [ "$(iptables -S DOCKER-USER 2>/dev/null | grep -cF -- "-s $RANGE -i $BRIDGE")" = 1 ] || fail "the DOCKER-USER rule is not there exactly once"
+ipv6_table_ok || fail "nftables table bridge $IPV6_TABLE does not drop IPv6 on $BRIDGE"
+[ "$(nft list chain bridge "$IPV6_TABLE" ipv6 2>/dev/null | grep -c 'ether type ip6 drop')" = 1 ] || fail "table bridge $IPV6_TABLE does not hold its rule exactly once"
+[ "$(cat "$sysctl_file" 2>/dev/null)" = 1 ] || fail "IPv6 is not off on $BRIDGE ($sysctl_file)"
+systemctl is-active --quiet "$IPV6_UNIT" || fail "$IPV6_UNIT is not active"
 systemctl show -p After incus.service | grep -qw docker.service || fail "incus.service is not ordered after docker.service"
 if [ -n "$(listen_ip)" ]; then
 	systemctl is-active --quiet "$LISTEN_UNIT" || fail "$LISTEN_UNIT is not active"
@@ -519,4 +571,4 @@ if [ "$FAILED" = 1 ]; then
 	log "verification failed; snapshots in $RUN_DIR"
 	exit 1
 fi
-log "done: Docker network $DOCKER_NETWORK ($BRIDGE), policies, DOCKER-USER rule, project $PROJECT, API $INCUS_LISTEN (for $CONTAINER_ADDRESS only), certificates in $CERT_DIR; snapshots in $RUN_DIR"
+log "done: Docker network $DOCKER_NETWORK ($BRIDGE), policies, DOCKER-USER rule, no IPv6 on $BRIDGE, project $PROJECT, API $INCUS_LISTEN (for $CONTAINER_ADDRESS only), certificates in $CERT_DIR; snapshots in $RUN_DIR"

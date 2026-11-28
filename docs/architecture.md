@@ -455,7 +455,22 @@ and without a ban chain, then end to end with Flow itself.
   Incus nor a bridged NIC adds a firewall rule. Each sandbox has one `bridged` NIC on it with
   `security.port_isolation` (no L2 traffic between sandboxes), `security.mac_filtering` and
   `security.ipv4_filtering` with a static `ipv4.address` (no spoofing; Incus adds its `table bridge incus`
-  chains, which do not depend on `br_netfilter`). No IPv6 in sandboxes. Settings: `BACKEND_SANDBOX_BRIDGE`,
+  chains, which do not depend on `br_netfilter`). No IPv6 in sandboxes: host-setup's nftables table
+  `bridge flow_sandbox` drops every IPv6 frame entering `flowbr0` (`meta ibrname`, so a re-created bridge is
+  covered; bridge-family hooks need no `br_netfilter`), and the bridge's host side has `disable_ipv6=1`. Other
+  Docker networks keep their IPv6 (the owner's Traefik network has it). Measured before (lab, firewalld's
+  `IPv6_rpfilter=strict`; the L2 results with the bridge-nf-call sysctls at 0, standing in for a host without
+  `br_netfilter`): the earlier zone-wide firewalld IPv6 reject cut every IPv6 Docker network's containers off
+  from the host over IPv6 (ping to the gateway refused; inbound to published ports and egress kept working,
+  neighbour discovery only because firewalld's stock policy `allow-host-ipv6` accepts it first); without that
+  reject a sandbox reached the host over link-local (published ports through docker-proxy), and Flow's container at
+  L2 whenever its leg on `flow` had IPv6 (Docker leaves it off: `disable_ipv6=1` on an IPv4-only network's
+  endpoint). With `IPv6_rpfilter=no` a sandbox's SYN from a spoofed global source to a published IPv6 port was
+  DNAT'd onto the container's bridge (blind: the answer goes to the spoofed address); with strict none was seen
+  arriving, by firewalld's `fib saddr` check (inferred from its rule, not traced). Rejected: Incus'
+  `security.ipv6_filtering` with `ipv6.address=none` (refuses to start the NIC without `br_netfilter`:
+  "security.ipv6_filtering requires bridge netfilter", Incus 6.0.4, measured), a narrower firewalld rule (addresses
+  only; the open path used a link-local source, which every bridge's containers share). Settings: `BACKEND_SANDBOX_BRIDGE`,
   `_SUBNET`, `_RANGE`, `_GATEWAY`, `_RESOLVERS` (`config/network.go`); `deploy/host-setup.sh` reads the same names.
   Rejected: an Incus-managed bridge with an Incus ACL (a second firewall manager on a host whose firewall must stay
   as it is); `enable_icc=false` (loads `br_netfilter` host-wide, changing bridged traffic for every container); a
@@ -463,15 +478,18 @@ and without a ban chain, then end to end with Flow itself.
 - **Host additions**, by the owner's hand with `deploy/host-setup.sh` (preconditions in its header; baseline, dry
   run, verified diff, `OTHER_CHURN` names others' churn to show but not count; the ban chain, when the host has
   one, first before and after: `BAN_CHAIN` names it, a name set explicitly or recorded by the setup must exist,
-  `BAN_REQUIRE=1` refuses a host without the default) and reversed by `deploy/host-teardown.sh`: firewalld policies `flow-sb-host` (range → host rejected, all
-  IPv6 from zone `docker` rejected), `flow-sb-docker` (range → other Docker bridges, also the routed hairpin back
+  `BAN_REQUIRE=1` refuses a host without the default) and reversed by `deploy/host-teardown.sh`: firewalld policies `flow-sb-host` (range → host rejected),
+  `flow-sb-docker` (range → other Docker bridges, also the routed hairpin back
   to another sandbox) and `flow-sb-lan` (range → 10/8, 172.16/12, 192.168/16, 169.254/16 with cloud metadata,
   100.64/10 behind the host, which it forwards otherwise: measured; so resolvers must be public or on the sandbox
   subnet, the config refuses others); one `DOCKER-USER` rule against published ports of other containers (firewalld accepts
   DNAT'd traffic before any policy), kept by the unit `flow-sandbox-published.service` (inserts it after Docker,
   before Incus; no ExecStop, so a Docker stop leaves it: measured without a gap across restarts and a simulated
   boot), effective only while FORWARD jumps to `DOCKER-USER` before `DOCKER-FORWARD` (the scripts check; once seen
-  reversed in the lab until Docker restarted); Incus ordered after Docker; Incus' API on the sandbox network's
+  reversed in the lab until Docker restarted); the IPv6 table and sysctl above, kept by
+  `flow-sandbox-ipv6.service` (bound to Docker like the rule's unit, before Incus; measured across a Docker
+  restart, a firewalld reload and `docker network rm`/`create`, after which the sysctl is back at 0 until the unit
+  runs again and the table holds alone); Incus ordered after Docker; Incus' API on the sandbox network's
   gateway (`INCUS_LISTEN`, `172.30.0.1:8443`): Flow's container cannot reach the host's loopback, sandboxes are
   refused there by `flow-sb-host`, and every other container (all Docker bridges are in zone `docker`) by
   `flow-sb-incus`, which lets only Flow's static address (`CONTAINER_ADDRESS`, `172.30.1.2`, outside Docker's and
@@ -501,7 +519,8 @@ and without a ban chain, then end to end with Flow itself.
   container on `flow`) reach flowd in every sandbox. In production sandboxes also reach every container on
   `flow` at L2: the host has no `br_netfilter`, so bridged frames meet no firewall (the lab blocks them only
   because its kernel has it). Hence: Flow's browser API is never served there
-  (`sandboxes.OffSandboxNetwork`, and the config refuses a `BACKEND_ADDR` on the subnet), and everything listening
+  (`sandboxes.OffSandboxNetwork`, which also refuses IPv6 link-local addresses, and the config refuses a
+  `BACKEND_ADDR` on the subnet), and everything listening
   on `flow` authenticates; flowd's own API takes only Flow's per-sandbox token. The guard judges the local address
   as well, so Flow's container must also be on the reverse proxy's network and the proxy must reach it there
   (Traefik: label `traefik.docker.network` naming the proxy's network, else Traefik may pick the `flow` address):
