@@ -265,13 +265,24 @@ func sandboxManager(cfg config.Config, db *sql.DB, projectStore projects.SQL, ru
 // without asking again; a row that cannot be read publishes nothing (a made-up none would show a warm sandbox as not
 // set up), the next change or a reload brings the truth.
 func sandboxChanged(m *sandboxes.Manager, hub *sse.Hub[apitypes.AppEvent]) func(projectID string) {
+	return serialChanges(m.Lookup, hub.Publish)
+}
+
+// serialChanges reads and publishes as one step, one change at a time: changes come from several goroutines (an
+// operation's start in one, another's end in the next), and two that read in one order and published in the other
+// would leave the older state (busy or not) shown until the next change, maybe a whole bring-up later.
+func serialChanges(lookup func(context.Context, string) (apitypes.Sandbox, error),
+	publish func(apitypes.AppEvent)) func(projectID string) {
+	var mu sync.Mutex
 	return func(projectID string) {
-		sb, err := m.Lookup(context.Background(), projectID)
+		mu.Lock()
+		defer mu.Unlock()
+		sb, err := lookup(context.Background(), projectID)
 		if err != nil {
 			slog.Warn("sandbox change not published: its row could not be read", "project", projectID, logging.Err(err))
 			return
 		}
-		hub.Publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: projectID, Sandbox: &sb})
+		publish(apitypes.AppEvent{Kind: apitypes.AppEventKindSandboxUpdated, ProjectID: projectID, Sandbox: &sb})
 	}
 }
 

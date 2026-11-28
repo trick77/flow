@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,5 +131,56 @@ func TestHandlerRefusesTheSandboxNetwork(t *testing.T) {
 	onSubnet := &net.TCPAddr{IP: net.ParseIP("172.30.0.2"), Port: 8080}
 	if c := do("192.0.2.10:40000", onSubnet); c != http.StatusForbidden {
 		t.Errorf("on Flow's sandbox-network address: %d", c)
+	}
+}
+
+// TestSerialChanges forces the interleaving that left a stale state shown: a change that read the old state is
+// held between its read and its publish while a newer change comes. Serialized, the newer one cannot read before
+// the older one published, so the last event published is the newest state.
+func TestSerialChanges(t *testing.T) {
+	var mu sync.Mutex
+	busy := false
+	var published []bool
+	read := make(chan struct{}, 2)
+	hold := make(chan struct{})
+	first := true
+	lookup := func(context.Context, string) (apitypes.Sandbox, error) {
+		mu.Lock()
+		sb := apitypes.Sandbox{State: apitypes.SandboxStateSetup, Busy: busy}
+		wait := first
+		first = false
+		mu.Unlock()
+		read <- struct{}{}
+		if wait {
+			<-hold // the older change, between its read and its publish
+		}
+		return sb, nil
+	}
+	publish := func(e apitypes.AppEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		published = append(published, e.Sandbox.Busy)
+	}
+	changed := serialChanges(lookup, publish)
+
+	done := make(chan struct{})
+	go func() { changed("p1"); done <- struct{}{} }()
+	<-read // the older change read busy false and is held
+	mu.Lock()
+	busy = true
+	mu.Unlock()
+	go func() { changed("p1"); done <- struct{}{} }()
+	select {
+	case <-read:
+		t.Fatal("the newer change read while the older one had not published")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(hold)
+	<-done
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(published) != 2 || published[0] || !published[1] {
+		t.Errorf("published busy %v, want [false true]", published)
 	}
 }
