@@ -167,7 +167,8 @@ describe("Sidebar", () => {
       projects: [
         proj("pa", "alpha"),
         proj("pb", "beta"),
-        { ...proj("pc", "gamma"), sandbox: { state: "setup" } },
+        // A setup that runs (busy; one without it was left behind).
+        { ...proj("pc", "gamma"), sandbox: { state: "setup", busy: true } },
       ],
     });
     // beta has a session: its own section, its dot named.
@@ -193,6 +194,17 @@ describe("Sidebar", () => {
     // A click on the line itself starts one too.
     fireEvent.click(within(idle).getByText("alpha"));
     expect(props.onNewSession).toHaveBeenLastCalledWith("pa");
+  });
+
+  it("names a setup left behind as the card does", () => {
+    renderSidebar({
+      sessions: [],
+      grouping: "project",
+      projects: [{ ...proj("pc", "gamma"), sandbox: { state: "setup" } }],
+    });
+    expect(
+      screen.getByRole("img", { name: "Sandbox setup did not finish" }),
+    ).toHaveClass("dot-failed");
   });
 
   it("keeps the dot and the + out of the heading, the project out of its rows", () => {

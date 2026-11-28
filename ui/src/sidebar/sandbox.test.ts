@@ -9,12 +9,24 @@ describe("sandboxDot", () => {
       ),
     ).toEqual({
       none: "down",
-      setup: "busy",
+      // Setup or stopping with nothing running did not finish.
+      setup: "failed",
       warm: "warm",
-      stopping: "busy",
+      stopping: "failed",
       stopped: "down",
       failed: "failed",
       deleting: "busy",
     });
+  });
+
+  it("shows any state as in progress while an operation runs", () => {
+    expect(
+      Object.fromEntries(
+        SANDBOX_STATE_VALUES.map((state) => [
+          state,
+          sandboxDot({ state, busy: true }),
+        ]),
+      ),
+    ).toEqual(Object.fromEntries(SANDBOX_STATE_VALUES.map((s) => [s, "busy"])));
   });
 });

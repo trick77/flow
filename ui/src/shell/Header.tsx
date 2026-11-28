@@ -106,9 +106,10 @@ export function sandboxTone(
   return "down";
 }
 
-// chipKey is the chip's label: setup and stopping with nothing running did
-// not finish, as the project card says.
-function chipKey(state: SandboxState, busy: boolean) {
+// sandboxLabelKey names a sandbox as the chip and the sidebar's project dot
+// say it: setup and stopping with nothing running did not finish, as the
+// project card says.
+export function sandboxLabelKey(state: SandboxState, busy: boolean) {
   if (!busy && state === "setup") return "sandboxChipSetupStale";
   if (!busy && state === "stopping") return "sandboxChipStopStale";
   return sandboxKeys[state] ?? "sandboxChipNone";
@@ -124,7 +125,7 @@ export function SandboxChip({
   busy?: boolean;
 }) {
   const { t } = useTranslation("shell");
-  const label = t(chipKey(state, busy));
+  const label = t(sandboxLabelKey(state, busy));
   return (
     <span
       className={`chip sbx-chip tone-${sandboxTone(state, busy)}`}

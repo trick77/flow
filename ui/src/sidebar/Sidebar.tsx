@@ -17,7 +17,8 @@ import { formatNumber } from "../i18n/format";
 import { AgentPill } from "../shell/AgentPill";
 import { projectBadge } from "../shell/badge";
 import { SIDEBAR_ID } from "../shell/drawer";
-import { sandboxKeys } from "../shell/Header";
+import { sandboxBusy } from "../api";
+import { sandboxLabelKey } from "../shell/Header";
 import { Icon } from "../shell/Icon";
 import { UserMenu } from "../shell/UserMenu";
 import { sandboxDot } from "./sandbox";
@@ -131,7 +132,9 @@ function SessionRow({
 // and in its tooltip.
 function SandboxDotMark({ project }: { project: Project }) {
   const { t } = useTranslation("shell");
-  const label = t(sandboxKeys[project.sandbox.state] ?? "sandboxChipNone");
+  const label = t(
+    sandboxLabelKey(project.sandbox.state, sandboxBusy(project.sandbox)),
+  );
   return (
     <span
       className={`sb-dot dot-${sandboxDot(project.sandbox)}`}
