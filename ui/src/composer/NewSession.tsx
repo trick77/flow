@@ -116,11 +116,20 @@ export function NewSession({
   const [error, setError] = useState<ErrorCode | null>(null);
   const [lost, setLost] = useState(false);
   const draftId = useRef<string | null>(null);
+  // The project draftId was made for: the server knows a start by its
+  // client id alone, so another project needs another id.
+  const draftProject = useRef<string | null>(null);
   const inputId = useId();
-  if (pick && pick.seq !== pickSeen && !busy) {
+  // A "+" while a start runs is dropped, not held: applied after a refusal
+  // it would clear that refusal and move the draft away from it; after a
+  // success the next new session begins on its own default anyway.
+  if (pick && pick.seq !== pickSeen) {
     setPickSeen(pick.seq);
-    setProjectId(pick.projectId);
-    setError(null);
+    if (!busy) {
+      setProjectId(pick.projectId);
+      setError(null);
+      setLost(false);
+    }
   }
 
   // Each time it shows again, the catalog is asked again: a credential may
@@ -202,6 +211,8 @@ export function NewSession({
     // One client id per draft, kept across retries: the server makes one
     // session per message.clientId, so a retry after a lost answer does not
     // start a second one. A new text is a new draft.
+    if (draftProject.current !== project.id) draftId.current = null;
+    draftProject.current = project.id;
     draftId.current ??= crypto.randomUUID();
     // The draft's project stays as started, whatever is opened meanwhile.
     setProjectId(project.id);
@@ -466,6 +477,7 @@ export function NewSession({
                 onChange={(id) => {
                   setProjectId(id);
                   setError(null);
+                  setLost(false);
                 }}
                 className="proj crumb-pick"
                 placement="down"
