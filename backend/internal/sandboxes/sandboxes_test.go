@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,6 +63,7 @@ type rig struct {
 	d      *dialer
 	ps     projects.SQL
 	db     *sql.DB
+	mu     sync.Mutex
 	events []string
 }
 
@@ -83,7 +85,12 @@ func newRig(t *testing.T) *rig {
 	r.m = &Manager{Store: SQL{DB: db}, Projects: ps, Runtime: r.rt, Dialer: r.d, Sealer: sealer, Image: "flow-base",
 		Network: labNetwork(), Memory: 1 << 30, Version: "fake", Log: slog.New(slog.DiscardHandler), Wait: time.Second,
 		Poll: time.Millisecond, Flowd: func(arch string) ([]byte, error) { return []byte("bin-" + arch), nil },
-		Changed: func(id string) { r.events = append(r.events, id) }}
+		Changed: func(id string) {
+			// A setup's goroutine tells its end after the request answered.
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			r.events = append(r.events, id)
+		}}
 	// The fake flowd runs this build's release, as one delivered before does.
 	rel, err := r.m.Release("amd64")
 	if err != nil {

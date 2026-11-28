@@ -627,6 +627,7 @@
         "properties": {
           "state": { "$ref": "#/components/schemas/SandboxState" },
           "progressCode": { "type": "string", "description": "i18n code of the setup step running now." },
+          "busy": { "type": "boolean", "description": "An operation on the sandbox runs now (a setup or start, a stop, a rebuild, a delete): another one waits for it or is refused with sandbox_busy. A setup or stopping state without it was left by an operation that did not finish (Flow restarted mid-way)." },
           "errorCode": { "$ref": "#/components/schemas/ErrorCode" },
           "lastUsedAt": { "type": "string", "format": "date-time" },
           "diskBytes": { "type": "integer", "format": "int64" },
