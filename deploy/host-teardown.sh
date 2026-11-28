@@ -139,7 +139,7 @@ for p in $POLICIES; do
 	fi
 done
 if [ "$reload" = 1 ]; then
-	run firewall-cmd -q --reload
+	reload_firewalld
 fi
 for p in $POLICIES; do
 	if recorded "policy $p" && [ -f "/etc/firewalld/policies/$p.xml.old" ]; then
