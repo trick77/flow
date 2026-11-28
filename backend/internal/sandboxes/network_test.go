@@ -539,6 +539,10 @@ func TestOffSandboxNetwork(t *testing.T) {
 		"mapped v4 on the leg": {"[::ffff:10.9.0.7]:4000", "[::ffff:172.30.0.2]:8080", 403},
 		"through the proxy":    {"10.9.0.7:4000", "10.9.0.2:8080", 204},
 		"loopback":             {"127.0.0.1:4000", "127.0.0.1:8080", 204},
+		"v6 link-local remote": {"[fe80::1266:6aff:fea6:6fba%eth0]:4000", "[fd00:2::3]:8080", 403},
+		"v6 link-local local":  {"[fd00:2::99]:4000", "[fe80::280c:63ff:fe0c:fc22%eth0]:8080", 403},
+		"v6 through the proxy": {"[fd00:2::2]:4000", "[fd00:2::3]:8080", 204},
+		"v6 loopback":          {"[::1]:4000", "[::1]:8080", 204},
 	} {
 		req := httptest.NewRequest("GET", "/api/projects", nil)
 		req.RemoteAddr = c.remote
