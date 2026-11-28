@@ -139,12 +139,12 @@ type ProfileUpdate struct {
 	ConfigRepo string `json:"configRepo,omitempty"`
 }
 
-// GitHubState: disconnected: no connection (in a poll answer: the code was denied, or Flow holds no code and no
-// connection). pending: a device code is out (in a poll answer: not confirmed yet, or confirmed and the account
-// not read yet). connected: Flow holds a renewable authorization (in a poll answer: also when Flow holds no code
-// but the connection exists, e.g. another tab's poll completed it). expired: the authorization can no longer be
-// renewed, the owner connects again (in a poll answer: the device code expired, or Flow holds no code and the
-// stored authorization is expired).
+// GitHubState: disconnected: no connection (in a poll answer: the owner denied the code on GitHub; with noCode:
+// Flow holds no code and no connection). pending: a device code is out (in a poll answer: not confirmed yet, or
+// confirmed and the account not read yet). connected: Flow holds a renewable authorization (in a poll answer:
+// also when Flow holds no code but the connection exists, e.g. another tab's poll completed it). expired: the
+// authorization can no longer be renewed, the owner connects again (in a poll answer: the device code expired,
+// or Flow holds no code and the stored authorization is expired).
 type GitHubState string
 
 // GitHubState values.
@@ -172,6 +172,9 @@ type GitHubConnection struct {
 	RefreshExpiresAt *time.Time `json:"refreshExpiresAt,omitempty"`
 	// Poll answers only: the interval in force after GitHub asked to slow down.
 	IntervalSeconds int `json:"intervalSeconds,omitempty"`
+	// Poll answers only: Flow holds no device code (it ended: a Flow restart, another tab's poll, a disconnect);
+	// state is the connection as it stands. A disconnected answer with it is not a denial: the owner starts again.
+	NoCode bool `json:"noCode,omitempty"`
 }
 
 // ClaudeSignIn: Whether the home volume holds a Claude login; Flow never reads the token.

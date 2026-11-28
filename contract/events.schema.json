@@ -375,7 +375,8 @@
       "properties": {
         "requestId": { "type": "string" },
         "decision": { "$ref": "#/$defs/PermissionDecision" },
-        "message": { "type": "string", "description": "The owner's note with a deny, passed to the agent." }
+        "message": { "type": "string", "description": "The owner's note with a deny, passed to the agent." },
+        "remembered": { "type": "boolean", "description": "With allow_always: the host answered by itself, the owner allowed this exact request for the session earlier (one the provider offered no rule for)." }
       }
     },
     "QuestionOption": {

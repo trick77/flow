@@ -328,6 +328,11 @@ export interface PermissionResolved {
   decision: PermissionDecision;
   /** The owner's note with a deny, passed to the agent. */
   message?: string;
+  /**
+   * With allow_always: the host answered by itself, the owner allowed this exact request for the session
+   * earlier (one the provider offered no rule for).
+   */
+  remembered?: boolean;
 }
 
 export interface QuestionOption {
