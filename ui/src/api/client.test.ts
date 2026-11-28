@@ -246,6 +246,13 @@ describe("API client", () => {
     ]);
   });
 
+  it("hands a search's signal to fetch", async () => {
+    fetchMock.mockResolvedValueOnce(respond(200, { items: [] }));
+    const ctl = new AbortController();
+    await listGitHubRepos("x", ctl.signal);
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(ctl.signal);
+  });
+
   it("creates and deletes projects and drives their sandboxes", async () => {
     fetchMock.mockResolvedValueOnce(respond(201, { id: "p" }));
     fetchMock.mockResolvedValueOnce(respond(204));

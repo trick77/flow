@@ -168,7 +168,8 @@ export function RepoPicker({
   useEffect(() => {
     if (opening === 0) return;
     let live = true;
-    listGitHubRepos().then(
+    const ctl = new AbortController();
+    listGitHubRepos("", ctl.signal).then(
       (r) => {
         if (live) setBase({ query: "", items: r.items });
       },
@@ -178,25 +179,31 @@ export function RepoPicker({
     );
     return () => {
       live = false;
+      ctl.abort();
     };
   }, [opening]);
 
   const baseItems = base && "items" in base ? base.items : null;
   const capped = baseItems !== null && baseItems.length >= LIST_CAP;
-  const q = query.trim();
-  const searching = capped && q !== "";
+  const typed = parseRepo(query);
+  // text is what is searched: a pasted GitHub address (or owner/name.git,
+  // owner/name/) as owner/name, else the search as typed.
+  const text = typed ?? query.trim();
+  const searching = capped && text !== "";
 
   // A capped list's search is asked for once typing pauses.
   useEffect(() => {
-    if (!open || !capped || q === asked) return;
-    const timer = setTimeout(() => setAsked(q), SEARCH_DELAY_MS);
+    if (!open || !capped || text === asked) return;
+    const timer = setTimeout(() => setAsked(text), SEARCH_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [open, capped, q, asked]);
+  }, [open, capped, text, asked]);
 
   useEffect(() => {
     if (!capped || asked === "") return;
     let live = true;
-    listGitHubRepos(asked).then(
+    // A newer search aborts this one: the server stops reading for it.
+    const ctl = new AbortController();
+    listGitHubRepos(asked, ctl.signal).then(
       (r) => {
         if (live) setRemote({ query: asked, items: r.items });
       },
@@ -206,13 +213,14 @@ export function RepoPicker({
     );
     return () => {
       live = false;
+      ctl.abort();
     };
   }, [capped, asked, remoteRetry]);
 
   // What the list shows: the base filtered by the search; for a capped list
   // and a search, the server's answer for exactly this text once it is in
   // (until then the base filtered, pending).
-  const answered = searching && remote?.query === q ? remote : null;
+  const answered = searching && remote?.query === text ? remote : null;
   let failure: ErrorCode | null = null;
   let pending = false;
   let pool: GitHubRepo[] = [];
@@ -224,11 +232,19 @@ export function RepoPicker({
     pool = base.items;
   } else if ("code" in answered) failure = answered.code;
   else pool = answered.items;
-  const items = filterRepos(pool, q);
+  // The one the typed owner/name names comes first.
+  const items = filterRepos(pool, text);
+  if (typed) {
+    const i = items.findIndex((r) => repoKey(r.fullName) === repoKey(typed));
+    if (i > 0) items.unshift(...items.splice(i, 1));
+  }
 
+  // The form hears of a failure at once, of its end only once a list is in
+  // (not while one loads again: its add-by-name field would go and come).
   useEffect(() => {
-    failedRef.current?.(failure !== null);
-  }, [failure]);
+    if (failure !== null) failedRef.current?.(true);
+    else if (!pending) failedRef.current?.(false);
+  }, [failure, pending]);
 
   // A click or a focus outside closes the popover.
   useEffect(() => {
@@ -247,7 +263,6 @@ export function RepoPicker({
   const shown = items.slice(0, MAX_SHOWN);
   const chosenNames = chosen.map((c) => c.fullName);
   const chosenKeys = new Set(chosenNames.map(repoKey));
-  const typed = parseRepo(query);
   const options: Option[] = shown.map((repo) => ({
     kind: "repo",
     repo,
@@ -375,7 +390,8 @@ export function RepoPicker({
   let note: string | null = null;
   if (base === null) note = t("repoLoading");
   else if (!pending && failure === null && items.length === 0 && n === 0) {
-    note = q !== "" ? t("repoNoMatch", { query: q }) : t("repoNone");
+    note =
+      text !== "" ? t("repoNoMatch", { query: query.trim() }) : t("repoNone");
   } else if (searching && answered && pool.length >= LIST_CAP) {
     note = t("repoCappedMatches", { n: formatNumber(LIST_CAP) });
   } else if (capped && !searching) {
