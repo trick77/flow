@@ -49,6 +49,11 @@ type fakeGitHub struct {
 	// userFails answers that many GET /user with 502; repoStatus answers GET /repos/{name} with a bare status.
 	userFails  int
 	repoStatus map[string]int
+	// userStatus answers every GET /user with this status; userGate holds GET /user until closed, after a send on
+	// userEntered.
+	userStatus  int
+	userGate    chan struct{}
+	userEntered chan struct{}
 }
 
 func newFake(t *testing.T) *fakeGitHub {
@@ -95,6 +100,15 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		if r.PostForm.Get("client_id") != "Iv23test" || r.PostForm.Has("client_secret") {
 			f.t.Errorf("%s: form %v", r.URL.Path, r.PostForm.Get("client_id"))
+		}
+	}
+	if r.URL.Path == "/user" {
+		f.mu.Lock()
+		gate, entered := f.userGate, f.userEntered
+		f.mu.Unlock()
+		if gate != nil {
+			entered <- struct{}{}
+			<-gate
 		}
 	}
 	f.mu.Lock()
@@ -157,6 +171,10 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 func (f *fakeGitHub) rest(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/user":
+		if f.userStatus != 0 {
+			w.WriteHeader(f.userStatus)
+			return
+		}
 		if f.userFails > 0 {
 			f.userFails--
 			w.WriteHeader(http.StatusBadGateway)
@@ -387,10 +405,11 @@ func TestDeviceFlow_errors(t *testing.T) {
 			h.f.polls = []string{answer}
 			call(t, h.s.StartDeviceFlow, http.MethodPost)
 			h.clock.add(5 * time.Second)
-			if c := pollState(t, h.s); c.State != want {
+			if c := pollState(t, h.s); c.State != want || c.NoCode {
 				t.Errorf("poll: %+v", c)
 			}
-			if c := pollState(t, h.s); c.State != apitypes.GitHubStateDisconnected {
+			// Over: no code out any more, which a reader must not take for a denial.
+			if c := pollState(t, h.s); c.State != apitypes.GitHubStateDisconnected || !c.NoCode {
 				t.Errorf("poll after the end: %+v", c)
 			}
 			if h.changed.Load() != 0 || h.s.Token(t.Context()).State != flowdproto.GitHubDisconnected {
@@ -434,7 +453,7 @@ func TestDeviceFlow_errors(t *testing.T) {
 	})
 	t.Run("no flow", func(t *testing.T) {
 		h := newHarness(t)
-		if c := pollState(t, h.s); c.State != apitypes.GitHubStateDisconnected {
+		if c := pollState(t, h.s); c.State != apitypes.GitHubStateDisconnected || !c.NoCode {
 			t.Errorf("poll: %+v", c)
 		}
 	})
@@ -581,6 +600,7 @@ func TestToken_rejected(t *testing.T) {
 	h.f.mu.Lock()
 	h.f.refreshError = "bad_refresh_token"
 	h.f.mu.Unlock()
+	h.clock.add(DefaultTick) // after a failed renewal only Run tries again within the tick
 	if got := h.s.Token(t.Context()); got.State != flowdproto.GitHubDisconnected || got.Token != "" {
 		t.Errorf("refused: %+v", got)
 	}
@@ -625,6 +645,7 @@ func TestToken_transient(t *testing.T) {
 	h.f.mu.Lock()
 	h.f.refreshStatus = 0
 	h.f.mu.Unlock()
+	h.clock.add(DefaultTick)
 	if got := h.s.Token(t.Context()); got.Token != "ghu_access2" || h.changed.Load() != 1 {
 		t.Errorf("recovered: %+v", got)
 	}
@@ -859,7 +880,12 @@ func TestDeviceFlow_disconnectRace(t *testing.T) {
 		t.Error("disconnect did not run")
 	}
 	polled := make(chan int, 1)
-	go func() { polled <- call(t, h.s.PollDeviceFlow, http.MethodPost).Code }()
+	var answer apitypes.GitHubConnection
+	go func() {
+		w := call(t, h.s.PollDeviceFlow, http.MethodPost)
+		_ = json.Unmarshal(w.Body.Bytes(), &answer)
+		polled <- w.Code
+	}()
 	for name, ch := range map[string]chan int{"poll": polled, "disconnect": disconnected} {
 		select {
 		case code := <-ch:
@@ -869,6 +895,10 @@ func TestDeviceFlow_disconnectRace(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s hangs", name)
 		}
+	}
+	// The disconnect came first: the answer says no code is out, not that the owner denied it.
+	if answer.State != apitypes.GitHubStateDisconnected || !answer.NoCode {
+		t.Errorf("poll answer %+v", answer)
 	}
 }
 
@@ -966,5 +996,139 @@ func TestDisconnect_staleRow(t *testing.T) {
 	}
 	if got := h.service().Token(t.Context()); got.State != flowdproto.GitHubDisconnected {
 		t.Errorf("after a restart: %+v", got)
+	}
+}
+
+// GitHub's token endpoint hangs and fails while the token is still valid: after the first failed try, callers get the
+// kept token at once, also while Run's retry hangs, and do not try themselves within the tick.
+func TestToken_slowEndpoint(t *testing.T) {
+	h := newHarness(t)
+	h.connect(t)
+	h.f.mu.Lock()
+	h.f.refreshStatus, h.f.refreshDelay = http.StatusBadGateway, 300*time.Millisecond
+	h.f.mu.Unlock()
+	h.clock.add(7*time.Hour + 50*time.Minute)
+	if got := h.s.Token(t.Context()); got.Token != "ghu_access1" {
+		t.Fatalf("first try: %+v", got)
+	}
+	retried := make(chan struct{})
+	go func() { h.s.get(t.Context(), true); close(retried) }()
+	for h.f.refreshCalls.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	for range 3 {
+		if got := h.s.Token(t.Context()); got.State != flowdproto.GitHubConnected || got.Token != "ghu_access1" {
+			t.Errorf("during Run's retry: %+v", got)
+		}
+	}
+	if d := time.Since(start); d > 150*time.Millisecond {
+		t.Errorf("callers held up %v by a renewal while the token is valid", d)
+	}
+	<-retried
+	if got := h.s.Token(t.Context()); got.Token != "ghu_access1" || h.f.refreshCalls.Load() != 2 {
+		t.Errorf("within the tick: %+v, refreshes %d (want only Run's)", got, h.f.refreshCalls.Load())
+	}
+}
+
+// A poll reading the account holds the flow: a Disconnect meanwhile waits for it and then removes the connection it
+// made, instead of being undone by it.
+func TestDisconnect_duringPoll(t *testing.T) {
+	h := newHarness(t)
+	gate, entered := make(chan struct{}), make(chan struct{}, 1)
+	h.f.polls, h.f.userGate, h.f.userEntered = []string{"ok"}, gate, entered
+	call(t, h.s.StartDeviceFlow, http.MethodPost)
+	h.clock.add(5 * time.Second)
+	polled := make(chan int, 1)
+	go func() { polled <- call(t, h.s.PollDeviceFlow, http.MethodPost).Code }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("poll never read the account")
+	}
+	disconnected := make(chan int, 1)
+	go func() { disconnected <- call(t, h.s.Disconnect, http.MethodDelete).Code }()
+	time.Sleep(50 * time.Millisecond) // a Disconnect not waiting for the poll is through by now
+	close(gate)
+	for name, ch := range map[string]chan int{"poll": polled, "disconnect": disconnected} {
+		select {
+		case code := <-ch:
+			if code >= 300 {
+				t.Errorf("%s: %d", name, code)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s hangs", name)
+		}
+	}
+	if _, err := h.store.Get(t.Context(), credentials.KindGitHub, ""); !errors.Is(err, credentials.ErrNotFound) {
+		t.Errorf("the poll connected again after the disconnect: %v", err)
+	}
+	if got := h.s.Token(t.Context()); got.State != flowdproto.GitHubDisconnected {
+		t.Errorf("token %+v", got)
+	}
+}
+
+// A confirmed code whose account read fails for good ends: at once on a 4xx from /user, after accountWait on an
+// outage; a brief outage is still survived (TestDeviceFlow_userFails).
+func TestDeviceFlow_userFailsForGood(t *testing.T) {
+	t.Run("4xx", func(t *testing.T) {
+		h := newHarness(t)
+		h.f.polls, h.f.userStatus = []string{"ok"}, http.StatusForbidden
+		call(t, h.s.StartDeviceFlow, http.MethodPost)
+		h.clock.add(5 * time.Second)
+		if w := call(t, h.s.PollDeviceFlow, http.MethodPost); w.Code != http.StatusBadGateway {
+			t.Errorf("poll: %d %s", w.Code, w.Body)
+		}
+		if c := h.s.Connection(t.Context()); c.State != apitypes.GitHubStateDisconnected {
+			t.Errorf("connection %+v", c)
+		}
+	})
+	t.Run("outage", func(t *testing.T) {
+		h := newHarness(t)
+		h.f.polls, h.f.userFails = []string{"ok"}, 1000
+		call(t, h.s.StartDeviceFlow, http.MethodPost)
+		h.clock.add(5 * time.Second)
+		if c := pollState(t, h.s); c.State != apitypes.GitHubStatePending {
+			t.Fatalf("poll: %+v", c)
+		}
+		// Past accountWait and the code's own expiry: no longer reported as waiting, even before the next poll.
+		h.clock.add(15 * time.Minute)
+		if c := h.s.Connection(t.Context()); c.State != apitypes.GitHubStateDisconnected {
+			t.Errorf("connection past accountWait: %+v", c)
+		}
+		if w := call(t, h.s.PollDeviceFlow, http.MethodPost); w.Code != http.StatusBadGateway {
+			t.Errorf("poll past accountWait: %d %s", w.Code, w.Body)
+		}
+		if c := pollState(t, h.s); c.State != apitypes.GitHubStateDisconnected || !c.NoCode {
+			t.Errorf("after: %+v", c)
+		}
+	})
+}
+
+// GitHub refuses the refresh token while the store fails: the lost state is written on the next use, so a restart
+// never sends the refused refresh token again.
+func TestToken_lostWriteFails(t *testing.T) {
+	h := newHarness(t)
+	fs := &failingStore{Store: h.store}
+	h.s.Store = fs
+	h.connect(t)
+	h.f.mu.Lock()
+	h.f.refreshError = "bad_refresh_token"
+	h.f.mu.Unlock()
+	h.clock.add(7*time.Hour + 50*time.Minute)
+	fs.fail.Store(true)
+	if got := h.s.Token(t.Context()); got.State != flowdproto.GitHubDisconnected {
+		t.Fatalf("refused: %+v", got)
+	}
+	if got := h.s.Token(t.Context()); got.State != flowdproto.GitHubDisconnected {
+		t.Errorf("write still failing: %+v", got)
+	}
+	fs.fail.Store(false)
+	h.s.Token(t.Context())
+	if got := h.service().Token(t.Context()); got.State != flowdproto.GitHubDisconnected {
+		t.Errorf("after a restart: %+v", got)
+	}
+	if n := h.f.refreshCalls.Load(); n != 1 {
+		t.Errorf("refreshes %d: the refused refresh token was sent again", n)
 	}
 }

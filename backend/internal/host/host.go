@@ -6,6 +6,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,11 +101,16 @@ type Host struct {
 	pendingKind  event.EventKind
 	// pendingQuestions are the open question request's questions: a reply naming others is refused.
 	pendingQuestions []event.Question
-	queue            []event.MessageSend
-	blocks           map[string]string
-	blockOrder       []string
-	subs             map[chan hostproto.Frame]struct{}
-	shutdownIdle     bool
+	// pendingPerm is the open permission request (nil while none is open).
+	pendingPerm *event.PermissionRequested
+	// allowed: the requests (rememberKey) the owner allowed for this session although the provider offered no rule
+	// to remember; the host answers them itself. Rebuilt from the log on start, gone with the session.
+	allowed      map[string]bool
+	queue        []event.MessageSend
+	blocks       map[string]string
+	blockOrder   []string
+	subs         map[chan hostproto.Frame]struct{}
+	shutdownIdle bool
 	// gateFailed: the open turn's last check run (gate.finished) had a non-zero exit, so the turn ends failed.
 	gateFailed bool
 	stop       chan struct{}
@@ -143,8 +150,9 @@ func New(cfg Config) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &Host{cfg: cfg, w: w, seen: map[string]bool{}, status: event.SessionStatusIdle, blocks: map[string]string{},
-		subs: map[chan hostproto.Frame]struct{}{}, stop: make(chan struct{}), model: cfg.Spec.Session.Model,
+	h := &Host{cfg: cfg, w: w, seen: map[string]bool{}, allowed: map[string]bool{}, status: event.SessionStatusIdle,
+		blocks: map[string]string{}, subs: map[chan hostproto.Frame]struct{}{}, stop: make(chan struct{}),
+		model:  cfg.Spec.Session.Model,
 		effort: cfg.Spec.Session.Effort, mode: cfg.Spec.Session.Mode, modeCap: cfg.Spec.Session.ModeCap}
 	if h.effort == "" {
 		h.effort = event.EffortDefault // a spec from a Flow before efforts
@@ -194,17 +202,25 @@ func (h *Host) recover(events []event.Event) {
 			h.turn, h.turnStart, h.gateFailed = e.Turn, e.TS, false
 		case *event.TurnEnded:
 			h.turn, h.gateFailed = "", false
-			h.pendingID, h.pendingKind = "", ""
+			h.pendingID, h.pendingKind, h.pendingPerm = "", "", nil
 		case *event.GateFinished:
 			h.gateFailed = p.ExitCode != 0
 		case *event.PermissionRequested:
-			h.pendingID, h.pendingKind = p.RequestID, e.Kind
+			h.pendingID, h.pendingKind, h.pendingPerm = p.RequestID, e.Kind, p
 		case *event.QuestionAsked:
-			h.pendingID, h.pendingKind, h.pendingQuestions = p.RequestID, e.Kind, p.Questions
+			h.pendingID, h.pendingKind, h.pendingQuestions, h.pendingPerm = p.RequestID, e.Kind, p.Questions, nil
 		case *event.PlanProposed:
-			h.pendingID, h.pendingKind = p.RequestID, e.Kind
-		case *event.PermissionResolved, *event.QuestionResolved, *event.PlanResolved:
-			h.pendingID, h.pendingKind = "", ""
+			h.pendingID, h.pendingKind, h.pendingPerm = p.RequestID, e.Kind, nil
+		case *event.PermissionResolved:
+			// The owner's own allow for this session on a request without a provider rule (not the host's answers
+			// from it): remembered again.
+			if r := h.pendingPerm; r != nil && r.RequestID == p.RequestID && !r.CanAlwaysAllow && !p.Remembered &&
+				p.Decision == event.PermissionDecisionAllowAlways {
+				h.remember(r)
+			}
+			h.pendingID, h.pendingKind, h.pendingPerm = "", "", nil
+		case *event.QuestionResolved, *event.PlanResolved:
+			h.pendingID, h.pendingKind, h.pendingPerm = "", "", nil
 		case *event.MessageQueued:
 			// A message queued again (sent now) moves: its id is in the queue once, where the last entry put it.
 			h.queue = slices.DeleteFunc(h.queue, func(m event.MessageSend) bool { return m.MessageID == p.MessageID })
@@ -512,11 +528,24 @@ func (h *Host) apply(c event.Command, p any) error {
 			h.interrupt(cmd)
 		}
 	case *event.PermissionReply:
+		req := h.pendingPerm
 		if err := h.resolve(event.KindPermissionRequested, p.RequestID); err != nil {
 			return err
 		}
+		decision := event.PermissionDecision(p.Decision)
+		if p.Decision == event.ReplyDecisionAllowAlways && req != nil && !req.CanAlwaysAllow {
+			// The provider offered no rule to remember: Flow remembers this exact request for the session (logged as
+			// the owner chose it), the agent hears allow once. A request with nothing to match is allowed once.
+			if !h.remember(req) {
+				decision = event.PermissionDecisionAllowOnce
+			}
+			p.Decision = event.ReplyDecisionAllowOnce
+			if b, err := json.Marshal(p); err == nil {
+				c.Data = b
+			}
+		}
 		h.append(event.KindPermissionResolved, cmd, event.PermissionResolved{RequestID: p.RequestID,
-			Decision: event.PermissionDecision(p.Decision), Message: p.Message})
+			Decision: decision, Message: p.Message})
 		h.setStatus(event.SessionStatusWorking)
 		h.send(c)
 	case *event.QuestionReply:
@@ -649,8 +678,77 @@ func (h *Host) resolve(kind event.EventKind, id string) error {
 	if h.pendingKind != kind || h.pendingID != id {
 		return &CommandError{Code: hostproto.CodeNotPending, Detail: id}
 	}
-	h.pendingID, h.pendingKind = "", ""
+	h.pendingID, h.pendingKind, h.pendingPerm = "", "", nil
 	return nil
+}
+
+// remember adds a request to the session's allow list; false when it has nothing exact to match.
+func (h *Host) remember(r *event.PermissionRequested) bool {
+	key, ok := rememberKey(r)
+	if ok {
+		h.allowed[key] = true
+	}
+	return ok
+}
+
+// rememberKey is what the owner's "allow for this session" covers when the provider offered no rule: exactly this
+// request, never a prefix or a pattern. A command: the tool and its input with the command string as given, only the
+// agent's label (description) and its timeout left out, so another flag (background, sandbox) is another request;
+// an edit or write: the tool and the exact path it names; anything else: the tool and its whole input. ok false: no
+// input to match (never remembered).
+func rememberKey(r *event.PermissionRequested) (string, bool) {
+	if r.Tool == "" || len(r.Input) == 0 {
+		return "", false
+	}
+	dec := json.NewDecoder(bytes.NewReader(r.Input))
+	dec.UseNumber()
+	var in map[string]any
+	if err := dec.Decode(&in); err != nil || in == nil || cut(in) {
+		return "", false
+	}
+	switch r.Kind {
+	case event.PermissionKindCommand:
+		if c, _ := in["command"].(string); c == "" {
+			return "", false
+		}
+		delete(in, "description")
+		delete(in, "timeout")
+	case event.PermissionKindEdit, event.PermissionKindWrite:
+		for _, f := range []string{"file_path", "notebook_path", "path"} {
+			if p, _ := in[f].(string); p != "" {
+				k, err := json.Marshal([]string{r.Tool, string(r.Kind), f, p})
+				return string(k), err == nil
+			}
+		}
+	}
+	b, err := json.Marshal(in) // map keys sorted: one form per input
+	if err != nil {
+		return "", false
+	}
+	k, err := json.Marshal([]string{r.Tool, string(r.Kind), "input", string(b)})
+	return string(k), err == nil
+}
+
+// cutMark is what the sidecar puts between head and tail of a string it shortened to fit a draft into a log line
+// (sidecar/src/limits.ts, cutHeadTail); a request it shortened carries no other mark.
+const cutMark = "\n…\n"
+
+// cut says whether a string in v may have been shortened: two different requests would then read the same, so such
+// a request is never remembered or matched (a string that only looks cut is merely asked again).
+func cut(v any) bool {
+	switch v := v.(type) {
+	case string:
+		return strings.Contains(v, cutMark)
+	case []any:
+		return slices.ContainsFunc(v, cut)
+	case map[string]any:
+		for _, x := range v {
+			if cut(x) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // interrupt tells the adapter to stop the turn. The open request expires at once: the adapter answers it as the
@@ -763,7 +861,7 @@ func (h *Host) expire(cmd string) {
 		h.append(event.KindPlanResolved, cmd, event.PlanResolved{RequestID: h.pendingID,
 			Decision: event.PlanDecisionExpired})
 	}
-	h.pendingID, h.pendingKind = "", ""
+	h.pendingID, h.pendingKind, h.pendingPerm = "", "", nil
 }
 
 // Draft takes one draft from the adapter.
@@ -858,6 +956,16 @@ func (h *Host) request(d event.EventDraft) {
 		h.refuse(d.Kind, req.RequestID)
 		return
 	}
+	h.pendingPerm = nil
+	if d.Kind == event.KindPermissionRequested {
+		var p event.PermissionRequested
+		if json.Unmarshal(d.Data, &p) == nil {
+			if key, ok := rememberKey(&p); ok && h.allowed[key] && h.allowRemembered(p.RequestID) {
+				return
+			}
+			h.pendingPerm = &p
+		}
+	}
 	h.pendingID, h.pendingKind = req.RequestID, d.Kind
 	if d.Kind == event.KindQuestionAsked {
 		var q event.QuestionAsked
@@ -866,6 +974,23 @@ func (h *Host) request(d event.EventDraft) {
 	}
 	h.setStatus(map[event.EventKind]event.SessionStatus{event.KindPermissionRequested: event.SessionStatusApproval,
 		event.KindQuestionAsked: event.SessionStatusQuestion, event.KindPlanProposed: event.SessionStatusPlan}[d.Kind])
+}
+
+// allowRemembered answers a logged permission request the owner allowed for this session before (exactly this one):
+// allow, logged as remembered, so the session never waits for the owner. false: the answer could not be logged; the
+// request then waits for the owner as any other.
+func (h *Host) allowRemembered(requestID string) bool {
+	if err := h.tryAppend(event.KindPermissionResolved, "", h.turn, event.PermissionResolved{RequestID: requestID,
+		Decision: event.PermissionDecisionAllowAlways, Remembered: true}); err != nil {
+		h.cfg.Log.Error("remembered allow not logged; asking the owner", "request", requestID, "err", err)
+		return false
+	}
+	c, err := event.NewCommand("remembered-"+requestID, h.cfg.Spec.Session.ID, event.CmdPermissionReply,
+		event.PermissionReply{RequestID: requestID, Decision: event.ReplyDecisionAllowOnce})
+	if err == nil {
+		h.send(c)
+	}
+	return true
 }
 
 // refuse answers a request for the owner, who never saw it: deny, reject, or an empty answer that says so.
@@ -910,7 +1035,7 @@ func (h *Host) withdraw(d event.EventDraft) bool {
 		h.cfg.Log.Warn("adapter resolution dropped", "kind", d.Kind, "request", r.RequestID)
 		return false
 	}
-	h.pendingID, h.pendingKind = "", ""
+	h.pendingID, h.pendingKind, h.pendingPerm = "", "", nil
 	return true
 }
 
