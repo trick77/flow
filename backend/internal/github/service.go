@@ -39,6 +39,9 @@ const (
 	reuseFlow = time.Minute
 	// refusalPause: after a refresh refusal with a code Flow does not know, GitHub is not asked again before this.
 	refusalPause = 5 * time.Minute
+	// accountWait: a confirmed code whose account read keeps failing (GitHub's API away) is given up after this,
+	// counted from the confirmation; a 4xx from /user ends it at once.
+	accountWait = 10 * time.Minute
 )
 
 // Service is the GitHub App area: the device flow, the one user token (renewed single-flight, the rotating refresh
@@ -66,8 +69,9 @@ type Service struct {
 	// every lookup while not connected.
 	Anonymous func(ctx context.Context, fullName string) (string, error)
 
-	// mu guards the token: loading, renewing, connecting and disconnecting all hold it, so two renewals never use
-	// one refresh token and a disconnect never races a renewal's write.
+	// mu guards the token: loading, connecting and disconnecting hold it; a renewal holds it except during its call
+	// to GitHub, which renewing marks, so two renewals never use one refresh token. A renewal's answer is applied
+	// only while cur is still the record it renewed: a disconnect or connect during the call wins.
 	mu     sync.Mutex
 	loaded bool
 	cur    *record
@@ -76,6 +80,13 @@ type Service struct {
 	unsaved bool
 	// retryAt: no renewal before then (refusalPause after an unknown refusal code).
 	retryAt time.Time
+	// renewing is closed when the renewal under way ends (nil: none). Callers wait for it only while the last
+	// renewal did not fail: a successful one kills the old token. failing: the last renewal failed and was kept;
+	// then only Run tries again (every tick), others get the kept token at once, and try themselves only after
+	// backoff (one tick), for a Service whose Run is not running.
+	renewing chan struct{}
+	failing  bool
+	backoff  time.Time
 
 	flowMu sync.Mutex
 	flow   *deviceFlow
@@ -189,9 +200,12 @@ func (s *Service) persist(ctx context.Context) error {
 }
 
 // Token implements credentials.GitHub.
-func (s *Service) Token(ctx context.Context) credentials.GitHubToken {
+func (s *Service) Token(ctx context.Context) credentials.GitHubToken { return s.get(ctx, false) }
+
+// get is Token; run says the caller is Run, which tries a failed renewal again on every tick.
+func (s *Service) get(ctx context.Context, run bool) credentials.GitHubToken {
 	s.mu.Lock()
-	t, changed := s.token(ctx)
+	t, changed := s.token(ctx, run)
 	s.mu.Unlock()
 	if changed {
 		s.notify()
@@ -199,64 +213,109 @@ func (s *Service) Token(ctx context.Context) credentials.GitHubToken {
 	return t
 }
 
-// token is Token under mu; changed says what sandboxes hold must be replaced (and the state republished).
-func (s *Service) token(ctx context.Context) (t credentials.GitHubToken, changed bool) {
+// token is get under mu (released only during a renewal's call to GitHub); changed says what sandboxes hold must
+// be replaced (and the state republished).
+func (s *Service) token(ctx context.Context, run bool) (credentials.GitHubToken, bool) {
+	changed := false
+	for {
+		t, done, ch := s.tokenOnce(ctx, run)
+		changed = changed || ch
+		if done {
+			return t, changed
+		}
+	}
+}
+
+// tokenOnce is one look at the token; done false: a renewal ended or changed hands meanwhile, look again.
+func (s *Service) tokenOnce(ctx context.Context, run bool) (t credentials.GitHubToken, done, changed bool) {
 	t.State = flowdproto.GitHubDisconnected
 	if s.Client == nil {
-		return t, false
+		return t, true, false
 	}
 	if err := s.load(ctx); err != nil {
 		s.log().Error("reading the GitHub connection", "err", err)
 		t.State = flowdproto.GitHubExpired
-		return t, false
+		return t, true, false
 	}
 	r := s.cur
 	if r == nil {
-		return t, false
+		return t, true, false
 	}
 	t.Login = r.login
-	if r.lost() {
-		return t, false
-	}
 	if s.unsaved {
+		// Before the lost check: a lost connection whose write failed is stored now, so a restart never sends the
+		// refused refresh token again.
 		if err := s.persist(ctx); err != nil {
 			s.log().Error("storing the renewed GitHub token", "err", err)
-			t.State = flowdproto.GitHubExpired
-			return t, false
+			if !r.lost() {
+				t.State = flowdproto.GitHubExpired
+			}
+			return t, true, false
 		}
-		// Sandboxes were told there is no token while the write was pending: push the one now stored.
-		changed = true
+		// Sandboxes were told there is no token while the write was pending: push the one now stored (a lost one
+		// was pushed when it was lost).
+		changed = !r.lost()
+	}
+	if r.lost() {
+		return t, true, changed
 	}
 	now := s.now()
 	exp := r.tokens.AccessExpiresAt
 	if exp.IsZero() || now.Before(exp.Add(-s.lead())) {
 		t.State, t.Token, t.ExpiresAt = flowdproto.GitHubConnected, r.tokens.AccessToken, exp
-		return t, changed
+		return t, true, changed
 	}
 	if r.tokens.RefreshToken == "" || (!r.tokens.RefreshExpiresAt.IsZero() && !now.Before(r.tokens.RefreshExpiresAt)) {
 		if now.Before(exp) {
 			t.State, t.Token, t.ExpiresAt = flowdproto.GitHubConnected, r.tokens.AccessToken, exp
-			return t, changed
+			return t, true, changed
 		}
 		s.markLost(ctx, "the GitHub authorization ran out")
-		return t, true
+		return t, true, true
 	}
 	// keep hands out the current token while it is valid: the authorization stays, the renewal is tried again.
-	keep := func() (credentials.GitHubToken, bool) {
+	keep := func() (credentials.GitHubToken, bool, bool) {
 		if now.Before(exp) {
 			t.State, t.Token, t.ExpiresAt = flowdproto.GitHubConnected, r.tokens.AccessToken, exp
-			return t, changed
+			return t, true, changed
 		}
 		t.State = flowdproto.GitHubExpired
-		return t, changed
+		return t, true, changed
 	}
-	if now.Before(s.retryAt) {
+	if wait := s.renewing; wait != nil {
+		if s.failing {
+			return keep() // GitHub was away at the last try: nobody waits on this one
+		}
+		s.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+		}
+		s.mu.Lock()
+		if ctx.Err() != nil {
+			// Gone before the renewal ended: what was looked at before may be dead or disconnected by now.
+			t.State = flowdproto.GitHubExpired
+			return t, true, changed
+		}
+		return t, false, changed
+	}
+	if now.Before(s.retryAt) || (s.failing && !run && now.Before(s.backoff)) {
 		return keep()
 	}
 	// Not the caller's context: a renewal cut off after GitHub answered would lose the only valid refresh token.
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), callTimeout)
+	wait := make(chan struct{})
+	s.renewing = wait
+	s.mu.Unlock()
 	nt, err := s.Client.Refresh(rctx, r.tokens.RefreshToken)
 	cancel()
+	s.mu.Lock()
+	s.renewing = nil
+	close(wait)
+	if s.cur != r {
+		// Disconnected or connected again during the call: the answer is not for the connection held now.
+		return t, false, changed
+	}
 	if err != nil {
 		var oe *OAuthError
 		if s.RenewalFailed != nil {
@@ -267,9 +326,11 @@ func (s *Service) token(ctx context.Context) (t credentials.GitHubToken, changed
 			s.RenewalFailed(class)
 		}
 		if Refused(err) {
+			s.failing = false
 			s.markLost(ctx, "GitHub refused the refresh token")
-			return t, true
+			return t, true, true
 		}
+		s.failing, s.backoff = true, now.Add(cmp.Or(s.Tick, DefaultTick))
 		if !Transient(err) && errors.As(err, &oe) && oe.Code != "incorrect_client_credentials" {
 			// A code Flow does not know is never taken as a refusal (that would drop a refresh token that may still
 			// be good): kept, and GitHub is asked again only after a pause. incorrect_client_credentials is Flow's
@@ -282,17 +343,18 @@ func (s *Service) token(ctx context.Context) (t credentials.GitHubToken, changed
 		s.log().Warn("renewing the GitHub token failed; trying again", "err", err)
 		return keep()
 	}
+	s.failing = false
 	r.tokens = tokens(nt, now, r.tokens.AccountID)
 	s.unsaved = true
 	if err := s.persist(ctx); err != nil {
 		// The old token is dead now: sandboxes must drop it, the new one waits for the write.
 		s.log().Error("storing the renewed GitHub token", "err", err)
 		t.State = flowdproto.GitHubExpired
-		return t, true
+		return t, true, true
 	}
 	s.log().Info("GitHub token renewed", "login", r.login, "expiresAt", r.tokens.AccessExpiresAt)
 	t.State, t.Token, t.ExpiresAt = flowdproto.GitHubConnected, r.tokens.AccessToken, r.tokens.AccessExpiresAt
-	return t, true
+	return t, true, true
 }
 
 // markLost keeps the connection's account but drops its tokens: the owner connects again. Never retried with the
@@ -330,7 +392,7 @@ func (s *Service) Run(ctx context.Context) {
 	defer t.Stop()
 	last := s.now()
 	for {
-		if tok := s.Token(ctx); tok.State == flowdproto.GitHubConnected && s.now().Sub(last) >= cmp.Or(s.Repush,
+		if tok := s.get(ctx, true); tok.State == flowdproto.GitHubConnected && s.now().Sub(last) >= cmp.Or(s.Repush,
 			DefaultRepush) && s.Changed != nil {
 			last = s.now()
 			s.Changed()
@@ -348,7 +410,8 @@ func (s *Service) Connection(ctx context.Context) apitypes.GitHubConnection {
 	c, has := s.connection(ctx)
 	if !has {
 		s.flowMu.Lock()
-		if s.Client != nil && s.flow != nil && (s.flow.tok != nil || s.now().Before(s.flow.expiresAt)) {
+		if f, now := s.flow, s.now(); s.Client != nil && f != nil &&
+			(f.tok != nil && now.Before(f.confirmed.Add(accountWait)) || now.Before(f.expiresAt)) {
 			c.State = apitypes.GitHubStatePending
 		}
 		s.flowMu.Unlock()
@@ -447,6 +510,19 @@ func (s *Service) PollDeviceFlow(w http.ResponseWriter, r *http.Request) {
 		httpapi.NotImplemented{}.PollGitHubDeviceFlow(w, r)
 		return
 	}
+	if !s.poll(w, r) {
+		return
+	}
+	// Connected: pushed and answered outside the flow's lock, so a Disconnect waiting for it is never held up by the
+	// push. A disconnect landing in between is what the answer then says: no code out, never a denial.
+	s.notify()
+	c, _ := s.connection(r.Context())
+	c.NoCode = c.State != apitypes.GitHubStateConnected
+	httpapi.WriteJSON(w, http.StatusOK, c)
+}
+
+// poll is PollDeviceFlow under flowMu; connected true: the code connected GitHub, nothing is answered yet.
+func (s *Service) poll(w http.ResponseWriter, r *http.Request) (connected bool) {
 	s.flowMu.Lock()
 	defer s.flowMu.Unlock()
 	answer := func(state apitypes.GitHubState) {
@@ -459,11 +535,12 @@ func (s *Service) PollDeviceFlow(w http.ResponseWriter, r *http.Request) {
 	f, now := s.flow, s.now()
 	switch {
 	case f == nil:
-		// No code out (over, or another tab's poll ended it): the connection as it stands, so a confirmed one
-		// never reads as denied.
+		// No code out (over: a restart, another tab's poll ended it, a disconnect): the connection as it stands, so
+		// a confirmed one never reads as denied, marked noCode, so a disconnected one does not either.
 		c, _ := s.connection(r.Context())
+		c.NoCode = true
 		httpapi.WriteJSON(w, http.StatusOK, c)
-		return
+		return false
 	case !now.Before(f.expiresAt) && f.tok == nil:
 		// A confirmed code outlives its expiry: the tokens it brought are good for hours.
 		s.flow = nil
@@ -521,6 +598,15 @@ func (s *Service) PollDeviceFlow(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := s.Client.User(ctx, tok.AccessToken)
 	if err != nil {
+		var se *StatusError
+		refused := errors.As(err, &se) && se.Status >= 400 && se.Status < 500 && se.Status != http.StatusTooManyRequests
+		if refused || !now.Before(f.confirmed.Add(accountWait)) {
+			// GitHub refused the account read, or its API stayed away too long: this code is done.
+			s.flow = nil
+			s.log().Warn("reading the connected GitHub account failed; giving up the code", "err", err)
+			httpapi.WriteError(w, upstream(detail(err)))
+			return
+		}
 		// The authorization stays with the flow; the next poll reads the account again.
 		s.log().Warn("reading the connected GitHub account failed; trying again", "err", err)
 		f.next = now.Add(f.interval)
@@ -532,10 +618,7 @@ func (s *Service) PollDeviceFlow(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, err)
 		return
 	}
-	s.notify()
-	// Not Connection: it takes flowMu, held here.
-	c, _ := s.connection(r.Context())
-	httpapi.WriteJSON(w, http.StatusOK, c)
+	return true
 }
 
 // connect replaces the stored connection with a new one, its token issued at now.
@@ -543,7 +626,7 @@ func (s *Service) connect(ctx context.Context, u User, tok Token, now time.Time)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cur = &record{id: store.NewID(), login: u.Login, tokens: tokens(tok, now, u.ID), createdAt: now.UTC()}
-	s.loaded, s.unsaved, s.retryAt = true, true, time.Time{}
+	s.loaded, s.unsaved, s.retryAt, s.failing = true, true, time.Time{}, false
 	if tok.RefreshToken == "" && tok.ExpiresIn > 0 {
 		s.log().Warn("GitHub handed out an expiring token without a refresh token; check the App's settings")
 	}
@@ -560,6 +643,9 @@ func (s *Service) connect(ctx context.Context, u User, tok Token, now time.Time)
 // revoke call: GitHub's revoke endpoints (DELETE /applications/{client_id}/token and /grant) need the client
 // secret, which Flow does not hold; the owner revokes the authorization on GitHub if wanted.
 func (s *Service) Disconnect(w http.ResponseWriter, r *http.Request) {
+	// flowMu first, in PollDeviceFlow's order (flowMu, then mu): a poll reading the account finishes its connect,
+	// then this removes it; a poll can never connect again after the disconnect.
+	s.flowMu.Lock()
 	s.mu.Lock()
 	// The stored row by kind, not by the id in memory: after a reconnect whose write failed, memory holds a new id
 	// while the old row is still stored, and it would come back after a restart.
@@ -574,13 +660,14 @@ func (s *Service) Disconnect(w http.ResponseWriter, r *http.Request) {
 		s.cur, s.unsaved, s.loaded = nil, false, true
 	}
 	s.mu.Unlock()
+	if err == nil {
+		s.flow = nil
+	}
+	s.flowMu.Unlock()
 	if err != nil {
 		httpapi.WriteError(w, err)
 		return
 	}
-	s.flowMu.Lock()
-	s.flow = nil
-	s.flowMu.Unlock()
 	s.log().Info("GitHub disconnected")
 	s.notify()
 	w.WriteHeader(http.StatusNoContent)
