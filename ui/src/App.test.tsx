@@ -173,6 +173,14 @@ function emitDemo(es: FakeEventSource, upTo = Infinity) {
   });
 }
 
+// The heading comes from the session list; the stream opens in a later
+// effect, so a lookup right after the heading can find nothing under load.
+async function doneStream(): Promise<FakeEventSource> {
+  const url = "/api/sessions/s-done/events";
+  await waitFor(() => expect(FakeEventSource.forUrl(url)).not.toHaveLength(0));
+  return FakeEventSource.forUrl(url)[0];
+}
+
 describe("App", () => {
   beforeEach(() => {
     FakeEventSource.reset();
@@ -315,7 +323,7 @@ describe("App", () => {
     const done = screen.getByRole("region", { name: en.sidebar.sectionDone });
     fireEvent.click(within(done).getByRole("button"));
     expect(ask[0].closed).toBe(true);
-    const es = FakeEventSource.forUrl("/api/sessions/s-done/events")[0];
+    const es = await doneStream();
     emitDemo(es);
 
     expect(
@@ -336,7 +344,7 @@ describe("App", () => {
     serve(server);
     render(<App EventSource={FakeEventSource} />);
     await screen.findByRole("heading", { level: 2, name: summary({}).title });
-    const es = FakeEventSource.forUrl("/api/sessions/s-done/events")[0];
+    const es = await doneStream();
 
     // Part way in, the turn runs: status working, stop button, indicator.
     emitDemo(es, 16);
@@ -397,7 +405,7 @@ describe("App", () => {
     });
     render(<App EventSource={FakeEventSource} />);
     await screen.findByRole("heading", { level: 2, name: summary({}).title });
-    const es = FakeEventSource.forUrl("/api/sessions/s-done/events")[0];
+    const es = await doneStream();
     emitDemo(es, 16);
     const row = () =>
       within(
@@ -420,7 +428,7 @@ describe("App", () => {
     expect(await screen.findByText(en.shell.sandboxStopped)).toBeVisible();
     // A log that ends mid-turn (the stop wrote no turn.ended) shows no running
     // turn: the row, where Flow ended it, wins while the sandbox is down.
-    emitDemo(FakeEventSource.forUrl("/api/sessions/s-done/events")[0], 16);
+    emitDemo(await doneStream(), 16);
     expect(screen.queryByRole("button", { name: en.composer.stop })).toBeNull();
     expect(screen.queryByText(en.timeline.workingNow)).toBeNull();
 
@@ -827,7 +835,7 @@ describe("App", () => {
     serve({ sessions: [summary({})], projects: [project], calls: [] });
     render(<App EventSource={FakeEventSource} />);
     await screen.findByRole("heading", { level: 2, name: summary({}).title });
-    const es = FakeEventSource.forUrl("/api/sessions/s-done/events")[0];
+    const es = await doneStream();
     act(() => {
       es.open();
       es.emit(
@@ -875,7 +883,7 @@ describe("App", () => {
       name: /Persist the sidebar width/,
     });
     expect(row).toHaveClass("unseen");
-    emitDemo(FakeEventSource.forUrl("/api/sessions/s-done/events")[0], 3);
+    emitDemo(await doneStream(), 3);
     await waitFor(
       () =>
         expect(server.calls).toContain(
@@ -1009,7 +1017,7 @@ describe("App", () => {
     const before = diffs();
 
     // A turn that ends reads the diff again.
-    const es = FakeEventSource.forUrl("/api/sessions/s-done/events")[0];
+    const es = await doneStream();
     emitDemo(es, 16);
     act(() => {
       fixtureLines("demo.jsonl")
