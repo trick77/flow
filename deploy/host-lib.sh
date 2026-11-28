@@ -94,6 +94,26 @@ run() {
 	fi
 }
 
+# reload_firewalld reloads firewalld, then waits (at most 30 s) until every interface zone docker held before is in
+# it again: Docker re-adds its bridges only after the reload (measured: 1 of 7 right after it, all 7 about 350 ms
+# later), and a snapshot taken in between misses the zone's chains (once 460 "unexpected" lines in a teardown).
+reload_firewalld() {
+	held="$(firewall-cmd --zone=docker --list-interfaces)"
+	run firewall-cmd -q --reload
+	[ "$DRY_RUN" = 1 ] && return 0
+	waited=0
+	for i in $held; do
+		until firewall-cmd -q --zone=docker --query-interface="$i"; do
+			if [ "$waited" -ge 30 ]; then
+				warn "$i is not back in firewalld zone docker 30 s after the reload"
+				return 0
+			fi
+			sleep 1
+			waited=$((waited + 1))
+		done
+	done
+}
+
 # put_file PATH MODE CONTENT RECORD writes a file unless it already holds CONTENT, recording RECORD before it writes;
 # status 0 when it wrote (or would).
 put_file() {

@@ -343,7 +343,7 @@ for p in $POLICIES; do
 done
 if [ "$reload" = 1 ]; then
 	log "reloading firewalld (Docker re-applies its rules)"
-	run firewall-cmd -q --reload
+	reload_firewalld
 fi
 
 # 3. The DOCKER-USER rule and its unit.
