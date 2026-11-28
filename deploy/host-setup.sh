@@ -60,14 +60,13 @@
 # DOCKER-FORWARD, Incus (if installed) as incus.service without a managed network, a free $SUBNET; Incus installed
 # or installable with apt-get (a candidate for each package), openssl and sha256sum, btrfs tooling for a new btrfs
 # pool.
-# Detected: a third party's chain kept first in FORWARD (a ban or intrusion-prevention tool's): FORWARD's first rule
-# is an unconditional jump to a chain that is not Docker's (host-lib.sh, first_jump), or BAN_CHAIN names it (empty:
-# none, no detection). Found: it must be first now, the setup waits up to $BAN_WAIT s after applying for its owner
-# to put it first again, its churn is shown in the difference, and the manifest records it, so later runs and the
-# teardown require it. None: those steps are skipped and the output says so; refused instead when BAN_CHAIN names
-# one that does not exist (a typo), one was recorded, or BAN_REQUIRE=1 (a host that should have one). Detection
-# sees only what is first now: on the very first run, a chain its owner is just restoring is missed (no record);
-# the output then names any other non-Docker chain FORWARD jumps to, for BAN_CHAIN=<name>.
+# Asked, never guessed: a third party's chain kept first in FORWARD (a ban or intrusion-prevention tool's). While
+# FORWARD jumps to any chain that is not Docker's (first or further down, any matches) and nothing is recorded, the
+# setup refuses before any change, names them and asks: BAN_CHAIN=<name> (that chain must stay first) or BAN_CHAIN=
+# (none needs to). Without such jumps it proceeds and records nothing. The answer is recorded (`ban-chain NAME`,
+# `ban-chain-none`), so later runs and the teardown need no variable. A named chain must exist and be first now;
+# the setup waits up to $BAN_WAIT s after applying for its owner to put it first again, and its churn is shown in
+# the difference. A recorded name never switches off, also while its owner restarts it (refused until it is back).
 #
 # Safety: records a baseline of the whole ruleset and firewalld's zones and policies before the first firewall
 # change ($STATE_DIR/baseline, written once) and a snapshot before each run (after an Incus install, to keep the
@@ -249,8 +248,10 @@ if [ "$DRY_RUN" = 0 ]; then
 	mkdir -p "$STATE_DIR"
 	chmod 0700 "$STATE_DIR"
 fi
-# From now on the teardown and every later setup require this chain (ban_from_manifest).
+# The decision on a chain kept first in FORWARD: from now on the teardown and every later setup follow it
+# (ban_from_manifest).
 [ "$BAN_SEEN" = 0 ] || record "ban-chain $BAN_CHAIN"
+[ "$BAN_NONE" = 0 ] || record "ban-chain-none"
 
 # Incus first, containers only, no managed network (no dnsmasq): the slowest step stays out of the window the
 # verification compares (others' changes in it would count), and a failing install changes no firewall.

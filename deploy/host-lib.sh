@@ -13,10 +13,12 @@ POOL="${BACKEND_INCUS_POOL:-default}"
 DOCKER_NETWORK="${DOCKER_NETWORK:-flow}"
 DOCKER_RANGE="${DOCKER_RANGE:-172.30.0.0/24}" # Docker's own allocations (Flow's container); the rest is RANGE's
 # A third party's iptables chain that keeps its jump first in FORWARD (a ban or intrusion-prevention tool puts its
-# chain ahead of Docker's and restores it there when Docker or firewalld move it). It must be first before and after
-# every change. Unset BAN_CHAIN: detected (resolve_ban), no name assumed. A name set explicitly, or recorded by an
-# earlier setup, must exist and be first (a typo or a chain being restarted never switches the checks off).
-# BAN_REQUIRE=1: a chain must be found, named or detected. Empty BAN_CHAIN: none, no detection.
+# chain ahead of Docker's and restores it there when Docker or firewalld move it). Never guessed: BAN_CHAIN=<name>
+# names it (it must exist and be first before and after every change), BAN_CHAIN= says none needs to be. Unset, the
+# setup refuses while FORWARD jumps to any chain that is not Docker's and asks for one of the two; the answer is
+# recorded, so later runs and the teardown need neither (resolve_ban, ban_from_manifest). "First" is the target of
+# FORWARD's first rule, whatever its matches. BAN_REQUIRE=1: refused unless a name is given or recorded (adds
+# little over naming the chain; kept for runs that must not proceed without one).
 BAN_CHAIN_SET="${BAN_CHAIN+1}"
 BAN_CHAIN="${BAN_CHAIN-}"
 BAN_REQUIRE="${BAN_REQUIRE:-0}"
@@ -339,23 +341,19 @@ user_first() {
 		END { exit !user }'
 }
 
-# Docker's own chains a FORWARD rule may jump to (measured, Docker 29: DOCKER, -BRIDGE, -CT, -FORWARD, -INTERNAL,
-# -USER; earlier versions' isolation stages; swarm's ingress) and the built-in targets: never a third party's.
-# firewalld on nftables keeps no iptables chain. An exact list, not a DOCKER prefix: anyone may name a chain DOCKER-x.
-NOT_THIRD_PARTY='^(DOCKER|DOCKER-(BRIDGE|CT|FORWARD|INTERNAL|USER|INGRESS|ISOLATION-STAGE-[12])|ACCEPT|DROP|REJECT|RETURN|LOG)$'
-
-# other_jumps prints the chains FORWARD jumps to unconditionally that are not Docker's, first one first.
+# other_jumps prints, once each and in FORWARD's order, the chains FORWARD jumps to that are not Docker's: user
+# chains only (`iptables -N`; built-in and extension targets such as REJECT or NFLOG are none), and every name
+# starting with DOCKER counts as Docker's (Docker 29 has DOCKER, -BRIDGE, -CT, -FORWARD, -INTERNAL, -USER; older
+# versions and swarm more). firewalld on nftables keeps no iptables chain.
 other_jumps() {
-	iptables -S FORWARD 2>/dev/null | awk -v not="$NOT_THIRD_PARTY" '$1 == "-A" && NF == 4 && $3 == "-j" && $4 !~ not { print $4 }' |
-		tr '\n' ' ' | sed 's/ $//'
+	chains="$(iptables -S 2>/dev/null | awk '$1 == "-N" { print $2 }')"
+	forward_targets | awk -v chains="$chains" '
+		BEGIN { n = split(chains, c, "\n"); for (i = 1; i <= n; i++) user[c[i]] = 1 }
+		($0 in user) && $0 !~ /^DOCKER/ && !seen[$0]++ { print }' | tr '\n' ' ' | sed 's/ $//'
 }
 
-# first_jump prints the chain FORWARD's first rule jumps to unconditionally, if it is not Docker's: the chain a
-# third party keeps first. Nothing when the first rule is Docker's, conditional, or there is none.
-first_jump() {
-	iptables -S FORWARD 2>/dev/null | awk -v not="$NOT_THIRD_PARTY" '
-		$1 == "-A" { if (NF == 4 && $3 == "-j" && $4 !~ not) print $4; exit }'
-}
+# chain_name_ok NAME: a name the scripts can match and record safely (iptables allows more).
+chain_name_ok() { printf '%s\n' "$1" | grep -Eqx '[A-Za-z0-9_.-]+'; }
 
 # manifest_settings refuses a PROJECT or POOL other than the one an earlier setup worked with (manifest lines
 # `project`, `uses project`, `root-device`; `uses pool`): a setup re-run would leave the old one behind, and the
@@ -373,58 +371,70 @@ manifest_settings() {
 	fi
 }
 
-# ban_from_manifest: a kept-first chain an earlier setup found (manifest line `ban-chain NAME`) is required from then
-# on, by setup re-runs and the teardown alike; a BAN_CHAIN that names another one (empty included) is refused.
+# ban_from_manifest applies the decision an earlier setup recorded; its last line counts. `ban-chain NAME`: NAME
+# must stay first, for setup re-runs and the teardown alike; a BAN_CHAIN naming another (empty included) is refused.
+# `ban-chain-none`: none needs to; only a setup with an explicit BAN_CHAIN=<name> overrides it (and records the
+# name), the teardown refuses a name the setup never recorded.
 ban_from_manifest() {
-	seen="$(sed -n 's/^ban-chain //p' "$MANIFEST" 2>/dev/null | tail -n 1)"
-	[ -n "$seen" ] || return 0
-	if [ -z "$BAN_CHAIN_SET" ]; then
-		BAN_CHAIN="$seen"
-		BAN_CHAIN_SET=1
-	elif [ "$BAN_CHAIN" != "$seen" ]; then
-		die "the setup found $seen first in FORWARD (manifest $MANIFEST), BAN_CHAIN says '$BAN_CHAIN': run with BAN_CHAIN=$seen, or, if the host no longer has it, delete the line 'ban-chain $seen' from the manifest"
-	fi
+	last="$(grep -E '^ban-chain( |-none$)' "$MANIFEST" 2>/dev/null | tail -n 1)"
+	case "$last" in
+	"") ;;
+	ban-chain-none)
+		if [ -z "$BAN_CHAIN_SET" ]; then
+			BAN_CHAIN_SET=1
+		elif [ -n "$BAN_CHAIN" ] && [ "$SCRIPT" != host-setup ]; then
+			die "the setup recorded that no chain must stay first in FORWARD (manifest $MANIFEST), BAN_CHAIN says '$BAN_CHAIN': run the setup with BAN_CHAIN=$BAN_CHAIN first, or leave BAN_CHAIN unset"
+		fi
+		;;
+	*)
+		seen="${last#ban-chain }"
+		if [ -z "$BAN_CHAIN_SET" ]; then
+			BAN_CHAIN="$seen"
+			BAN_CHAIN_SET=1
+		elif [ "$BAN_CHAIN" != "$seen" ]; then
+			die "the setup recorded $seen as the chain that stays first in FORWARD (manifest $MANIFEST), BAN_CHAIN says '$BAN_CHAIN': run with BAN_CHAIN=$seen, or, if the host no longer has it, delete the line 'ban-chain $seen' from the manifest"
+		fi
+		;;
+	esac
 }
 
-# resolve_ban decides once per run which chain, if any, must stay first in FORWARD:
-# - named (BAN_CHAIN set, or recorded by an earlier setup): it must exist and be first now, else refused;
-# - BAN_CHAIN empty: none, nothing detected;
-# - unset: the chain FORWARD's first rule jumps to unconditionally, if it is not Docker's (first_jump), taken as
-#   if named. None: the checks are skipped (refused under BAN_REQUIRE=1), with a hint naming any other non-Docker
-#   chain FORWARD jumps to.
-# Detection sees only what is first now: a chain its owner is restoring during the very first setup (gone, or not
-# first yet) is not found and that run records none; the hint line names it when FORWARD still jumps to it. After
-# a setup recorded one, its absence never switches the checks off. Never re-decided later: a chain that vanishes
-# during the run fails the verification instead. BAN_SEEN=1: there is one (host-setup.sh records it).
+# resolve_ban decides once per run which chain, if any, must stay first in FORWARD. It never picks one itself:
+# - a name (BAN_CHAIN=<name>, or recorded): a user chain that exists and is first now, else refused;
+# - none (BAN_CHAIN= , or recorded ban-chain-none): nothing kept in place;
+# - neither: FORWARD jumps to no chain that is not Docker's (other_jumps) → nothing to keep, nothing recorded;
+#   it does → refused before any change, naming them: the owner decides once, and host-setup.sh records it. A chain
+#   its owner is restoring (not first for a moment) is asked about as well, so a first run cannot miss it.
+# BAN_SEEN=1: a name to keep first; BAN_NONE=1: none, decided (host-setup.sh records either).
 BAN_SEEN=0
+BAN_NONE=0
 resolve_ban() {
 	case "$BAN_REQUIRE" in
 	0 | 1) ;;
 	*) die "BAN_REQUIRE must be 0 or 1" ;;
 	esac
-	if [ -n "$BAN_CHAIN_SET" ] && [ -z "$BAN_CHAIN" ]; then
-		[ "$BAN_REQUIRE" = 0 ] || die "BAN_REQUIRE=1 with an empty BAN_CHAIN: name the chain, or leave BAN_CHAIN unset to detect it"
-		log "BAN_CHAIN is empty: no chain is kept first in FORWARD"
-		return 0
-	fi
 	if [ -n "$BAN_CHAIN" ]; then
+		chain_name_ok "$BAN_CHAIN" || die "BAN_CHAIN '$BAN_CHAIN' is not a chain name these scripts accept ([A-Za-z0-9_.-])"
+		# iptables -S fails for built-in and extension targets (REJECT, NFLOG: measured), succeeds for a chain.
 		iptables -S "$BAN_CHAIN" >/dev/null 2>&1 ||
-			die "chain $BAN_CHAIN does not exist (named in BAN_CHAIN or found first in FORWARD by an earlier setup): fix the name or wait for its owner to restore it; a host without one: BAN_CHAIN= (and, if the manifest $MANIFEST has a line 'ban-chain $BAN_CHAIN', delete that line)"
+			die "chain $BAN_CHAIN does not exist (named in BAN_CHAIN or recorded by an earlier setup): fix the name or wait for its owner to restore it; a host without one: BAN_CHAIN= (and, if the manifest $MANIFEST has a line 'ban-chain $BAN_CHAIN', delete that line)"
 		ban_first || die "$BAN_CHAIN is not first in FORWARD now: wait for its owner to restore it"
 		log "$BAN_CHAIN is first in FORWARD; it must be again after the changes"
 		BAN_SEEN=1
 		return 0
 	fi
-	BAN_CHAIN="$(first_jump)"
-	if [ -n "$BAN_CHAIN" ]; then
-		log "$BAN_CHAIN, a third party's chain, is first in FORWARD: it must be again after the changes (BAN_CHAIN= if it need not)"
-		BAN_SEEN=1
+	[ "$BAN_REQUIRE" = 0 ] ||
+		die "BAN_REQUIRE=1 needs the chain that stays first in FORWARD named: BAN_CHAIN=<name> (or recorded by an earlier setup)"
+	if [ -n "$BAN_CHAIN_SET" ]; then
+		log "no chain is kept first in FORWARD (BAN_CHAIN= , or recorded so)"
+		BAN_NONE=1
 		return 0
 	fi
 	jumps="$(other_jumps)"
-	[ "$BAN_REQUIRE" = 0 ] ||
-		die "no third party's chain is first in FORWARD, and BAN_REQUIRE=1 says this host has one${jumps:+ (FORWARD jumps to $jumps further down: wait for its owner to put it first)}; BAN_CHAIN=<name> names it"
-	log "no third party's chain first in FORWARD: nothing to keep in place${jumps:+; FORWARD also jumps to $jumps (BAN_CHAIN=<name> if one of them must stay first)}"
+	if [ -z "$jumps" ]; then
+		log "FORWARD jumps to no chain but Docker's: no third party's chain to keep first"
+		return 0
+	fi
+	die "FORWARD jumps to chains that are not Docker's: $jumps. If one of them is kept first by its owner (a ban or intrusion-prevention tool), run with BAN_CHAIN=<that chain> (it must be first then); if none needs to stay first, run with BAN_CHAIN= . The setup records the answer"
 }
 
 # preflight refuses unless the host has what the isolation design was measured with: firewalld on nftables, Docker
