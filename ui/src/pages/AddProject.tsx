@@ -98,12 +98,22 @@ export function AddProject({
   const [typedName, setTypedName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<Failure>();
+  // listFailed: the picker's list failed (not a lost connection); adding by
+  // name is offered beside it.
+  const [listFailed, setListFailed] = useState(false);
   const onConnected = useCallback(
     () => setSource({ kind: "connected" }),
     [setSource],
   );
   const device = useDeviceFlow(onConnected);
   const flow = device.state;
+  // The connection went: back to connecting, the old flow's "connected"
+  // line gone with it.
+  const lose = () => {
+    device.reset();
+    setListFailed(false);
+    setSource({ kind: "offer", expired: true });
+  };
 
   useEffect(() => {
     if (flow.phase === "unavailable") setSource({ kind: "unavailable" });
@@ -124,10 +134,14 @@ export function AddProject({
       setFailure(undefined);
     }
   };
-  const remove = (fullName: string) =>
+  const remove = (fullName: string) => {
     setRepos((rs) =>
       rs.filter((x) => repoKey(x.fullName) !== repoKey(fullName)),
     );
+    if (failure && "field" in failure && failure.field === "repos") {
+      setFailure(undefined);
+    }
+  };
 
   const missing =
     repos.length === 0 ? "needRepos" : name.trim() === "" ? "needName" : null;
@@ -140,6 +154,9 @@ export function AddProject({
       name: name.trim(),
       repos: repos.map((r) => r.fullName),
     }).then(onCreated, (err: unknown) => {
+      // invalid_request on repos: the directory rule is checked as they are
+      // added (repoClash), so what is left is a name GitHub does not know.
+      // The API's detail is for logs only (openapi.json, Error).
       const f = fieldError(err);
       setFailure(f);
       setBusy(false);
@@ -149,7 +166,7 @@ export function AddProject({
         f.key === "notFoundPublic" &&
         source.kind === "connected"
       ) {
-        setSource({ kind: "offer", expired: true });
+        lose();
       }
     });
   };
@@ -197,9 +214,8 @@ export function AddProject({
                 chosen={repos}
                 onAdd={add}
                 onRemove={remove}
-                onDisconnected={() =>
-                  setSource({ kind: "offer", expired: true })
-                }
+                onDisconnected={lose}
+                onFailed={setListFailed}
                 labelId={reposLabel}
                 invalid={reposErr !== null}
               />
@@ -252,11 +268,19 @@ export function AddProject({
             </span>
           )}
         </div>
-        {source.kind !== "connected" && source.kind !== "loading" && (
+        {/* By name: the path besides the picker, and its stand-in while
+            the list cannot be read (a public one needs no connection). */}
+        {(source.kind === "connected"
+          ? listFailed
+          : source.kind !== "loading") && (
           <RepoByName
             chosen={repos}
             onAdd={add}
-            label={source.kind === "offer" ? t("byNameOr") : t("byName")}
+            label={
+              source.kind === "offer" || source.kind === "connected"
+                ? t("byNameOr")
+                : t("byName")
+            }
           />
         )}
         <div className="field">
@@ -271,10 +295,12 @@ export function AddProject({
             value={name}
             aria-invalid={nameErr !== null || undefined}
             aria-describedby={`${uid}-name-hint`}
-            onChange={(e) =>
-              // Clearing the field lets the name follow again.
-              setTypedName(e.target.value === "" ? null : e.target.value)
-            }
+            // An emptied field stays empty while it has the focus (to type
+            // another name); left empty, the name follows again.
+            onChange={(e) => setTypedName(e.target.value)}
+            onBlur={(e) => {
+              if (e.target.value === "") setTypedName(null);
+            }}
           />
           <span className="hint" id={`${uid}-name-hint`}>
             {t("nameHint")}
