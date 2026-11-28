@@ -335,8 +335,12 @@ button.picker:disabled:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A long repository name must not widen the centred start text (it is
+   sized to its content): the chips take the width they are given and
+   truncate. */
 .rpick {
   width: 100%;
+  contain: inline-size;
 }
 .rchip {
   max-width: 100%;

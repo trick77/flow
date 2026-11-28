@@ -609,4 +609,199 @@ describe("NewSession", () => {
     fireEvent.click(screen.getByRole("button", { name: en.composer.retry }));
     expect(await box()).toBeInTheDocument();
   });
+
+  const withRepos = (id: string, n: number): Project => ({
+    id,
+    name: id,
+    repos: Array.from({ length: n }, (_, i) => ({
+      id: `${id}-r${i}`,
+      fullName: `dev/${id}-${i}`,
+      defaultBranch: "main",
+    })),
+    sandbox: { state: "warm" },
+    createdAt: "2026-11-01T00:00:00Z",
+  });
+
+  it("names a single repository instead of offering a checkbox", async () => {
+    serve();
+    const props = view({ currentProjectId: "p2" });
+    await box();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.getByText("Working in dev/harbor")).toBeInTheDocument();
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
+    expect(posted()).toMatchObject({ projectId: "p2", repoIds: ["r3"] });
+  });
+
+  it("shows up to six repositories as labelled chips", async () => {
+    serve();
+    view({ projects: [withRepos("six", 6)] });
+    await box();
+    const group = screen.getByRole("group", { name: en.composer.repos });
+    expect(within(group).getAllByRole("checkbox")).toHaveLength(6);
+    expect(within(group).getByText(en.composer.repos)).toBeInTheDocument();
+  });
+
+  it("puts seven and more repositories in a searchable menu", async () => {
+    serve();
+    const props = view({ projects: [withRepos("big", 12)] });
+    await box();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    const button = () =>
+      screen.getByRole("button", { name: /^Repositories in this session:/ });
+    expect(button()).toHaveTextContent("12 of 12 repositories");
+
+    // Opens from the keyboard with the focus in the search field.
+    fireEvent.keyDown(button(), { key: "ArrowDown" });
+    const field = screen.getByRole("combobox", {
+      name: en.composer.repoSearch,
+    });
+    expect(field).toHaveFocus();
+    const opts = () => screen.getAllByRole("option");
+    expect(opts()).toHaveLength(12);
+    expect(opts()[0]).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("listbox")).toHaveAttribute(
+      "aria-multiselectable",
+      "true",
+    );
+
+    // Enter toggles the active one and the menu stays open.
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(field).toHaveAttribute("aria-activedescendant", opts()[1].id);
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(opts()[1]).toHaveAttribute("aria-selected", "false");
+    expect(button()).toHaveTextContent("11 of 12 repositories");
+
+    // A query narrows the list; none and all act on what it leaves.
+    fireEvent.change(field, { target: { value: "big-1" } });
+    expect(opts().map((o) => o.textContent)).toEqual([
+      "dev/big-1",
+      "dev/big-10",
+      "dev/big-11",
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: en.composer.repoNone }));
+    expect(button()).toHaveTextContent("9 of 12 repositories");
+    fireEvent.click(screen.getByRole("button", { name: en.composer.repoAll }));
+    expect(button()).toHaveTextContent("12 of 12 repositories");
+    fireEvent.change(field, { target: { value: "nothing" } });
+    expect(screen.getByRole("status")).toHaveTextContent(
+      en.composer.repoSearchNone,
+    );
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: en.composer.repoNone }));
+    expect(screen.getByRole("alert")).toHaveTextContent(en.composer.reposNone);
+
+    // Escape closes and gives the focus back.
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(button()).toHaveFocus();
+
+    // A click picks one back; what is sent follows the list's order.
+    fireEvent.click(button());
+    fireEvent.click(screen.getByRole("option", { name: "dev/big-3" }));
+    fireEvent.click(screen.getByRole("option", { name: "dev/big-1" }));
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
+    expect(posted()).toMatchObject({ repoIds: ["big-r1", "big-r3"] });
+  });
+
+  it("switches to the project a + asks for, keeping the draft", async () => {
+    serve();
+    const { props, rerender } = viewWithRerender({
+      pick: { projectId: "p2", seq: 1 },
+    });
+    // A first open lands on the asked project.
+    await box();
+    expect(
+      screen.getByText("What should we work on in harbor?"),
+    ).toBeInTheDocument();
+    fireEvent.change(await box(), { target: { value: "Draft" } });
+    // The same ask again changes nothing; a new one switches.
+    rerender({ ...props, pick: { projectId: "p2", seq: 1 } });
+    rerender({ ...props, pick: { projectId: "p1", seq: 2 } });
+    expect(
+      screen.getByText("What should we work on in riptide?"),
+    ).toBeInTheDocument();
+    expect(await box()).toHaveValue("Draft");
+  });
+
+  it("does not switch the project while a start runs", async () => {
+    let answer: (r: Response) => void = () => {};
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === "/api/agents") return json(200, catalog);
+      if (init?.method === "POST")
+        return new Promise<Response>((r) => (answer = r));
+      return json(404, { code: "not_found" });
+    });
+    const { props, rerender } = viewWithRerender();
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    rerender({ ...props, pick: { projectId: "p2", seq: 1 } });
+    expect(
+      screen.getByText("What should we work on in riptide?"),
+    ).toBeInTheDocument();
+    // Refused: the ask applies now.
+    await act(async () => answer(json(409, { code: "conflict" })));
+    await waitFor(() =>
+      expect(
+        screen.getByText("What should we work on in harbor?"),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("searches a long project menu, most recently used first", async () => {
+    serve();
+    const many = Array.from({ length: 8 }, (_, i) => withRepos(`proj${i}`, 1));
+    view({
+      projects: many,
+      lastUse: new Map([
+        ["proj5", 3000],
+        ["proj2", 2000],
+      ]),
+    });
+    await box();
+    fireEvent.click(screen.getByRole("button", { name: "Project: proj0" }));
+    const field = screen.getByRole("combobox", {
+      name: en.composer.projectSearch,
+    });
+    expect(field).toHaveFocus();
+    const names = () =>
+      screen.getAllByRole("option").map((o) => o.textContent?.slice(2));
+    expect(names()).toEqual([
+      "proj5",
+      "proj2",
+      "proj0",
+      "proj1",
+      "proj3",
+      "proj4",
+      "proj6",
+      "proj7",
+    ]);
+    // The checked one is active at first.
+    expect(screen.getByRole("option", { name: /proj0/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    fireEvent.change(field, { target: { value: "PROJ7" } });
+    expect(names()).toEqual(["proj7"]);
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(
+      screen.getByRole("button", { name: "Project: proj7" }),
+    ).toHaveFocus();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("keeps a short project menu in the list's order, without search", async () => {
+    serve();
+    const seven = Array.from({ length: 7 }, (_, i) => withRepos(`proj${i}`, 1));
+    view({ projects: seven, lastUse: new Map([["proj5", 3000]]) });
+    await box();
+    fireEvent.click(screen.getByRole("button", { name: "Project: proj0" }));
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByRole("menuitemradio").map((o) => o.textContent?.slice(2)),
+    ).toEqual(["proj0", "proj1", "proj2", "proj3", "proj4", "proj5", "proj6"]);
+  });
 });

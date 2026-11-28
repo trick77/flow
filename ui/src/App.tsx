@@ -18,6 +18,7 @@ import {
   type View,
 } from "./shell";
 import {
+  lastUse,
   orderSessions,
   Sidebar,
   useGrouping,
@@ -51,6 +52,9 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
   // elsewhere. A new key after a start begins the next one empty.
   const [newOpened, setNewOpened] = useState(false);
   const [newKey, setNewKey] = useState(0);
+  // newFor: the project a project's "+" asked New session to switch to; seq
+  // tells a second ask for the same project from the one already applied.
+  const [newFor, setNewFor] = useState<{ projectId: string; seq: number }>();
   const viewRef = useRef(view);
   useEffect(() => {
     viewRef.current = view;
@@ -140,6 +144,8 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
         sessionId: s.summary.id,
       });
       if (viewRef.current === "new") onSelect(s.summary.id);
+      // The next one begins empty, on its own default project.
+      setNewFor(undefined);
       setNewKey((k) => k + 1);
     },
     [apply, onSelect],
@@ -159,7 +165,16 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
     for (const s of sessions) n[s.projectId] = (n[s.projectId] ?? 0) + 1;
     return n;
   }, [sessions]);
-  const startNew = () => {
+  // A project's "+" (projectId) switches New session to that project, as a
+  // pick in its project menu does; plain New session keeps what it shows.
+  // When each project was last worked in: the new session's project menu
+  // lists by it once it is long.
+  const lastUsed = useMemo(
+    () => lastUse(sessions, projects),
+    [sessions, projects],
+  );
+  const startNew = (projectId?: string) => {
+    if (projectId) setNewFor((f) => ({ projectId, seq: (f?.seq ?? 0) + 1 }));
     setNewOpened(true);
     setView("new");
   };
@@ -190,6 +205,8 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
           drawerOpen={drawerOpen}
           onCloseDrawer={closeDrawer}
           onOpenSettings={() => setView("settings")}
+          onOpenProjects={() => setView("projects")}
+          projectsError={projectsError}
         />
         {narrow && drawerOpen && (
           <div className="scrim" aria-hidden="true" onClick={closeDrawer} />
@@ -203,6 +220,8 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
               projectsLoaded={loaded}
               projectsError={projectsError ?? error}
               currentProjectId={selected?.projectId}
+              pick={newFor}
+              lastUse={lastUsed}
               nav={nav}
               onCreated={onCreated}
               onAnswerLost={reload}
@@ -259,7 +278,7 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
                   <button
                     type="button"
                     className="btn primary empty-new"
-                    onClick={startNew}
+                    onClick={() => startNew()}
                   >
                     {t("newSession")}
                   </button>

@@ -40,6 +40,11 @@ import "./composer.css";
 import { authKeys, effortKeys, modeKeys } from "./modes";
 import { Picker, type PickerOption } from "./Picker";
 import { loadPrefs, savePrefs } from "./prefs";
+import { RepoChoice } from "./RepoChoice";
+
+// From this many projects on, the project menu has a search field and lists
+// the most recently used first.
+export const PROJECT_SEARCH_FROM = 8;
 
 // NewSession starts a session: the project, its repositories (all picked at
 // first), the model, the effort, the permission mode and the first message.
@@ -57,6 +62,8 @@ export function NewSession({
   projectsLoaded = true,
   projectsError = null,
   currentProjectId,
+  pick,
+  lastUse,
   nav,
   hidden = false,
   onCreated,
@@ -70,6 +77,11 @@ export function NewSession({
   projectsError?: ErrorCode | null;
   // The project of the session on screen, the default project.
   currentProjectId?: string;
+  // The project a project's "+" asked for; a new seq is a new ask.
+  pick?: { projectId: string; seq: number };
+  // When each project was last worked in (ms): a long project menu lists
+  // the most recent first.
+  lastUse?: ReadonlyMap<string, number>;
   nav?: ReactNode;
   hidden?: boolean;
   onCreated: (session: Session) => void;
@@ -83,7 +95,12 @@ export function NewSession({
   const agentName = useAgentName();
   const [catalogState, retry] = useCatalog(true);
   const [prefs] = useState(() => loadPrefs());
-  const [projectId, setProjectId] = useState<string>();
+  const [projectId, setProjectId] = useState<string | undefined>(
+    pick?.projectId,
+  );
+  // A project's "+" in the sidebar (pick) switches the draft to that
+  // project as a pick in the project menu does; not while a start runs.
+  const [pickSeen, setPickSeen] = useState(pick?.seq);
   // Repositories left out, per project: a project switched to starts with
   // all of its repositories.
   const [left, setLeft] = useState<Record<string, string[]>>({});
@@ -100,6 +117,11 @@ export function NewSession({
   const [lost, setLost] = useState(false);
   const draftId = useRef<string | null>(null);
   const inputId = useId();
+  if (pick && pick.seq !== pickSeen && !busy) {
+    setPickSeen(pick.seq);
+    setProjectId(pick.projectId);
+    setError(null);
+  }
 
   // Each time it shows again, the catalog is asked again: a credential may
   // have been added in Settings meanwhile (the mount asks by itself).
@@ -136,7 +158,10 @@ export function NewSession({
         ? auth
         : defaultAuth(choice.provider)
       : undefined;
-  const leftOut = project ? (left[project.id] ?? []) : [];
+  // A project with one repository has nothing to choose: that one goes in,
+  // whatever was left out while it had more.
+  const leftOut =
+    project && project.repos.length > 1 ? (left[project.id] ?? []) : [];
   const repoIds = project
     ? project.repos.filter((r) => !leftOut.includes(r.id)).map((r) => r.id)
     : [];
@@ -148,6 +173,15 @@ export function NewSession({
       [project.id]: leftOut.includes(id)
         ? leftOut.filter((x) => x !== id)
         : [...leftOut, id],
+    }));
+  };
+  const setRepos = (ids: string[]) => {
+    if (!project) return;
+    setLeft((l) => ({
+      ...l,
+      [project.id]: project.repos
+        .map((r) => r.id)
+        .filter((id) => !ids.includes(id)),
     }));
   };
 
@@ -215,7 +249,16 @@ export function NewSession({
     }
   };
 
-  const projectOptions: PickerOption<string>[] = projects.map((p) => ({
+  // A long project menu searches and lists the most recently used first
+  // (the list's order breaks ties); a short one keeps the list's order.
+  const longMenu = projects.length >= PROJECT_SEARCH_FROM;
+  const byUse = longMenu
+    ? projects
+        .map((p, i) => ({ p, i, at: lastUse?.get(p.id) ?? -Infinity }))
+        .sort((a, b) => b.at - a.at || a.i - b.i)
+        .map((x) => x.p)
+    : projects;
+  const projectOptions: PickerOption<string>[] = byUse.map((p) => ({
     value: p.id,
     label: p.name,
     lead: (
@@ -426,6 +469,15 @@ export function NewSession({
                 }}
                 className="proj crumb-pick"
                 placement="down"
+                search={
+                  longMenu
+                    ? {
+                        label: t("projectSearch"),
+                        placeholder: t("projectSearchPlaceholder"),
+                        empty: t("projectSearchNone"),
+                      }
+                    : undefined
+                }
               >
                 <span className="mono-badge" aria-hidden="true">
                   {projectBadge(project.name)}
@@ -451,24 +503,13 @@ export function NewSession({
                   {t("startQuestion", { project: project.name })}
                 </p>
                 <p>{t("startHint")}</p>
-                {project.repos.length > 0 && (
-                  <div className="rpick" role="group" aria-label={t("repos")}>
-                    {project.repos.map((r) => (
-                      <label className="rchip" key={r.id}>
-                        <input
-                          type="checkbox"
-                          checked={!leftOut.includes(r.id)}
-                          disabled={busy}
-                          onChange={() => toggleRepo(r.id)}
-                        />
-                        <span className="box" aria-hidden="true">
-                          <Icon name="check" />
-                        </span>
-                        <span>{r.fullName}</span>
-                      </label>
-                    ))}
-                  </div>
-                )}
+                <RepoChoice
+                  repos={project.repos}
+                  picked={repoIds}
+                  disabled={busy}
+                  onToggle={toggleRepo}
+                  onChange={setRepos}
+                />
                 {repoIds.length === 0 && (
                   <p className="rpick-note" role="alert">
                     {t("reposNone")}

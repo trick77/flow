@@ -201,6 +201,75 @@ describe("App", () => {
     expect(screen.getAllByText(en.sidebar.empty)).toHaveLength(4);
   });
 
+  it("opens New session on a project's + and on Add a project the projects page", async () => {
+    window.localStorage.clear();
+    const created = summary({ id: "s-new", projectId: "p2", title: "Go" });
+    const server: Server = {
+      sessions: [],
+      projects: [
+        project,
+        {
+          ...project,
+          id: "p2",
+          name: "ovh-restock",
+          repos: [
+            { id: "r9", fullName: "dev/ovh-restock", defaultBranch: "main" },
+          ],
+        },
+      ],
+      created,
+      calls: [],
+    };
+    serve(server);
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByText(en.shell.empty);
+    fireEvent.click(
+      screen.getByRole("radio", { name: en.sidebar.groupByProject }),
+    );
+    // A project without sessions is listed, its + starts one in it.
+    fireEvent.click(
+      screen.getByRole("button", { name: "New session in ovh-restock" }),
+    );
+    const box = await screen.findByLabelText(en.composer.startPlaceholder);
+    expect(
+      screen.getByText("What should we work on in ovh-restock?"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Working in dev/ovh-restock")).toBeInTheDocument();
+    // Another +, with a draft typed: the draft moves along.
+    fireEvent.change(box, { target: { value: "Go" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "New session in scener" }),
+    );
+    expect(
+      screen.getByText("What should we work on in scener?"),
+    ).toBeInTheDocument();
+    expect(box).toHaveValue("Go");
+    fireEvent.click(
+      screen.getByRole("button", { name: "New session in ovh-restock" }),
+    );
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Go" }),
+    ).toBeInTheDocument();
+    expect(server.calls).toContain("POST /api/sessions");
+  });
+
+  it("points to the projects page from the sidebar without any project", async () => {
+    window.localStorage.clear();
+    serve({ sessions: [], projects: [], calls: [] });
+    render(<App EventSource={FakeEventSource} />);
+    await screen.findByText(en.shell.empty);
+    fireEvent.click(
+      screen.getByRole("radio", { name: en.sidebar.groupByProject }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: en.sidebar.addProject }),
+    );
+    expect(
+      screen.getByRole("heading", { level: 1, name: en.projects.title }),
+    ).toBeInTheDocument();
+  });
+
   it("starts a session from the sidebar and opens it at once", async () => {
     window.localStorage.clear();
     const created = summary({
