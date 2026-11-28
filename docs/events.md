@@ -110,7 +110,7 @@ member. The spec's "waiting" is `question`/`plan`; "needs approval" is `approval
 | tool rows, "6 results", "+18 −4", "2 of 20 failed", "Opened draft pull request" | `tool.started` (`kind`, `path`, `command`, `pattern`) + `tool.finished.result` |
 | assistant text, code blocks, tables | `assistant.text` (Markdown), live `assistant.text_delta` |
 | changed-files card | `files.changed` per repo at turn end |
-| permission card and its resolution, "capped at Accept edits by the parent" | `permission.requested` (`mode`, `modeCap`), `permission.resolved` |
+| permission card and its resolution, "capped at Accept edits by the parent" | `permission.requested` (`mode`, `modeCap`), `permission.resolved` (`remembered`: allowed by the session's earlier choice, no card shown waiting) |
 | question with options, "Answer in the composer" | `question.asked`, `question.resolved` (`answers` or `text`) |
 | plan card | `plan.proposed`, `plan.resolved` |
 | todo list | `todo.updated` (whole list) |
@@ -153,7 +153,7 @@ Sources: [typescript](https://code.claude.com/docs/en/agent-sdk/typescript),
 | `canUseTool(toolName, input, {toolUseID, requestId, suggestions})` | `permission.requested` (`canAlwaysAllow` = suggestions present) |
 | `canUseTool("AskUserQuestion", {questions})` | `question.asked`; reply = allow with `updatedInput.answers` keyed by question text |
 | `canUseTool("ExitPlanMode", {plan?})` | `plan.proposed` (**provisional**: approval path not documented; allow = approve, deny + message = keep planning) |
-| `permission.reply` allow_once / allow_always / deny | `{behavior:"allow"}` / allow + `updatedPermissions` = suggestions with `destination: "session"` (the UI's "Allow for this session"; the SDK's own destination, often `localSettings`, would write a settings file into the worktree) / `{behavior:"deny", message}` |
+| `permission.reply` allow_once / allow_always / deny | `{behavior:"allow"}` / allow + `updatedPermissions` = suggestions with `destination: "session"` (the UI's "Allow for this session"; the SDK's own destination, often `localSettings`, would write a settings file into the worktree) / `{behavior:"deny", message}`. For a request without suggestions (`canAlwaysAllow` false) the host remembers the exact request itself and passes allow_once on (docs/architecture.md, "Session allow list"); a later identical request is answered by the host, `permission.resolved {allow_always, remembered: true}` |
 | `result` `success` | `turn.ended {completed}` with `usage`, `duration_ms`, `costUsd` = this turn's share of the cumulative `total_cost_usd`; `model` from `modelUsage` (largest `costUSD` growth), `provider` claude |
 | `assistant` content `tool_use` of a tool not in the list above | `tool.started` kind `other`, `name` and `input` as given |
 | `user` message `tool_use_result` (structured result) | `tool.finished.rawResult` |

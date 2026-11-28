@@ -206,6 +206,16 @@ sandbox (Incus system container, one per project)
   missing or tampered with never keeps a host and its credential running); only the remove step reads it. Request
   drafts (permission, question, plan) wait for the owner only when logged inside a turn; otherwise the host answers
   the adapter with a deny at once, so no session waits on a request nobody can see.
+- **Session allow list.** "Allow for this session" (`allow_always`) on a request the provider offered no rule for
+  (`canAlwaysAllow` false, e.g. a Bash command the SDK has no suggestion for) would otherwise be an allow once that
+  the log calls durable. The host keeps its own list instead: the exact request (a command: tool + input with the
+  command string as given, only `description` and `timeout` ignored, so another flag is another request; an edit or
+  write: tool + the exact path; anything else: tool + the whole input; no prefixes, no patterns; a request the
+  sidecar shortened to fit the log line, or without input, is never remembered or matched), logs the owner's
+  `allow_always`, tells the agent allow once, and answers a later identical request itself: `permission.requested`,
+  then `permission.resolved {allow_always, remembered}`, the agent allowed, the session never waits. In memory only,
+  rebuilt from the log on start (the owner's resolutions, not the remembered ones), gone with the session. A rule the
+  provider offers stays the provider's (the SDK's session rule, unchanged).
 - **Command results** say whether a `message.send` was queued (`CommandResult.queued`, from the host): the browser's
   `MessageAccepted.queued` is that, not the mirrored status.
 - **flowd → Flow requests** (child-session tools, gate acquire) ride the control stream: flowd queues them with ids,
@@ -341,18 +351,26 @@ sandbox (Incus system container, one per project)
   `slow_down`), a browser poll in between is answered `pending` from memory; `access_denied` → `disconnected`,
   `expired_token` → `expired`, other OAuth errors end the code with `upstream`, network failures keep it. A
   confirmed code keeps its tokens with the flow until `GET /user` and the connect succeeded (a failed `/user`
-  answers `pending`, the next poll reads it again; the code's expiry no longer drops them). A poll while Flow holds
-  no code answers the connection as it stands (another tab's poll, a lost answer, a page shown again: never read
-  as a denial); an error answer means the code is over, the UI stops polling. The start answers the seconds left
+  answers `pending`, the next poll reads it again; the code's expiry no longer drops them), for at most 10 minutes
+  from the confirmation; a 4xx from `/user` (429 aside) ends it at once with `upstream`. A poll while Flow holds
+  no code answers the connection as it stands with `noCode` (a Flow restart, another tab's poll, a lost answer, a
+  page shown again: never read as a denial, the UI says start again); an error answer carrying an API code means
+  the code is over, the UI stops polling; a 5xx without one (a proxy's page) is a lost answer, polled again. The start answers the seconds left
   as well: the UI counts its deadline from them with its own clock (clocks differ), the poll's `expired` decides.
   The connection is one `credentials` row (kind `github`): login, expiries, sealed `{accessToken, refreshToken,
-  expiries, accountId}`. One mutex holds every load, renewal, connect and disconnect: a refresh rotates the
-  refresh token and kills the old access token ("Once you use a refresh token, that refresh token and the old
-  user access token will no longer work"), so two renewals must never run. Renewal 15 minutes before the 8-hour
+  expiries, accountId}`. One mutex holds every load, renewal, connect and disconnect, released only during a
+  renewal's call to GitHub, which is marked single-flight: a refresh rotates the refresh token and kills the old
+  access token ("Once you use a refresh token, that refresh token and the old user access token will no longer
+  work"), so two renewals must never run. Callers wait for a renewal under way (it kills their token), except
+  after a failed one: then they get the kept token at once, only the loop retries (each tick; others after a
+  tick), so a hanging token endpoint stalls a caller at most once. A renewal's answer is dropped when a disconnect
+  or connect came in meanwhile. Disconnect takes the device flow's lock first (the poll's order), so a poll
+  reading the account finishes its connect and the disconnect then removes it. Renewal 15 minutes before the 8-hour
   token ends (once per token's life; every renewal cuts off the old token until the push lands), from a one-minute
   loop and from any use; never at Flow's start while the stored token is valid; not under the caller's context
   (a cut request must not lose the only valid refresh token). The new pair is stored before the access token is
-  handed out; a failed write keeps it in memory and is retried, GitHub is never asked again with the burned one.
+  handed out; a failed write keeps it in memory and is retried, GitHub is never asked again with the burned one
+  (a lost connection's failed write too, before anything else: a restart must not send the refused token again).
   Each renewal pushes the set to warm sandboxes at once (`credentials.Service.Changed`): push-driven because flowd
   cannot dial Flow. Network errors, 5xx and 429 (whatever their body) and answers without an OAuth error are
   transient (the token is handed out while valid, then `expired`). Only a known refusal drops the tokens:
