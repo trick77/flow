@@ -104,6 +104,11 @@ button.picker:disabled:hover {
   background: var(--color-raised);
   color: var(--color-ink-bright);
 }
+/* The header's crumb clips to truncate a title; the open project menu
+   hangs below it and must not be cut off. */
+.hdr .crumb:has(.crumb-pick[aria-expanded="true"]) {
+  overflow: visible;
+}
 .crumb .crumb-pick svg.i {
   width: 13px;
   height: 13px;
@@ -201,6 +206,102 @@ button.picker:disabled:hover {
   color: var(--color-accent-strong);
 }
 
+/* A long menu: a search field on top, the options as a listbox, the active
+   one (the field keeps the focus) highlighted as a focused option is. */
+.pop-find {
+  display: flex;
+  flex-direction: column;
+  padding: 0 0 4px;
+  overflow: hidden;
+}
+.pop-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  height: 38px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-border-strong);
+  color: var(--color-muted);
+}
+.pop-search svg.i {
+  width: 14px;
+  height: 14px;
+}
+.pop-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-ink-bright);
+  font-size: 0.8125rem;
+}
+.pop-search input::placeholder {
+  color: var(--color-muted-2);
+}
+.pop-find .pop-h {
+  flex: 0 0 auto;
+}
+.pop-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 4px 0 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.pop-list .opt {
+  cursor: pointer;
+}
+.pop-list .opt.active {
+  background: var(--color-active);
+}
+.pop-list .opt[aria-selected="true"] .ck {
+  visibility: visible;
+}
+.pop-list .opt.off {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.pop-list .opt .t {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pop-empty {
+  margin: 0;
+  padding: 10px 14px 6px;
+  color: var(--color-faint);
+  font-size: 0.8125rem;
+}
+.pop-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 6px 8px 0;
+}
+.pop-act {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+.pop-act:hover {
+  background: var(--color-active);
+  color: var(--color-ink-bright);
+}
+.pop-act[aria-disabled="true"] {
+  color: var(--color-faint);
+  cursor: default;
+}
+.pop-act[aria-disabled="true"]:hover {
+  background: none;
+}
+
 .comp-note {
   margin: 8px 8px 0;
   color: var(--color-faint);
@@ -211,11 +312,69 @@ button.picker:disabled:hover {
 
 .rpick {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
   gap: 8px;
   max-width: 560px;
   margin: 18px auto 0;
+}
+.rpick-label {
+  color: var(--color-muted-2);
+  font-size: 0.75rem;
+}
+.rpick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.rchip .nm {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rpick {
+  width: 100%;
+}
+.rchip {
+  max-width: 100%;
+  min-width: 0;
+}
+/* One repository: named, nothing to pick. */
+.rpick-one {
+  margin: 14px auto 0;
+  color: var(--color-muted-2);
+  font-size: 0.8125rem;
+}
+/* Many: "5 of 12 repositories", a menu below it. */
+.rchip.rpick-btn {
+  color: var(--color-ink-warm);
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+}
+.rpick-btn svg.i {
+  width: 14px;
+  height: 14px;
+  color: var(--color-muted);
+}
+.rpick-btn[aria-expanded="true"] {
+  border-color: var(--color-border-strong);
+  background: var(--color-raised);
+}
+.rpick-btn:focus-visible {
+  outline: 2px solid var(--color-accent-strong);
+  outline-offset: 2px;
+}
+/* The timeline scrolls and ends at the composer: the menu stays short
+   enough to fit above it. */
+.rpick-many .pop.down {
+  left: 50%;
+  width: 340px;
+  max-height: min(40vh, 340px);
+  transform: translateX(-50%);
+  text-align: left;
 }
 .rchip {
   position: relative;
