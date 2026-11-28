@@ -15,6 +15,8 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
+    // Tests assert local times; CI runs in UTC.
+    env: { TZ: "Europe/Zurich" },
     coverage: {
       provider: "v8",
       // lcov is what ship check reads (the UI floor and the patch gate; its
