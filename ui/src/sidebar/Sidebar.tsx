@@ -55,37 +55,59 @@ function RowStatus({ session }: { session: SessionSummary }) {
   );
 }
 
+// SessionRow is one session. Under its project's head (inProject) the
+// project line would repeat the head: the title takes its place, beside
+// the status.
 function SessionRow({
   session,
   project,
   selected,
   onSelect,
+  inProject = false,
 }: {
   session: SessionSummary;
   project?: Project;
   selected: boolean;
   onSelect: (id: string) => void;
+  inProject?: boolean;
 }) {
   const { t } = useTranslation("sidebar");
   const name = project?.name ?? "";
+  const status = (
+    <span className="s-right">
+      <RowStatus session={session} />
+    </span>
+  );
+  const title = <span className="s-title">{session.title}</span>;
   return (
     <button
-      className={session.unseen ? "srow unseen" : "srow"}
+      className={
+        "srow" +
+        (session.unseen ? " unseen" : "") +
+        (inProject ? " in-proj" : "")
+      }
       type="button"
       aria-current={selected ? "true" : undefined}
       aria-description={session.unseen ? t("unseen") : undefined}
       onClick={() => onSelect(session.id)}
     >
-      <span className="s-proj">
-        <span className="mono-badge" aria-hidden="true">
-          {projectBadge(name)}
-        </span>
-        <span>{name}</span>
-      </span>
-      <span className="s-right">
-        <RowStatus session={session} />
-      </span>
-      <span className="s-title">{session.title}</span>
+      {inProject ? (
+        <>
+          {title}
+          {status}
+        </>
+      ) : (
+        <>
+          <span className="s-proj">
+            <span className="mono-badge" aria-hidden="true">
+              {projectBadge(name)}
+            </span>
+            <span>{name}</span>
+          </span>
+          {status}
+          {title}
+        </>
+      )}
       <span className="s-branch">
         <Icon name="branch" />
         <span>{session.branch}</span>
@@ -154,17 +176,20 @@ function ProjectHead({
   count: number;
   onAdd?: (projectId: string) => void;
 }) {
+  // The heading holds the name and count only; the dot and the "+" sit
+  // beside it, not inside (no control in a heading).
   return (
-    <h2 className="sb-section-h sb-proj-h">
-      <span className="mono-badge" aria-hidden="true">
-        {projectBadge(project.name)}
-      </span>
-      <span className="nm">{project.name}</span>
-      <span className="n">{formatNumber(count)}</span>
-      <span className="grow" />
+    <div className="sb-proj-head">
+      <h2 className="sb-section-h sb-proj-h">
+        <span className="mono-badge" aria-hidden="true">
+          {projectBadge(project.name)}
+        </span>
+        <span className="nm">{project.name}</span>
+        <span className="n">{formatNumber(count)}</span>
+      </h2>
       <SandboxDotMark project={project} />
       {onAdd && <AddButton project={project} onAdd={onAdd} />}
-    </h2>
+    </div>
   );
 }
 
@@ -190,10 +215,15 @@ function IdleProjects({
         {projects.map((p) => (
           <li
             key={p.id}
-            className="sb-prow"
-            onClick={(e) => {
-              if (!(e.target as HTMLElement).closest("button")) onAdd?.(p.id);
-            }}
+            className={onAdd ? "sb-prow can-add" : "sb-prow"}
+            onClick={
+              onAdd
+                ? (e) => {
+                    if (!(e.target as HTMLElement).closest("button"))
+                      onAdd(p.id);
+                  }
+                : undefined
+            }
           >
             <span className="mono-badge" aria-hidden="true">
               {projectBadge(p.name)}
@@ -451,7 +481,7 @@ export function Sidebar({
     </button>
   );
 
-  const rows = (list: SessionSummary[]) =>
+  const rows = (list: SessionSummary[], inProject = false) =>
     list.map((s) => (
       <SessionRow
         key={s.id}
@@ -459,13 +489,14 @@ export function Sidebar({
         project={projectOf.get(s.projectId)}
         selected={s.id === selectedId}
         onSelect={select}
+        inProject={inProject}
       />
     ));
 
   // Without any project there is nothing to start: say so and point to the
   // projects page (unless the list failed to load; the error shows then).
   const noProjects =
-    projects.length === 0 && !projectsError ? (
+    projects.length === 0 && !projectsError && !error ? (
       <div className="sb-none">
         <p className="sb-empty">{t("noProjects")}</p>
         {openProjects && (
@@ -480,7 +511,10 @@ export function Sidebar({
     if (grouping === "project") {
       const groups = groupByProject(sessions, projects);
       if (groups.length === 0)
-        return noProjects ?? <p className="sb-empty">{t("empty")}</p>;
+        return (
+          noProjects ??
+          (error ? null : <p className="sb-empty">{t("empty")}</p>)
+        );
       const idle = groups.flatMap((g) =>
         g.project && g.sessions.length === 0 ? [g.project] : [],
       );
@@ -511,7 +545,7 @@ export function Sidebar({
                   count={g.sessions.length}
                   onAdd={startNew}
                 />
-                {rows(g.sessions)}
+                {rows(g.sessions, true)}
               </section>
             );
           })}
