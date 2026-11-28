@@ -742,13 +742,93 @@ describe("NewSession", () => {
     expect(
       screen.getByText("What should we work on in riptide?"),
     ).toBeInTheDocument();
-    // Refused: the ask applies now.
+    // Refused: the "+" was dropped; the refusal stays with its draft.
     await act(async () => answer(json(409, { code: "conflict" })));
-    await waitFor(() =>
-      expect(
-        screen.getByText("What should we work on in harbor?"),
-      ).toBeInTheDocument(),
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      en.errors.conflict,
     );
+    expect(
+      screen.getByText("What should we work on in riptide?"),
+    ).toBeInTheDocument();
+    // A later "+" applies.
+    rerender({ ...props, pick: { projectId: "p2", seq: 2 } });
+    expect(
+      screen.getByText("What should we work on in harbor?"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("drops a + pressed while a start runs that then succeeds", async () => {
+    let answer: (r: Response) => void = () => {};
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === "/api/agents") return json(200, catalog);
+      if (init?.method === "POST")
+        return new Promise<Response>((r) => (answer = r));
+      return json(404, { code: "not_found" });
+    });
+    const { props, rerender } = viewWithRerender();
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    rerender({ ...props, pick: { projectId: "p2", seq: 1 } });
+    await act(async () =>
+      answer(
+        json(201, {
+          summary: { id: "s-new", projectId: "p1" },
+          worktrees: [],
+          dir: "/w",
+          lastSeq: 0,
+        }),
+      ),
+    );
+    await waitFor(() => expect(props.onCreated).toHaveBeenCalled());
+    expect(
+      screen.getByText("What should we work on in riptide?"),
+    ).toBeInTheDocument();
+  });
+
+  it("sends a new client id after a lost answer when the project changes", async () => {
+    const ids = ["id-1", "id-2", "id-3"];
+    vi.spyOn(crypto, "randomUUID").mockImplementation(
+      () => ids.shift() as `${string}-${string}-${string}-${string}-${string}`,
+    );
+    const bodies: { projectId: string; message: { clientId: string } }[] = [];
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === "/api/agents") return json(200, catalog);
+      if (init?.method === "POST") {
+        bodies.push(JSON.parse(String(init.body)));
+        throw new TypeError("network");
+      }
+      return json(404, { code: "not_found" });
+    });
+    const { props, rerender } = viewWithRerender({
+      onAnswerLost: () => Promise.resolve(),
+    });
+    fireEvent.change(await box(), { target: { value: "Go" } });
+    fireEvent.click(startButton());
+    await screen.findByText(en.composer.startLost, { exact: false });
+    // Same project: the retry keeps the id.
+    fireEvent.click(startButton());
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    // "+" to another project: a new id.
+    rerender({ ...props, pick: { projectId: "p2", seq: 1 } });
+    expect(
+      screen.queryByText(en.composer.startLost, { exact: false }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => expect(startButton()).toBeEnabled());
+    fireEvent.click(startButton());
+    await waitFor(() => expect(bodies).toHaveLength(3));
+    // The crumb's menu back to the first: again a new id.
+    fireEvent.click(screen.getByRole("button", { name: "Project: harbor" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: /riptide/ }));
+    await waitFor(() => expect(startButton()).toBeEnabled());
+    fireEvent.click(startButton());
+    await waitFor(() => expect(bodies).toHaveLength(4));
+    expect(bodies.map((b) => [b.projectId, b.message.clientId])).toEqual([
+      ["p1", "id-1"],
+      ["p1", "id-1"],
+      ["p2", "id-2"],
+      ["p1", "id-3"],
+    ]);
   });
 
   it("searches a long project menu, most recently used first", async () => {
