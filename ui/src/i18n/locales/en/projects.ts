@@ -54,7 +54,7 @@ export const projects = {
   // Adding a public repository by name.
   byName: "Add a public repository by name",
   byNameOr: "Or add a public repository by name",
-  byNamePlaceholder: "cli/cli or https://github.com/cli/cli",
+  byNamePlaceholder: "cli/cli",
   byNameAdd: "Add",
   byNameInvalid: "Use owner/name or a github.com address.",
   byNameTwice: "This repository is chosen already.",
