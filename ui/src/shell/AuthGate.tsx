@@ -120,10 +120,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
 // login endpoint is a navigation (it redirects to the identity provider).
 // failed: the last sign-in was refused; why is only in the server log.
 // The background is decoration: a CSS image (no broken-image icon when it
-// fails, bg-bg stays), anchored top left where the picture is dark and empty;
-// wide screens put the block there, narrow ones centre it. The black halo
-// behind the block is what holds text-muted and text-danger at 4.5:1: danger
-// on bare bg-bg is only 4.4:1.
+// fails, bg-bg stays). Landscape enlarges it from the top left, 125%, 170% on
+// short screens, so the dark, empty corner of the picture lies behind the
+// centred block and the bright code lines sit lower right (at 125% a short
+// landscape page put the error line on them, 3.7:1). The soft black ellipse
+// behind the block holds text-muted and text-danger at 4.5:1 with or without
+// the image: danger on bare bg-bg is 4.16:1 and needs at least 25% black
+// there (rgb 23); the core is 35%.
 export function SignIn({
   error,
   failed,
@@ -133,18 +136,18 @@ export function SignIn({
 }) {
   const { t } = useTranslation("shell");
   return (
-    <main className="relative isolate grid h-full place-items-center overflow-hidden bg-bg px-4 md:place-items-start md:px-[12vw] md:pt-[24vh]">
+    <main className="relative isolate grid h-full place-items-center overflow-hidden bg-bg px-4">
       <div
-        className="absolute inset-0 -z-10 bg-cover bg-left-top"
+        className="absolute top-0 left-0 -z-10 h-full w-full bg-cover bg-left-top landscape:h-[125%] landscape:w-[125%] [@media(orientation:landscape)_and_(max-height:600px)]:h-[170%] [@media(orientation:landscape)_and_(max-height:600px)]:w-[170%]"
         style={{ backgroundImage: `url(${signInImage})` }}
         aria-hidden="true"
         data-testid="sign-in-image"
       />
-      <div className="relative flex flex-col items-center gap-5 text-center md:items-start md:text-left">
-        <div
-          className="absolute -inset-x-40 -inset-y-32 -z-10 bg-radial-[closest-side] from-black/35 from-40% to-transparent"
-          aria-hidden="true"
-        />
+      <div
+        className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_600px_420px_at_center,rgb(0_0_0/0.35)_36%,rgb(0_0_0/0.27)_50%,rgb(0_0_0/0.16)_64%,rgb(0_0_0/0.07)_79%,rgb(0_0_0/0.02)_91%,transparent)]"
+        aria-hidden="true"
+      />
+      <div className="flex flex-col items-center gap-5 text-center">
         <h1 className="font-serif text-[2.5rem] leading-[3rem] font-medium text-ink-bright">
           {t("appName", { ns: "common" })}
         </h1>
