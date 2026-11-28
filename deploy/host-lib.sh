@@ -301,9 +301,15 @@ check_settings() {
 
 # --- state of the firewall managers ---
 
+# forward_targets prints the target of each FORWARD rule, in order: what follows -j or -g, whatever the rule's
+# matches (a conditional or commented jump counts like a bare one).
+forward_targets() {
+	iptables -S FORWARD 2>/dev/null | awk '$1 == "-A" { for (i = 3; i < NF; i++) if ($i == "-j" || $i == "-g") { print $(i + 1); break } }'
+}
+
 ban_first() {
 	[ -z "$BAN_CHAIN" ] && return 0
-	[ "$(iptables -S FORWARD 2>/dev/null | awk '$1 == "-A" { print; exit }')" = "-A FORWARD -j $BAN_CHAIN" ]
+	[ "$(forward_targets | head -n 1)" = "$BAN_CHAIN" ]
 }
 
 # wait_ban_first gives the kept-first chain's owner BAN_WAIT seconds to put it first in FORWARD again (Docker and
