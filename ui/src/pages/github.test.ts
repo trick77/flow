@@ -44,6 +44,18 @@ describe("pollOutcome", () => {
     });
   });
 
+  it("tells a server without a code from a denial", () => {
+    expect(pollOutcome({ state: "disconnected", noCode: true })).toEqual({
+      kind: "ended",
+    });
+    expect(pollOutcome({ state: "expired", noCode: true })).toEqual({
+      kind: "ended",
+    });
+    expect(
+      pollOutcome({ state: "connected", noCode: true, login: "octo-user" }),
+    ).toMatchObject({ kind: "connected" });
+  });
+
   it("reads a slow-down, with or without a new interval", () => {
     expect(pollOutcome({ state: "pending", intervalSeconds: 10 })).toEqual({
       kind: "slowDown",
@@ -81,13 +93,18 @@ describe("pollOutcome", () => {
       kind: "retry",
     });
     // The server's upstream or internal: its code is over, no retry.
-    expect(pollOutcome(undefined, new ApiError("upstream", 502))).toEqual({
-      kind: "failed",
-      code: "upstream",
+    expect(
+      pollOutcome(undefined, new ApiError("upstream", 502, undefined, true)),
+    ).toEqual({ kind: "failed", code: "upstream" });
+    expect(
+      pollOutcome(undefined, new ApiError("internal", 500, undefined, true)),
+    ).toEqual({ kind: "failed", code: "internal" });
+    // A proxy's 502/504 page carries no code: the answer was lost, retried.
+    expect(pollOutcome(undefined, new ApiError("internal", 502))).toEqual({
+      kind: "retry",
     });
-    expect(pollOutcome(undefined, new ApiError("internal", 500))).toEqual({
-      kind: "failed",
-      code: "internal",
+    expect(pollOutcome(undefined, new ApiError("internal", 504))).toEqual({
+      kind: "retry",
     });
     expect(pollOutcome(undefined, new ApiError("conflict", 409))).toEqual({
       kind: "failed",

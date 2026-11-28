@@ -30,17 +30,22 @@ import {
 
 // ApiError is a non-2xx answer (or no answer at all). code is one of the API's
 // error codes; the UI shows t(code, { ns: "errors" }), never the detail.
+// coded says the body carried one of the API's codes: the server's own answer.
+// Without it (a reverse proxy's 502/504 page, no answer at all) code is
+// internal by default, and nothing says what became of the request.
 export class ApiError extends Error {
   readonly code: ErrorCode;
   readonly status: number;
   readonly field?: string;
+  readonly coded: boolean;
 
-  constructor(code: ErrorCode, status: number, field?: string) {
+  constructor(code: ErrorCode, status: number, field?: string, coded = false) {
     super(code);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
     this.field = field;
+    this.coded = coded;
   }
 }
 
@@ -71,9 +76,10 @@ async function failure(res: Response): Promise<ApiError> {
     // Not JSON (a proxy's HTML page, an empty body): no code to read.
   }
   const b = (body ?? {}) as { code?: unknown; field?: unknown };
-  const code = isErrorCode(b.code) ? b.code : "internal";
+  const coded = isErrorCode(b.code);
+  const code = coded ? (b.code as ErrorCode) : "internal";
   const field = typeof b.field === "string" ? b.field : undefined;
-  return new ApiError(code, res.status, field);
+  return new ApiError(code, res.status, field, coded);
 }
 
 const unauthenticatedListeners = new Set<() => void>();

@@ -91,6 +91,14 @@ export const timeline = {
   modeIs: "mode {{mode}}",
   allowOnce: "Allow once",
   allowAlways: "Allow for this session",
+  // The hint when the provider offers no rule: Flow remembers exactly this.
+  allowExact: {
+    command: "Allow for this session: this exact command",
+    file: "Allow for this session: this exact file",
+    request: "Allow for this session: this exact request",
+  },
+  // A request the host allowed by itself from that earlier choice.
+  resolvedRemembered: "Allowed for this session (remembered)",
   deny: "Deny",
   resolved: {
     allow_once: "Allowed once",

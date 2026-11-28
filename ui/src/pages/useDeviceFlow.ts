@@ -23,6 +23,7 @@ export type FlowState =
   | { phase: "connected"; connection: GitHubConnection }
   | { phase: "expired" }
   | { phase: "denied" }
+  | { phase: "ended" }
   | { phase: "unavailable" }
   | { phase: "failed"; code: ErrorCode };
 
@@ -57,6 +58,8 @@ function ended(o: PollOutcome): FlowState {
       return { phase: "expired" };
     case "denied":
       return { phase: "denied" };
+    case "ended":
+      return { phase: "ended" };
     case "unavailable":
       return { phase: "unavailable" };
     case "failed":

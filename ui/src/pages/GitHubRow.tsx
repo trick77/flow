@@ -139,6 +139,7 @@ export function GitHubRow({
   const ended =
     flow.phase === "expired" ||
     flow.phase === "denied" ||
+    flow.phase === "ended" ||
     flow.phase === "failed";
   const waiting = flow.phase === "waiting" ? flow.flow : null;
   const starting = flow.phase === "starting";
@@ -213,7 +214,12 @@ export function GitHubRow({
             : t("deviceConnected")}
         </p>
       )}
-      {ended && (
+      {flow.phase === "ended" && (
+        <p className="form-status conn-note" role="status">
+          {t("deviceEnded")}
+        </p>
+      )}
+      {ended && flow.phase !== "ended" && (
         <p className="page-error" role="alert">
           {flow.phase === "expired"
             ? t("deviceExpired")

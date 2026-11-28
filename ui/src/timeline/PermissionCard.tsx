@@ -26,7 +26,9 @@ function Resolved({ item }: { item: PermissionItem }) {
     <div className={allowed ? "resolved" : "resolved denied"}>
       <Icon name={allowed ? "check" : "x"} />
       <span className="what">
-        {t(`resolved.${known}`)}{" "}
+        {allowed && item.remembered === true
+          ? t("resolvedRemembered")
+          : t(`resolved.${known}`)}{" "}
         <span className="mono">{r.command ?? r.path ?? r.tool}</span>
       </span>
     </div>
@@ -67,6 +69,14 @@ export function PermissionCard({
   };
 
   const body = r.command ?? r.path;
+  // Without a rule from the provider, "Allow for this session" is Flow's own:
+  // the host remembers this exact request (docs/events.md), which the hint says.
+  const exact =
+    kind === "command"
+      ? "command"
+      : kind === "edit" || kind === "write"
+        ? "file"
+        : "request";
   return (
     <div className="card perm" data-testid={item.key}>
       <div className="card-h">
@@ -99,6 +109,9 @@ export function PermissionCard({
               t("modeIs", { mode: t(mode, { ns: "composer" }) })}
           </div>
         )}
+        {!r.canAlwaysAllow && (
+          <p className="card-sub perm-hint">{t(`allowExact.${exact}`)}</p>
+        )}
         {error && (
           <p className="card-error" role="alert">
             {t(error, { ns: "errors" })}
@@ -114,16 +127,14 @@ export function PermissionCard({
         >
           {t("allowOnce")}
         </button>
-        {r.canAlwaysAllow && (
-          <button
-            className="btn"
-            type="button"
-            disabled={sent !== null}
-            onClick={() => answer("allow_always")}
-          >
-            {t("allowAlways")}
-          </button>
-        )}
+        <button
+          className="btn"
+          type="button"
+          disabled={sent !== null}
+          onClick={() => answer("allow_always")}
+        >
+          {t("allowAlways")}
+        </button>
         <button
           className="btn ghost"
           type="button"

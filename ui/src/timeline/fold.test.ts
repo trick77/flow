@@ -86,6 +86,33 @@ describe("foldEvents on the demo turn", () => {
     const perm = folded.items[3] as PermissionItem;
     expect(perm.request.command).toBe("make check");
     expect(perm.decision).toBe("allow_once");
+    expect(perm.remembered).toBeUndefined();
+  });
+
+  it("marks a request the host allowed from the session's earlier choice", () => {
+    const f = foldRaw([
+      mk(
+        "permission.requested",
+        {
+          requestId: "r",
+          tool: "Bash",
+          kind: "command",
+          command: "echo hi",
+          mode: "ask",
+          canAlwaysAllow: false,
+        },
+        { seq: 1 },
+      ),
+      mk(
+        "permission.resolved",
+        { requestId: "r", decision: "allow_always", remembered: true },
+        { seq: 2 },
+      ),
+    ]);
+    expect(f.items[0]).toMatchObject({
+      decision: "allow_always",
+      remembered: true,
+    });
   });
 
   it("shows the turn as running, with its open tool, part way in", () => {

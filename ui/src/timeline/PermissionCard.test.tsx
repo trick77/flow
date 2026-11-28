@@ -96,7 +96,7 @@ describe("PermissionCard", () => {
     ).toBeEnabled();
   });
 
-  it("offers Allow for this session only when the provider can remember a rule", () => {
+  it("offers Allow for this session also without a provider rule, saying it covers this exact request", () => {
     render(
       <PermissionCard
         item={item({
@@ -121,8 +121,40 @@ describe("PermissionCard", () => {
       "mode Accept edits",
     );
     expect(
-      screen.queryByRole("button", { name: en.timeline.allowAlways }),
-    ).toBeNull();
+      screen.getByRole("button", { name: en.timeline.allowAlways }),
+    ).toBeInTheDocument();
+    expect(document.querySelector(".perm-hint")?.textContent).toBe(
+      en.timeline.allowExact.file,
+    );
+  });
+
+  it("says a command without a provider rule is remembered exactly", () => {
+    render(
+      <PermissionCard
+        item={item({ request: { ...request, canAlwaysAllow: false } })}
+        sessionId="s1"
+      />,
+    );
+    expect(document.querySelector(".perm-hint")?.textContent).toBe(
+      en.timeline.allowExact.command,
+    );
+  });
+
+  it("shows no hint when the provider offers its own rule", () => {
+    render(<PermissionCard item={item()} sessionId="s1" />);
+    expect(document.querySelector(".perm-hint")).toBeNull();
+  });
+
+  it("says when the host allowed a request from the earlier choice", () => {
+    const { container } = render(
+      <PermissionCard
+        item={item({ decision: "allow_always", remembered: true })}
+        sessionId="s1"
+      />,
+    );
+    expect(container.querySelector(".resolved")).toHaveTextContent(
+      `${en.timeline.resolvedRemembered} make check`,
+    );
   });
 
   it("names an unknown agent and request kind neutrally", () => {

@@ -88,8 +88,9 @@ export const settings = {
     "Paused while this tab is hidden; it goes on when you come back.",
   deviceConnectedAs: "Connected as {{login}}.",
   deviceConnected: "GitHub is connected.",
-  deviceDenied:
-    "GitHub did not confirm the connection: it was denied or the code is no longer valid.",
+  deviceDenied: "The connection was denied on GitHub.",
+  deviceEnded:
+    "This connection attempt is no longer open. Start again to get a new code.",
   deviceExpired: "The code expired before it was confirmed.",
   deviceFailed: "Connecting failed.",
   tryAgain: "Try again",
