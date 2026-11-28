@@ -86,6 +86,8 @@ func TestBusy_spansEachOperation(t *testing.T) {
 		t.Errorf("first event %v", got)
 	}
 	busyThroughout(t, "bring-up", got, "warm")
+	// The outcome arrives with busy over, never as busy for a moment.
+	notBusyAs(t, "bring-up", got, "warm")
 
 	// A reconnect to a cached warm sandbox is no operation.
 	if _, err := r.m.Ensure(ctx, pid); err != nil {
@@ -98,11 +100,15 @@ func TestBusy_spansEachOperation(t *testing.T) {
 	if err := r.m.Stop(ctx, pid); err != nil {
 		t.Fatal(err)
 	}
-	busyThroughout(t, "stop", s.take(), "stopped")
+	got = s.take()
+	busyThroughout(t, "stop", got, "stopped")
+	notBusyAs(t, "stop", got, "stopped")
 
 	r.m.Setup(pid)
 	idle(t, r.m, &s)
-	busyThroughout(t, "setup", s.take(), "warm")
+	got = s.take()
+	busyThroughout(t, "setup", got, "warm")
+	notBusyAs(t, "setup", got, "warm")
 
 	if err := r.m.Rebuild(ctx, pid); err != nil {
 		t.Fatal(err)
@@ -174,7 +180,7 @@ func TestBusy_endsOnce(t *testing.T) {
 	}
 }
 
-func TestBusy_aReconnectCounts(t *testing.T) {
+func TestBusy_aReconnectIsNoOperation(t *testing.T) {
 	r := newRig(t)
 	ctx := t.Context()
 	if _, err := r.m.Ensure(ctx, pid); err != nil {
@@ -182,12 +188,52 @@ func TestBusy_aReconnectCounts(t *testing.T) {
 	}
 	var s seen
 	s.watch(r.m)
-	// Nothing cached (a Flow restart, a dropped connection): Warm reconnects under the lock.
+	// Nothing cached (a Flow restart) and flowd out of reach: every read's Warm reconnects and fails. None of them
+	// may flash the card busy.
 	r.m.Forget(pid)
-	if _, err := r.m.Warm(ctx, pid); err != nil {
+	r.rt.RemoveBridge("flowbr0")
+	for range 3 {
+		if _, err := r.m.Warm(ctx, pid); err == nil {
+			t.Fatal("the reconnect worked with the bridge gone")
+		}
+	}
+	for _, e := range s.take() {
+		if strings.HasSuffix(e, "/true") {
+			t.Errorf("a failing reconnect published busy: %s", e)
+		}
+	}
+	if r.m.Busy(pid) {
+		t.Error("busy")
+	}
+}
+
+func TestBusy_aRefusedRebuildIsNoOperation(t *testing.T) {
+	r := newRig(t)
+	ctx := t.Context()
+	if _, err := r.m.Ensure(ctx, pid); err != nil {
 		t.Fatal(err)
 	}
-	busyThroughout(t, "reconnect", s.take(), "warm")
+	r.m.ActiveSessions = func(context.Context, string) (int, error) { return 1, nil }
+	var s seen
+	s.watch(r.m)
+	err := r.m.Rebuild(ctx, pid)
+	var ae *apitypes.Error
+	if !errors.As(err, &ae) || ae.Code != apitypes.ErrorCodeProjectHasSessions {
+		t.Fatalf("rebuild with sessions: %v", err)
+	}
+	if got := s.take(); len(got) != 0 {
+		t.Errorf("a refused rebuild published %v", got)
+	}
+}
+
+// notBusyAs: no event shows the outcome state as busy (it is told once the operation ended).
+func notBusyAs(t *testing.T, what string, got []string, outcome string) {
+	t.Helper()
+	for _, e := range got {
+		if e == outcome+"/true" {
+			t.Errorf("%s: the outcome shown busy (%v)", what, got)
+		}
+	}
 }
 
 func TestBusy_aProjectDeleteEndsWithoutAnEvent(t *testing.T) {

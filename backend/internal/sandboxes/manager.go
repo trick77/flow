@@ -107,8 +107,9 @@ type Manager struct {
 	apis  map[string]cachedAPI
 	// bringing marks the projects whose lock a bring-up that may start the sandbox holds (Warm answers at once).
 	bringing map[string]bool
-	// ops counts per project the operations that run now or wait for its lock (a setup or start, a bring-up, a stop,
-	// a rebuild, a delete): the API's busy. Short holders of the lock (Warm, an environment push) are not counted.
+	// ops counts per project the operations that run now or wait for its lock (a setup or start, a bring-up that may
+	// start the sandbox, a stop, a rebuild, a delete): the API's busy. Warm and the environment push are not counted,
+	// a reconnect of theirs neither.
 	ops map[string]int
 	// dialed is the flowd each project's last bring-up greeted (logAPI).
 	dialed map[string]cachedAPI
@@ -551,6 +552,23 @@ func (m *Manager) setState(ctx context.Context, sb *Sandbox, state, errCode stri
 	m.changed(sb.ProjectID)
 }
 
+// settle records an operation's outcome (stopped, failed, warm): told only when no operation runs, else the last
+// one's end tells it, so the outcome arrives not busy (a stopped sandbox never reads "busy" for a moment).
+func (m *Manager) settle(ctx context.Context, sb *Sandbox, state, errCode string) {
+	sb.State, sb.ProgressCode, sb.ErrorCode = state, "", errCode
+	if err := m.Store.SetState(ctx, sb.ID, state, "", errCode); err != nil {
+		m.Log.Error("sandbox state", "sandbox", sb.Instance, "err", err)
+	}
+	m.settled(sb.ProjectID)
+}
+
+// settled tells Changed of an outcome unless an operation runs (its end tells).
+func (m *Manager) settled(projectID string) {
+	if !m.Busy(projectID) {
+		m.changed(projectID)
+	}
+}
+
 // InstanceName is a project's instance: a host name (letters first), unique by the id's random tail.
 func InstanceName(projectID string) string {
 	hexID := strings.ReplaceAll(projectID, "-", "")
@@ -637,11 +655,12 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart, wait b
 	if err != nil {
 		return nil, err
 	}
-	// Busy from before the setup state is written, so its event already says so, to after the outcome's. A no-start
-	// reconnect (Warm, the environment push, nothing cached) counts too: it holds the lock past LockWait as well.
-	defer m.beginOp(projectID).end()
+	// A bring-up that may start the sandbox is busy from before the setup state is written, so its event already says
+	// so, to after the outcome's. A no-start reconnect (Warm, the environment push) is not counted: after a Flow
+	// restart with flowd away every read would flash the card busy.
 	if mayStart {
 		m.setBringing(projectID, true)
+		defer m.beginOp(projectID).end()
 	}
 	// Setup scripts run in a bring-up that finds the sandbox not warm, never on a reconnect to a warm one (setup.go).
 	setup := sb.State != StateWarm
@@ -654,7 +673,7 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart, wait b
 		m.setBringing(projectID, false)
 	}
 	if errors.Is(err, ErrNotWarm) {
-		m.setState(ctx, &sb, StateStopped, "")
+		m.settle(ctx, &sb, StateStopped, "")
 		return nil, err
 	}
 	if err != nil {
@@ -663,7 +682,7 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart, wait b
 		// next call tries again (a fetch that failed, flowd briefly away). Failed is recorded only when the sandbox
 		// was not warm before, or this call had to create, start or move its instance (or found it needs moving).
 		if setup || touched || relocate(err) {
-			m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(failCode(err)))
+			m.settle(context.WithoutCancel(ctx), &sb, StateFailed, string(failCode(err)))
 		}
 		return nil, apitypes.Fail(failCode(err), err.Error())
 	}
@@ -845,7 +864,7 @@ func (m *Manager) greet(ctx context.Context, sb *Sandbox, addr netip.Addr, start
 	if err := m.Store.Put(ctx, *sb); err != nil {
 		return nil, err
 	}
-	m.changed(sb.ProjectID)
+	m.settled(sb.ProjectID)
 	m.Log.Info("sandbox warm", "sandbox", sb.Instance, "address", st.IPv4, "flowd", hello.Version,
 		"ms", time.Since(t0).Milliseconds())
 	return api, nil
@@ -1113,10 +1132,10 @@ func (m *Manager) Stop(ctx context.Context, projectID string) error {
 	}
 	m.setState(ctx, &sb, StateStopping, "")
 	if err := m.Runtime.Stop(ctx, sb.Instance, 30*time.Second); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
-		m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
+		m.settle(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
 		return err
 	}
-	m.setState(ctx, &sb, StateStopped, "")
+	m.settle(ctx, &sb, StateStopped, "")
 	return nil
 }
 
@@ -1180,7 +1199,7 @@ func (m *Manager) Delete(ctx context.Context, projectID string, rows func(contex
 	m.setState(ctx, &sb, StateDeleting, "")
 	if err := m.removeInstance(ctx, sb.Instance); err != nil {
 		// ctx may be what ran out: the failure is recorded all the same.
-		m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
+		m.settle(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
 		return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
 	}
 	if addrs, err := m.addresses(ctx); err != nil {
@@ -1194,7 +1213,7 @@ func (m *Manager) Delete(ctx context.Context, projectID string, rows func(contex
 	}
 	// The instance is gone whatever the caller does now (or however long the removal took): the rows must follow it.
 	if err := rows(context.WithoutCancel(ctx)); err != nil {
-		m.setState(context.WithoutCancel(ctx), &sb, StateStopped, "")
+		m.settle(context.WithoutCancel(ctx), &sb, StateStopped, "")
 		return err
 	}
 	o.endQuietly()
@@ -1211,12 +1230,13 @@ func (m *Manager) Rebuild(ctx context.Context, projectID string) error {
 		return err
 	}
 	// Busy from the drop until the setup has begun its own operation: no moment in between reads as setup left
-	// behind.
-	defer m.beginOp(projectID).end()
-	err = m.noSessions(ctx, projectID)
-	if err == nil {
-		err = m.dropInstance(ctx, projectID)
+	// behind. A rebuild refused for open sessions is no operation (as Delete).
+	if err := m.noSessions(ctx, projectID); err != nil {
+		unlock()
+		return err
 	}
+	defer m.beginOp(projectID).end()
+	err = m.dropInstance(ctx, projectID)
 	unlock()
 	if err != nil {
 		return err
@@ -1243,7 +1263,7 @@ func (m *Manager) dropInstance(ctx context.Context, projectID string) error {
 	m.setState(ctx, &sb, StateSetup, "")
 	if err := m.removeInstance(ctx, sb.Instance); err != nil {
 		// ctx may be what ran out: the failure is recorded all the same.
-		m.setState(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
+		m.settle(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
 		return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, err.Error())
 	}
 	m.Log.Info("sandbox instance deleted for a rebuild", "sandbox", sb.Instance)
