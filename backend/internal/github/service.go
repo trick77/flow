@@ -35,6 +35,8 @@ const (
 	// maxRepos bounds listGitHubRepos (the schema has no paging), maxInstallationPages the installations read.
 	maxRepos             = 1000
 	maxInstallationPages = 10
+	// maxScannedRepos bounds the repositories a search reads to find maxRepos matches (100 pages of 100).
+	maxScannedRepos = 10000
 	// reuseFlow: a start while a device code has more than this left hands out the same code.
 	reuseFlow = time.Minute
 	// refusalPause: after a refresh refusal with a code Flow does not know, GitHub is not asked again before this.
@@ -692,23 +694,24 @@ func (s *Service) ListRepos(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, apitypes.Fail(apitypes.ErrorCodeGithubNotConnected, ""))
 		return
 	}
-	repos, err := s.repos(r.Context())
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
+	repos, err := s.repos(r.Context(), q)
 	if err != nil {
 		httpapi.WriteError(w, err)
 		return
 	}
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
 	out := apitypes.GitHubRepoList{Items: []apitypes.GitHubRepo{}}
 	for _, rp := range repos {
-		if q == "" || strings.Contains(strings.ToLower(rp.FullName), q) {
-			out.Items = append(out.Items, apitypes.GitHubRepo{FullName: rp.FullName, DefaultBranch: rp.DefaultBranch,
-				Private: rp.Private, Description: rp.Description})
-		}
+		out.Items = append(out.Items, apitypes.GitHubRepo{FullName: rp.FullName, DefaultBranch: rp.DefaultBranch,
+			Private: rp.Private, Description: rp.Description})
 	}
 	httpapi.WriteJSON(w, http.StatusOK, out)
 }
 
-func (s *Service) repos(ctx context.Context) ([]Repo, error) {
+// repos is what the installations reach, at most maxRepos, sorted by name. With q (lower case) only the ones whose
+// owner/name contains it, filtered while reading: the cap counts matches, so a query finds repositories past the
+// first maxRepos an unfiltered list stops at. The repositories read are bounded by maxScannedRepos either way.
+func (s *Service) repos(ctx context.Context, q string) ([]Repo, error) {
 	token, err := s.connected(ctx)
 	if err != nil {
 		return nil, err
@@ -722,19 +725,31 @@ func (s *Service) repos(ctx context.Context) ([]Repo, error) {
 	}
 	seen := map[string]bool{}
 	var out []Repo
+	scanned := 0
 	for _, in := range inst {
-		if len(out) >= maxRepos {
+		if len(out) >= maxRepos || scanned >= maxScannedRepos {
 			break
 		}
-		list, err := s.Client.InstallationRepos(ctx, token, in.ID, maxRepos-len(out))
+		// Without a query every repository read is kept: read no more than the cap leaves room for.
+		limit := maxRepos - len(out)
+		if q != "" {
+			limit = maxScannedRepos - scanned
+		}
+		list, err := s.Client.InstallationRepos(ctx, token, in.ID, limit)
 		if err != nil {
 			s.log().Warn("listing GitHub repositories failed", "err", err)
 			return nil, upstream(detail(err))
 		}
+		scanned += len(list)
 		for _, rp := range list {
-			if k := strings.ToLower(rp.FullName); !seen[k] {
-				seen[k] = true
-				out = append(out, rp)
+			k := strings.ToLower(rp.FullName)
+			if seen[k] || q != "" && !strings.Contains(k, q) {
+				continue
+			}
+			seen[k] = true
+			out = append(out, rp)
+			if len(out) >= maxRepos {
+				break
 			}
 		}
 	}
