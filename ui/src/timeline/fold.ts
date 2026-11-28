@@ -112,6 +112,9 @@ export interface PermissionItem {
   key: string;
   request: PermissionRequested;
   decision?: PermissionDecision;
+  // remembered: the host allowed it by itself, from the owner's earlier
+  // "allow for this session" on this exact request.
+  remembered?: boolean;
 }
 
 // The agent's questions (question.asked) and, once there, how they were
@@ -499,7 +502,10 @@ export function foldEvents(state: StreamState): Folded {
       }
       case "permission.resolved": {
         const p = perms.get(e.data.requestId);
-        if (p) p.decision = e.data.decision;
+        if (p) {
+          p.decision = e.data.decision;
+          if (e.data.remembered === true) p.remembered = true;
+        }
         break;
       }
       case "question.asked": {

@@ -268,6 +268,32 @@ describe("GitHubRow device flow", () => {
     expect(within(row).getByRole("region")).toBeInTheDocument();
   });
 
+  it("no code on the server: a neutral start-again, not a denial", async () => {
+    const { row } = await connect({
+      polls: [json(200, { state: "disconnected", noCode: true })],
+    });
+    await advance(5000);
+    expect(row).toHaveTextContent(en.deviceEnded);
+    expect(row).not.toHaveTextContent(en.deviceDenied);
+    expect(within(row).queryByRole("alert")).toBeNull();
+    expect(
+      within(row).getByRole("button", { name: en.tryAgain }),
+    ).toBeInTheDocument();
+  });
+
+  it("a proxy's 502 page during the wait is retried, not a failure", async () => {
+    const { row } = await connect({
+      polls: [
+        new Response("<html>Bad Gateway</html>", { status: 502 }),
+        json(200, { state: "connected" }),
+      ],
+    });
+    await advance(5000);
+    expect(within(row).queryByRole("alert")).toBeNull();
+    await advance(5000);
+    expect(row).toHaveTextContent(en.deviceConnected);
+  });
+
   it("expired: says so", async () => {
     const { row } = await connect({ polls: [json(200, { state: "expired" })] });
     await advance(5000);

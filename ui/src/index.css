@@ -1103,6 +1103,9 @@ svg.i {
 .perm .card-h {
   padding-bottom: 6px;
 }
+.perm-hint {
+  margin-top: 6px;
+}
 .label-pill {
   display: inline-flex;
   align-items: center;

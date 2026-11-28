@@ -154,6 +154,7 @@ describe("API client", () => {
       code: "session_archived",
       status: 409,
       field: "text",
+      coded: true,
     });
     expect(errorCode(err)).toBe("session_archived");
   });
@@ -166,6 +167,8 @@ describe("API client", () => {
       const err = await listSessions().catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ApiError);
       expect(errorCode(err)).toBe("internal");
+      // Not the server's own code: a reader must not take it for its answer.
+      expect((err as ApiError).coded).toBe(false);
     }
     expect(errorCode(new Error("x"))).toBe("internal");
   });

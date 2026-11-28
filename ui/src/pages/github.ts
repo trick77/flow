@@ -40,6 +40,7 @@ export type PollOutcome =
   | { kind: "slowDown"; intervalSeconds?: number }
   | { kind: "connected"; connection: GitHubConnection }
   | { kind: "denied" }
+  | { kind: "ended" }
   | { kind: "expired" }
   | { kind: "unavailable" }
   | { kind: "retry" }
@@ -52,12 +53,14 @@ type PollAnswer = Omit<GitHubConnection, "state"> & { state: string };
 
 // pollOutcome is the one place that reads a poll's answer (or its failure).
 // pending with intervalSeconds is a slow-down (the interval now in force);
-// disconnected means the code was denied or the server holds none and no
-// connection (a server without a code answers the connection as it stands);
-// expired, that the code expired. A 501 means the server cannot connect
-// GitHub. The server answers upstream or internal only once the code is over
-// (GitHub away is pending), so those end the flow with their code; an answer
-// lost on the way is retried; any other refusal ends the flow.
+// disconnected means the code was denied; with noCode the server holds no
+// code (a restart, another tab ended it) and answers the connection as it
+// stands: not connected, the flow simply ended. expired, that the code
+// expired. A 501 means the server cannot connect GitHub. The server answers
+// upstream or internal only once the code is over (GitHub away is pending),
+// so those end the flow with their code, but only when the body carried the
+// code: a proxy's 502/504 page is an answer lost on the way, which is
+// retried; any other refusal ends the flow.
 export function pollOutcome(answer: unknown, err?: unknown): PollOutcome {
   if (err !== undefined) {
     if (err instanceof ApiError && err.code === "not_implemented") {
@@ -65,6 +68,7 @@ export function pollOutcome(answer: unknown, err?: unknown): PollOutcome {
     }
     if (
       err instanceof ApiError &&
+      err.coded &&
       err.status >= 500 &&
       (err.code === "upstream" || err.code === "internal")
     ) {
@@ -78,6 +82,7 @@ export function pollOutcome(answer: unknown, err?: unknown): PollOutcome {
     typeof a.intervalSeconds === "number" && a.intervalSeconds > 0
       ? a.intervalSeconds
       : undefined;
+  if (a.noCode === true && a.state !== "connected") return { kind: "ended" };
   switch (a.state) {
     case "pending":
       return interval === undefined
