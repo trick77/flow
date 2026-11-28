@@ -371,12 +371,11 @@ button.picker:disabled:hover {
   outline: 2px solid var(--color-accent-strong);
   outline-offset: 2px;
 }
-/* The timeline scrolls and ends at the composer: the menu stays short
-   enough to fit above it. */
-.rpick-many .pop.down {
+/* Centred under (or over) its button; its height is measured as it opens
+   (fitPopup) so the timeline's end at the composer does not cut it. */
+.rpick-many .pop {
   left: 50%;
   width: 340px;
-  max-height: min(40vh, 340px);
   transform: translateX(-50%);
   text-align: left;
 }
