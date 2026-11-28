@@ -221,12 +221,7 @@ fi
 # An existing policy of ours may be incomplete (a run interrupted while making it) but must hold no rule of
 # anyone else's: what is missing is added below.
 policy_exists() { firewall-cmd --permanent --get-policies | tr ' ' '\n' | grep -qx "$1"; }
-# own_stale POLICY RULE: a flow-sb-incus rule an earlier run made for another CONTAINER_ADDRESS or INCUS_LISTEN;
-# policy() replaces it.
-own_stale() {
-	[ "$1" = "$POLICY_INCUS" ] && printf '%s\n' "$2" |
-		grep -Eqx 'rule family="ipv4" source NOT address="[0-9.]+"( destination address="[0-9.]+")? port port="[0-9]+" protocol="tcp" reject'
-}
+# Rules of Flow's earlier settings or versions are not foreign (own_stale, host-lib.sh): policy() removes them.
 for p in $POLICIES; do
 	policy_exists "$p" || continue
 	foreign="$(firewall-cmd --permanent --policy="$p" --list-rich-rules | while IFS= read -r r; do

@@ -156,12 +156,29 @@ policy_rules() {
 		done
 		;;
 	# Every container (all Docker bridges are in zone docker) but Flow's: the Incus API's port, on the listen
-	# address (any host address for a wildcard listener).
+	# address (any host address for a wildcard listener). A wildcard listens on IPv6 too, whichever spelling
+	# (measured, Incus 6.0.4: 0.0.0.0, [::] and :port all bind *:port), and Flow dials over IPv4: then IPv6 to the
+	# port is refused for every container.
 	"$POLICY_INCUS")
 		lip="$(listen_ip)"
 		printf 'rule family="ipv4" source NOT address="%s"%s port port="%s" protocol="tcp" reject\n' \
 			"$CONTAINER_ADDRESS" "${lip:+ destination address=\"$lip\"}" "${INCUS_LISTEN##*:}"
+		[ -n "$lip" ] || printf 'rule family="ipv6" port port="%s" protocol="tcp" reject\n' "${INCUS_LISTEN##*:}"
 		;;
+	esac
+}
+
+# own_stale POLICY RULE: a rule of Flow's that an earlier run made and these settings no longer want; policy()
+# replaces or removes it instead of refusing it as someone else's. flow-sb-incus: rules for another
+# CONTAINER_ADDRESS or INCUS_LISTEN. flow-sb-host: the zone-wide IPv6 reject of setups before IPV6_NFT.
+own_stale() {
+	case "$1" in
+	"$POLICY_INCUS")
+		printf '%s\n' "$2" | grep -Eqx \
+			'rule family="ipv4" source NOT address="[0-9.]+"( destination address="[0-9.]+")? port port="[0-9]+" protocol="tcp" reject|rule family="ipv6" port port="[0-9]+" protocol="tcp" reject'
+		;;
+	"$POLICY_HOST") [ "$2" = 'rule family="ipv6" source address="::/0" reject' ] ;;
+	*) return 1 ;;
 	esac
 }
 policy_egress() {
