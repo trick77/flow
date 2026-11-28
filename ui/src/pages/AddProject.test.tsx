@@ -130,15 +130,15 @@ describe("the name", () => {
       }),
     );
     expect(nameField()).toHaveValue("shop");
+    // Emptied, it stays empty while focused: another name can be typed.
     fireEvent.change(nameField(), { target: { value: "" } });
+    expect(nameField()).toHaveValue("");
+    fireEvent.change(nameField(), { target: { value: "t" } });
+    expect(nameField()).toHaveValue("t");
+    // Left empty, it follows again.
+    fireEvent.change(nameField(), { target: { value: "" } });
+    fireEvent.blur(nameField());
     expect(nameField()).toHaveValue("other");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: en.repoRemove.replace("{{name}}", "octo/other"),
-      }),
-    );
-    addByName(`octo/${"x".repeat(80)}`);
-    expect(nameField()).toHaveValue("x".repeat(64));
     fireEvent.change(nameField(), { target: { value: "   " } });
     expect(submitBtn()).toBeDisabled();
     expect(screen.getByText(en.needName)).toBeInTheDocument();
@@ -316,6 +316,125 @@ describe("AddProject with GitHub connected", () => {
     expect(
       screen.getByRole("button", { name: en.ghConnectAgain }),
     ).toBeInTheDocument();
+  });
+
+  it("offers adding by name while the list cannot be read", async () => {
+    const calls = routeFetch({
+      "GET /api/connections": connections({
+        state: "connected",
+        available: true,
+      }),
+      "GET /api/github/repos": json(502, { code: "upstream" }),
+      "POST /api/projects": json(201, created),
+    });
+    await renderForm();
+    expect(byNameQuery()).toBeNull();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Choose repositories/ }),
+      );
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(errors.upstream);
+    addByName("cli/cli", en.byNameOr);
+    expect(chips()).toEqual(["cli/cli"]);
+    await act(async () => {
+      fireEvent.click(submitBtn());
+    });
+    expect(calls[calls.length - 1].body).toEqual({
+      name: "cli",
+      repos: ["cli/cli"],
+    });
+  });
+
+  it("clears a refusal of the repositories once one is removed", async () => {
+    routeFetch({
+      "GET /api/connections": connections({
+        state: "connected",
+        available: true,
+      }),
+      "GET /api/github/repos": json(200, {
+        items: [repo("octo/app"), repo("octo/gone")],
+      }),
+      "POST /api/projects": json(400, {
+        code: "invalid_request",
+        field: "repos",
+      }),
+    });
+    await renderForm();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Choose repositories/ }),
+      );
+    });
+    fireEvent.click(screen.getByRole("option", { name: /octo\/app/ }));
+    fireEvent.click(screen.getByRole("option", { name: /octo\/gone/ }));
+    await act(async () => {
+      fireEvent.click(submitBtn());
+    });
+    expect(screen.getByText(en.invalidRepos)).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: en.repoRemove.replace("{{name}}", "octo/gone"),
+      }),
+    );
+    expect(screen.queryByText(en.invalidRepos)).toBeNull();
+  });
+
+  it("drops the connected line when a connection made here is lost", async () => {
+    routeFetch({
+      "GET /api/connections": connections({
+        state: "disconnected",
+        available: true,
+      }),
+      "POST /api/connections/github/device": json(200, {
+        userCode: "WDJB-MJHT",
+        verificationUri: "https://github.com/login/device",
+        expiresAt: "2026-11-28T10:15:00Z",
+        expiresInSeconds: 900,
+        intervalSeconds: 1,
+      }),
+      "POST /api/connections/github/device/poll": json(200, {
+        state: "connected",
+        available: true,
+        login: "octo",
+      }),
+      "GET /api/github/repos": json(409, { code: "github_not_connected" }),
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderForm();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: en.ghConnect }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    const connected = settings.deviceConnectedAs.replace("{{login}}", "octo");
+    expect(screen.getByText(connected)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Choose repositories/ }),
+      );
+    });
+    expect(screen.getByText(en.ghExpired)).toBeInTheDocument();
+    expect(screen.queryByText(connected)).toBeNull();
+  });
+
+  it("refuses by name one the server would refuse, saying why", async () => {
+    routeFetch({
+      "GET /api/connections": connections({
+        state: "disconnected",
+        available: false,
+      }),
+    });
+    await renderForm();
+    addByName("octo/.github");
+    expect(screen.getByRole("alert")).toHaveTextContent(en.repoBadDir);
+    addByName("octo/app");
+    addByName("fork/App");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      en.repoSameDir.replace("{{name}}", "octo/app"),
+    );
+    expect(chips()).toEqual(["octo/app"]);
   });
 });
 
