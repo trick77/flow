@@ -107,6 +107,9 @@ type Manager struct {
 	apis  map[string]cachedAPI
 	// bringing marks the projects whose lock a bring-up that may start the sandbox holds (Warm answers at once).
 	bringing map[string]bool
+	// ops counts per project the operations that run now or wait for its lock (a setup or start, a bring-up, a stop,
+	// a rebuild, a delete): the API's busy. Short holders of the lock (Warm, an environment push) are not counted.
+	ops map[string]int
 	// dialed is the flowd each project's last bring-up greeted (logAPI).
 	dialed map[string]cachedAPI
 	// addrMu guards setting up Addresses (addrReady).
@@ -440,6 +443,60 @@ func (m *Manager) setBringing(projectID string, on bool) {
 	}
 }
 
+// op is one counted operation on a project's sandbox (beginOp).
+type op struct {
+	m    *Manager
+	id   string
+	once sync.Once
+}
+
+// beginOp counts an operation on the project's sandbox until its end (once; later calls do nothing). The first one
+// to begin and the last one to end tell Changed, so the app event says busy from the start of an operation to its
+// end; one that begins inside another (a bring-up inside a setup) says nothing.
+func (m *Manager) beginOp(projectID string) *op {
+	m.mu.Lock()
+	if m.ops == nil {
+		m.ops = map[string]int{}
+	}
+	m.ops[projectID]++
+	first := m.ops[projectID] == 1
+	m.mu.Unlock()
+	if first {
+		m.changed(projectID)
+	}
+	return &op{m: m, id: projectID}
+}
+
+// end ends the operation.
+func (o *op) end() { o.finish(true) }
+
+// endQuietly ends it without telling Changed: the project is gone (a sandbox.updated of state none would come
+// just before its project.removed).
+func (o *op) endQuietly() { o.finish(false) }
+
+func (o *op) finish(tell bool) {
+	o.once.Do(func() {
+		m := o.m
+		m.mu.Lock()
+		m.ops[o.id]--
+		last := m.ops[o.id] <= 0
+		if last {
+			delete(m.ops, o.id)
+		}
+		m.mu.Unlock()
+		if last && tell {
+			m.changed(o.id)
+		}
+	})
+}
+
+// Busy reports whether an operation on the project's sandbox runs now (beginOp).
+func (m *Manager) Busy(projectID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ops[projectID] > 0
+}
+
 // noSessions refuses with project_has_sessions while a session of the project is not archived; asked under the
 // project's lock, so a session's start (Ensure) cannot slip in between the count and the removal.
 func (m *Manager) noSessions(ctx context.Context, projectID string) error {
@@ -580,13 +637,16 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart, wait b
 	if err != nil {
 		return nil, err
 	}
+	// Busy from before the setup state is written, so its event already says so, to after the outcome's. A no-start
+	// reconnect (Warm, the environment push, nothing cached) counts too: it holds the lock past LockWait as well.
+	defer m.beginOp(projectID).end()
+	if mayStart {
+		m.setBringing(projectID, true)
+	}
 	// Setup scripts run in a bring-up that finds the sandbox not warm, never on a reconnect to a warm one (setup.go).
 	setup := sb.State != StateWarm
 	if setup {
 		m.setState(ctx, &sb, StateSetup, "")
-	}
-	if mayStart {
-		m.setBringing(projectID, true)
 	}
 	var touched bool
 	c, err := m.bring(ctx, &sb, mayStart, setup, &touched)
@@ -1032,6 +1092,8 @@ func (m *Manager) Warm(ctx context.Context, projectID string) (flowdproto.API, e
 // Stop stops a project's sandbox; its filesystem stays. An instance that does not exist (a bring-up failed before
 // creating it, or deleted outside Flow) is stopped already.
 func (m *Manager) Stop(ctx context.Context, projectID string) error {
+	// Busy while it waits behind a bring-up as well: the stop is under way.
+	defer m.beginOp(projectID).end()
 	unlock, err := m.lockCtx(ctx, projectID, false)
 	if err != nil {
 		return err
@@ -1102,6 +1164,8 @@ func (m *Manager) Delete(ctx context.Context, projectID string, rows func(contex
 	if err := m.noSessions(ctx, projectID); err != nil {
 		return err
 	}
+	o := m.beginOp(projectID)
+	defer o.end()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
 	defer cancel()
 	m.remember(projectID, cachedAPI{})
@@ -1133,6 +1197,7 @@ func (m *Manager) Delete(ctx context.Context, projectID string, rows func(contex
 		m.setState(context.WithoutCancel(ctx), &sb, StateStopped, "")
 		return err
 	}
+	o.endQuietly()
 	return nil
 }
 
@@ -1145,6 +1210,9 @@ func (m *Manager) Rebuild(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
+	// Busy from the drop until the setup has begun its own operation: no moment in between reads as setup left
+	// behind.
+	defer m.beginOp(projectID).end()
 	err = m.noSessions(ctx, projectID)
 	if err == nil {
 		err = m.dropInstance(ctx, projectID)
@@ -1186,8 +1254,11 @@ func (m *Manager) dropInstance(ctx context.Context, projectID string) error {
 // that asked for it (a project's creation, a start) already says so, before the app event of the bring-up's own
 // state reaches a browser that may not know the project yet.
 func (m *Manager) Setup(projectID string) {
+	// Busy until the bring-up has ended, also while it waits for the project's lock.
+	o := m.beginOp(projectID)
 	m.markSetup(projectID)
 	go func() {
+		defer o.end()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 		if _, err := m.Ensure(ctx, projectID); err != nil {
@@ -1236,12 +1307,13 @@ func (m *Manager) Describe(ctx context.Context, projectID string) apitypes.Sandb
 func (m *Manager) Lookup(ctx context.Context, projectID string) (apitypes.Sandbox, error) {
 	sb, err := m.Store.ByProject(ctx, projectID)
 	if errors.Is(err, ErrNotFound) {
-		return apitypes.Sandbox{State: apitypes.SandboxStateNone}, nil
+		// A setup queued for a new project is busy before its row exists.
+		return apitypes.Sandbox{State: apitypes.SandboxStateNone, Busy: m.Busy(projectID)}, nil
 	}
 	if err != nil {
 		return apitypes.Sandbox{State: apitypes.SandboxStateNone}, err
 	}
-	return apitypes.Sandbox{State: apitypes.SandboxState(sb.State), ProgressCode: sb.ProgressCode,
+	return apitypes.Sandbox{State: apitypes.SandboxState(sb.State), ProgressCode: sb.ProgressCode, Busy: m.Busy(projectID),
 		ErrorCode: apitypes.ErrorCode(sb.ErrorCode), LastUsedAt: sb.LastUsedAt, FlowdVersion: sb.FlowdVersion}, nil
 }
 

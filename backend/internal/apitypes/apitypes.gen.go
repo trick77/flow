@@ -271,7 +271,11 @@ var SandboxStateValues = []SandboxState{SandboxStateNone, SandboxStateSetup, San
 type Sandbox struct {
 	State SandboxState `json:"state"`
 	// i18n code of the setup step running now.
-	ProgressCode string     `json:"progressCode,omitempty"`
+	ProgressCode string `json:"progressCode,omitempty"`
+	// An operation on the sandbox runs now (a setup or start, a stop, a rebuild, a delete): another one waits for it
+	// or is refused with sandbox_busy. A setup or stopping state without it was left by an operation that did not
+	// finish (Flow restarted mid-way).
+	Busy         bool       `json:"busy,omitempty"`
 	ErrorCode    ErrorCode  `json:"errorCode,omitempty"`
 	LastUsedAt   *time.Time `json:"lastUsedAt,omitempty"`
 	DiskBytes    int64      `json:"diskBytes,omitempty"`
