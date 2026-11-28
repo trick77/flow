@@ -60,15 +60,18 @@
 # DOCKER-FORWARD, Incus (if installed) as incus.service without a managed network, a free $SUBNET; Incus installed
 # or installable with apt-get (a candidate for each package), openssl and sha256sum, btrfs tooling for a new btrfs
 # pool.
-# Detected: a ban chain, a third party's chain that keeps its jump first in FORWARD (BAN_CHAIN, default MAILCOW).
-# Present: it must be first now, the setup waits up to $BAN_WAIT s after applying for its owner to put it first
-# again, its churn is shown in the difference, and the manifest records it, so later runs and the teardown require
-# it. Absent: those steps are skipped and the output says so; refused instead when BAN_CHAIN was set explicitly
-# (a typo), recorded, or BAN_REQUIRE=1 (a host that should have it).
+# Detected: a third party's chain kept first in FORWARD (a ban or intrusion-prevention tool's): FORWARD's first rule
+# is an unconditional jump to a chain that is not Docker's (host-lib.sh, first_jump), or BAN_CHAIN names it (empty:
+# none, no detection). Found: it must be first now, the setup waits up to $BAN_WAIT s after applying for its owner
+# to put it first again, its churn is shown in the difference, and the manifest records it, so later runs and the
+# teardown require it. None: those steps are skipped and the output says so; refused instead when BAN_CHAIN names
+# one that does not exist (a typo), one was recorded, or BAN_REQUIRE=1 (a host that should have one). Detection
+# sees only what is first now: on the very first run, a chain its owner is just restoring is missed (no record);
+# the output then names any other non-Docker chain FORWARD jumps to, for BAN_CHAIN=<name>.
 #
 # Safety: records a baseline of the whole ruleset and firewalld's zones and policies before the first firewall
 # change ($STATE_DIR/baseline, written once) and a snapshot before each run (after an Incus install, to keep the
-# window short); after applying (and the ban chain's wait) it prints the difference and fails on anything Flow's
+# window short); after applying (and the wait for a kept-first chain) it prints the difference and fails on anything Flow's
 # changes do not explain, except what OTHER_CHURN names (shown, not counted; default none). It writes a manifest
 # of what it creates, each entry before the thing is made, so the teardown removes exactly that, also after an
 # interrupted run. A re-run completes what is missing, the DOCKER-USER rule included.
