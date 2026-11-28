@@ -543,10 +543,11 @@ func (m *Manager) changed(projectID string) {
 	}
 }
 
-// setState records a state; setup steps have no progress codes yet.
-func (m *Manager) setState(ctx context.Context, sb *Sandbox, state, errCode string) {
-	sb.State, sb.ProgressCode, sb.ErrorCode = state, "", errCode
-	if err := m.Store.SetState(ctx, sb.ID, state, "", errCode); err != nil {
+// setState records a state on the way (setup, stopping, deleting; an outcome goes through settle) and tells it;
+// setup steps have no progress codes yet.
+func (m *Manager) setState(ctx context.Context, sb *Sandbox, state string) {
+	sb.State, sb.ProgressCode, sb.ErrorCode = state, "", ""
+	if err := m.Store.SetState(ctx, sb.ID, state, "", ""); err != nil {
 		m.Log.Error("sandbox state", "sandbox", sb.Instance, "err", err)
 	}
 	m.changed(sb.ProjectID)
@@ -641,7 +642,7 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart, wait b
 		}
 		st, serr := m.Runtime.State(ctx, sb.Instance)
 		if serr == nil && st.Status != sandbox.StatusRunning || errors.Is(serr, sandbox.ErrNotFound) {
-			m.setState(ctx, &sb, StateStopped, "")
+			m.settle(ctx, &sb, StateStopped, "")
 			return nil, ErrNotWarm
 		}
 	}
@@ -665,7 +666,7 @@ func (m *Manager) ensure(ctx context.Context, projectID string, mayStart, wait b
 	// Setup scripts run in a bring-up that finds the sandbox not warm, never on a reconnect to a warm one (setup.go).
 	setup := sb.State != StateWarm
 	if setup {
-		m.setState(ctx, &sb, StateSetup, "")
+		m.setState(ctx, &sb, StateSetup)
 	}
 	var touched bool
 	c, err := m.bring(ctx, &sb, mayStart, setup, &touched)
@@ -1130,7 +1131,7 @@ func (m *Manager) Stop(ctx context.Context, projectID string) error {
 	if sb.State == StateDeleting {
 		return nil // nothing runs, and the state must stay what keeps a bring-up away
 	}
-	m.setState(ctx, &sb, StateStopping, "")
+	m.setState(ctx, &sb, StateStopping)
 	if err := m.Runtime.Stop(ctx, sb.Instance, 30*time.Second); err != nil && !errors.Is(err, sandbox.ErrNotFound) {
 		m.settle(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
 		return err
@@ -1196,7 +1197,7 @@ func (m *Manager) Delete(ctx context.Context, projectID string, rows func(contex
 	if err != nil {
 		return err
 	}
-	m.setState(ctx, &sb, StateDeleting, "")
+	m.setState(ctx, &sb, StateDeleting)
 	if err := m.removeInstance(ctx, sb.Instance); err != nil {
 		// ctx may be what ran out: the failure is recorded all the same.
 		m.settle(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
@@ -1260,7 +1261,7 @@ func (m *Manager) dropInstance(ctx context.Context, projectID string) error {
 	if sb.State == StateDeleting {
 		return apitypes.Fail(apitypes.ErrorCodeSandboxUnavailable, "sandbox being deleted")
 	}
-	m.setState(ctx, &sb, StateSetup, "")
+	m.setState(ctx, &sb, StateSetup)
 	if err := m.removeInstance(ctx, sb.Instance); err != nil {
 		// ctx may be what ran out: the failure is recorded all the same.
 		m.settle(context.WithoutCancel(ctx), &sb, StateFailed, string(apitypes.ErrorCodeSandboxUnavailable))
@@ -1312,7 +1313,7 @@ func (m *Manager) markSetup(projectID string) {
 	case err != nil:
 		m.Log.Warn("sandbox row", "project", projectID, "err", err)
 	case sb.State == StateStopped || sb.State == StateFailed || sb.State == StateNone:
-		m.setState(ctx, &sb, StateSetup, "")
+		m.setState(ctx, &sb, StateSetup)
 	}
 }
 
