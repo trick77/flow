@@ -49,8 +49,22 @@ export const composer = {
   startQuestion: "What should we work on in {{project}}?",
   startHint:
     "Each repository gets a worktree from its default branch, on one new branch, when you start.",
-  repos: "Repositories for this session",
+  repos: "Repositories in this session",
   reposNone: "Pick at least one repository.",
+  // A project with one repository: nothing to choose.
+  workingIn: "Working in {{repo}}",
+  // More repositories than chips fit: the menu button and its menu.
+  repoPicked_one: "{{picked}} of {{n}} repository",
+  repoPicked_other: "{{picked}} of {{n}} repositories",
+  repoSearch: "Search repositories",
+  repoSearchPlaceholder: "Search repositories",
+  repoSearchNone: "No repository matches.",
+  repoAll: "Select all",
+  repoNone: "Select none",
+  // A long project menu.
+  projectSearch: "Search projects",
+  projectSearchPlaceholder: "Search projects",
+  projectSearchNone: "No project matches.",
   startPlaceholder: "Describe the task",
   start: "Start session",
   starting: "Starting…",
