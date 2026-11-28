@@ -124,7 +124,7 @@
       "get": {
         "tags": ["connections"], "operationId": "listGitHubRepos", "x-flow-area": "connections",
         "summary": "Repositories on GitHub", "description": "Repositories the GitHub App installation can reach, for adding to a project: in every installation the owner can see, sorted by name, at most 1000. 409 github_not_connected without a connection.",
-        "parameters": [{ "name": "query", "in": "query", "required": false, "description": "Filter by name.", "schema": { "type": "string" } }],
+        "parameters": [{ "name": "query", "in": "query", "required": false, "description": "Filter: a case-insensitive part of owner/name or the description.", "schema": { "type": "string" } }],
         "responses": { "200": { "description": "The repositories.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GitHubRepoList" } } } }, "409": { "$ref": "#/components/responses/Error" }, "502": { "$ref": "#/components/responses/Error" }, "501": { "$ref": "#/components/responses/NotImplemented" } }
       }
     },
