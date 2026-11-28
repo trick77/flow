@@ -95,21 +95,41 @@ export const sandboxKeys = {
   deleting: "sandboxChipDeleting",
 } as const satisfies Record<SandboxState, string>;
 
-// sandboxTone is the chip dot's colour: running, on its way, or not running.
-export function sandboxTone(state: SandboxState): "warm" | "busy" | "down" {
+// sandboxTone is the chip dot's colour: running, on its way (an operation
+// runs, busy), or not running. A setup or stop left behind is not running.
+export function sandboxTone(
+  state: SandboxState,
+  busy = false,
+): "warm" | "busy" | "down" {
+  if (busy || state === "deleting") return "busy";
   if (state === "warm") return "warm";
-  if (state === "setup" || state === "stopping" || state === "deleting")
-    return "busy";
   return "down";
+}
+
+// chipKey is the chip's label: setup and stopping with nothing running did
+// not finish, as the project card says.
+function chipKey(state: SandboxState, busy: boolean) {
+  if (!busy && state === "setup") return "sandboxChipSetupStale";
+  if (!busy && state === "stopping") return "sandboxChipStopStale";
+  return sandboxKeys[state] ?? "sandboxChipNone";
 }
 
 // SandboxChip is the project sandbox's state; the text hides on tight
 // headers (CSS), the dot and the label stay.
-export function SandboxChip({ state }: { state: SandboxState }) {
+export function SandboxChip({
+  state,
+  busy = false,
+}: {
+  state: SandboxState;
+  busy?: boolean;
+}) {
   const { t } = useTranslation("shell");
-  const label = t(sandboxKeys[state] ?? "sandboxChipNone");
+  const label = t(chipKey(state, busy));
   return (
-    <span className={`chip sbx-chip tone-${sandboxTone(state)}`} title={label}>
+    <span
+      className={`chip sbx-chip tone-${sandboxTone(state, busy)}`}
+      title={label}
+    >
       <span className="chip-dot" aria-hidden="true" />
       <span className="txt" aria-hidden="true">
         {label}
@@ -261,6 +281,7 @@ export function Header({
   actions,
   onRename,
   sandbox,
+  sandboxBusy,
   repos,
   onOpenRepo,
 }: {
@@ -270,6 +291,8 @@ export function Header({
   actions?: ReactNode;
   onRename?: (title: string) => void;
   sandbox?: SandboxState;
+  // sandboxBusy: an operation runs on the sandbox now (Sandbox.busy).
+  sandboxBusy?: boolean;
   // repos: the session's repositories; the menu shows for more than one.
   repos?: RepoEntry[];
   onOpenRepo?: (repoId: string) => void;
@@ -298,7 +321,7 @@ export function Header({
       {repos && repos.length > 1 && (
         <ReposMenu branch={branch} repos={repos} onOpen={onOpenRepo} />
       )}
-      {sandbox && <SandboxChip state={sandbox} />}
+      {sandbox && <SandboxChip state={sandbox} busy={sandboxBusy} />}
       {actions}
     </header>
   );

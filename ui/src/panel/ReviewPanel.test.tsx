@@ -257,9 +257,24 @@ describe("ReviewPanel", () => {
 
   it("shows starting while the sandbox sets up", async () => {
     serve({ [URL1]: [{ status: 503, body: { code: "sandbox_unavailable" } }] });
-    renderPanel({ sandboxState: "setup" });
+    renderPanel({ sandboxState: "setup", sandboxBusy: true });
     expect(await screen.findByText(en.sandboxStarting)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: en.startSandbox })).toBeNull();
+  });
+
+  it("offers a start for a setup left behind, none during a stop", async () => {
+    serve({ [URL1]: [{ status: 503, body: { code: "sandbox_unavailable" } }] });
+    const view = renderPanel({ sandboxState: "setup" });
+    expect(
+      await screen.findByRole("button", { name: en.startSandbox }),
+    ).toBeInTheDocument();
+    view.unmount();
+    serve({ [URL1]: [{ status: 503, body: { code: "sandbox_unavailable" } }] });
+    renderPanel({ sandboxState: "stopping", sandboxBusy: true });
+    expect(await screen.findByText(en.sandboxDown)).toBeInTheDocument();
+    expect(screen.queryByText(en.sandboxStarting)).toBeNull();
+    expect(screen.queryByRole("button", { name: en.startSandbox })).toBeNull();
+    expect(screen.queryByRole("button", { name: en.retry })).toBeNull();
   });
 
   it("resizes with the keyboard and a drag, and remembers the width", async () => {

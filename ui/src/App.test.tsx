@@ -540,6 +540,56 @@ describe("App", () => {
     expect(screen.queryByText(en.shell.sandboxStopped)).toBeNull();
   });
 
+  it("offers no start while the sandbox is busy, one for a setup left behind", async () => {
+    serve({
+      sessions: [summary({ status: "failed" })],
+      projects: [{ ...project, sandbox: { state: "setup", busy: true } }],
+      calls: [],
+    });
+    render(<App EventSource={FakeEventSource} />);
+    expect(await screen.findByText(en.shell.sandboxStarting)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: en.shell.startSandbox }),
+    ).toBeNull();
+    expect(screen.getByTitle(en.shell.sandboxChipSetup)).toHaveClass(
+      "tone-busy",
+    );
+    const app = FakeEventSource.forUrl("/api/events")[0];
+    act(() => {
+      app.emit("app", {
+        kind: "sandbox.updated",
+        projectId: "p1",
+        sandbox: { state: "setup" },
+      });
+    });
+    expect(screen.getByText(en.shell.sandboxSetupStale)).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: en.shell.startSandbox }),
+    ).toBeVisible();
+    expect(screen.getByTitle(en.shell.sandboxChipSetupStale)).toHaveClass(
+      "tone-down",
+    );
+    act(() => {
+      app.emit("app", {
+        kind: "sandbox.updated",
+        projectId: "p1",
+        sandbox: { state: "stopping", busy: true },
+      });
+    });
+    expect(screen.getByText(en.shell.sandboxStopping)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: en.shell.startSandbox }),
+    ).toBeNull();
+    act(() => {
+      app.emit("app", {
+        kind: "sandbox.updated",
+        projectId: "p1",
+        sandbox: { state: "stopping" },
+      });
+    });
+    expect(screen.getByText(en.shell.sandboxStopStale)).toBeVisible();
+  });
+
   it("opens Projects and Settings from the header, also without sessions", async () => {
     serve({ sessions: [], projects: [project], calls: [] });
     render(<App EventSource={FakeEventSource} />);

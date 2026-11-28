@@ -109,12 +109,16 @@ describe("ProjectsPage", () => {
     expect(onBack).toHaveBeenCalled();
   });
 
-  it("offers start, rebuild and delete in setup and stopping, never a stop", () => {
-    // Such a state can outlive its operation (a restart mid bring-up); while
-    // one really runs the server answers sandbox_busy.
-    for (const state of ["setup", "stopping"] as const) {
+  it("says a setup or stop left behind and offers start, rebuild and delete", () => {
+    // Nothing runs (not busy): the operation did not finish.
+    for (const [state, text] of [
+      ["setup", en.staleSetup],
+      ["stopping", en.staleStop],
+    ] as const) {
       const { view } = renderPage([project({}, { state })]);
       const card = screen.getByRole("article", { name: "apps" });
+      expect(within(card).getByRole("status")).toHaveTextContent(text);
+      expect(within(card).getByRole("status")).toHaveClass("failed");
       expect(
         within(card)
           .getAllByRole("button")
@@ -124,7 +128,41 @@ describe("ProjectsPage", () => {
     }
   });
 
-  it("says sandbox_busy when a setup really runs", async () => {
+  it("shows what runs while busy and offers nothing that would wait", () => {
+    for (const [state, text] of [
+      ["setup", en.busySetup],
+      ["none", en.busySetup],
+      ["stopping", en.busyStopping],
+      ["deleting", en.busyDeleting],
+      ["warm", en.busyWorking],
+    ] as const) {
+      const { view } = renderPage([project({}, { state, busy: true })]);
+      const card = screen.getByRole("article", { name: "apps" });
+      expect(within(card).getByRole("status")).toHaveTextContent(text);
+      expect(within(card).getByRole("status")).toHaveClass("busy");
+      expect(within(card).queryAllByRole("button")).toEqual([]);
+      expect(within(card).getByText(en.busyNote)).toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it("drops an open confirmation once the sandbox turns busy", () => {
+    const { view, events } = renderPage([project()]);
+    fireEvent.click(screen.getByRole("button", { name: en.delete }));
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    view.rerender(
+      <ProjectsPage
+        projects={[project({}, { state: "warm", busy: true })]}
+        loaded
+        error={null}
+        onEvent={(e) => events.push(e)}
+        nav={null}
+      />,
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("says sandbox_busy when an operation began meanwhile", async () => {
     serve([json(409, { code: "sandbox_busy" })]);
     renderPage([project({}, { state: "setup" })]);
     fireEvent.click(screen.getByRole("button", { name: en.delete }));

@@ -81,6 +81,15 @@ export const projects = {
   sandboxStopped: "Stopped",
   sandboxFailed: "Failed",
   sandboxDeleting: "Deleting",
+  // An operation runs on the sandbox now (busy).
+  busySetup: "Setting up…",
+  busyStopping: "Stopping…",
+  busyDeleting: "Deleting…",
+  busyWorking: "Working…",
+  busyNote: "Start, stop, rebuild and delete return once this is done.",
+  // setup or stopping with nothing running: the operation did not finish.
+  staleSetup: "Setup did not finish",
+  staleStop: "Stop did not finish",
   start: "Start sandbox",
   stop: "Stop sandbox",
   rebuild: "Rebuild",
