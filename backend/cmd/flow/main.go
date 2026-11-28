@@ -264,20 +264,39 @@ func sandboxManager(cfg config.Config, db *sql.DB, projectStore projects.SQL, ru
 // sandboxChanged publishes a sandbox's change. The event carries the state, so the UI shows a setup turning warm
 // without asking again; a row that cannot be read publishes nothing (a made-up none would show a warm sandbox as not
 // set up), the next change or a reload brings the truth.
+// changeLookupTimeout bounds the row read of one sandbox change.
+const changeLookupTimeout = 10 * time.Second
+
 func sandboxChanged(m *sandboxes.Manager, hub *sse.Hub[apitypes.AppEvent]) func(projectID string) {
 	return serialChanges(m.Lookup, hub.Publish)
 }
 
-// serialChanges reads and publishes as one step, one change at a time: changes come from several goroutines (an
-// operation's start in one, another's end in the next), and two that read in one order and published in the other
-// would leave the older state (busy or not) shown until the next change, maybe a whole bring-up later.
+// serialChanges reads and publishes as one step, one change of a project at a time: changes come from several
+// goroutines (an operation's start in one, another's end in the next), and two that read in one order and published
+// in the other would leave the older state (busy or not) shown until the next change, maybe a whole bring-up later.
+// Projects do not wait for each other, and a read that hangs gives up after changeLookupTimeout. publish must not
+// block (sse.Hub.Publish drops for a full subscriber).
 func serialChanges(lookup func(context.Context, string) (apitypes.Sandbox, error),
 	publish func(apitypes.AppEvent)) func(projectID string) {
 	var mu sync.Mutex
-	return func(projectID string) {
+	locks := map[string]*sync.Mutex{}
+	lockOf := func(projectID string) *sync.Mutex {
 		mu.Lock()
 		defer mu.Unlock()
-		sb, err := lookup(context.Background(), projectID)
+		l, ok := locks[projectID]
+		if !ok {
+			l = &sync.Mutex{}
+			locks[projectID] = l
+		}
+		return l
+	}
+	return func(projectID string) {
+		l := lockOf(projectID)
+		l.Lock()
+		defer l.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), changeLookupTimeout)
+		defer cancel()
+		sb, err := lookup(ctx, projectID)
 		if err != nil {
 			slog.Warn("sandbox change not published: its row could not be read", "project", projectID, logging.Err(err))
 			return
