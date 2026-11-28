@@ -493,7 +493,8 @@ and without a ban chain, then end to end with Flow itself.
   gateway (`INCUS_LISTEN`, `172.30.0.1:8443`): Flow's container cannot reach the host's loopback, sandboxes are
   refused there by `flow-sb-host`, and every other container (all Docker bridges are in zone `docker`) by
   `flow-sb-incus`, which lets only Flow's static address (`CONTAINER_ADDRESS`, `172.30.1.2`, outside Docker's and
-  the sandboxes' ranges) through; matched by source address, so a container on `flow` with raw sockets could forge
+  the sandboxes' ranges) through, and for a wildcard `INCUS_LISTEN` refuses IPv6 to the port from every container
+  (every wildcard spelling binds `*:port`, measured; Flow dials over IPv4); matched by source address, so a container on `flow` with raw sockets could forge
   it or take the address over on the bridge (not measured); Incus' client certificate stays the other bar. `flow-incus-listen.service`
   sets the listener again once Docker made the bridge (Incus binds a missing address once more after 30 s, then
   never; measured);
