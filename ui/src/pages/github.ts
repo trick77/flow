@@ -213,6 +213,61 @@ export const MAX_SHOWN = 50;
 // a list this long may have been cut.
 export const LIST_CAP = 1000;
 
+// filterRepos is the picker's search over a list the server gave: a
+// case-insensitive part of owner/name or the description, repositories
+// whose name or owner/name starts with the query first, else in the list's
+// order.
+export function filterRepos(items: GitHubRepo[], query: string): GitHubRepo[] {
+  const q = query.trim().toLowerCase();
+  if (q === "") return items;
+  const starts: GitHubRepo[] = [];
+  const rest: GitHubRepo[] = [];
+  for (const r of items) {
+    const full = r.fullName.toLowerCase();
+    if (repoName(full).startsWith(q) || full.startsWith(q)) starts.push(r);
+    else if (
+      full.includes(q) ||
+      (r.description ?? "").toLowerCase().includes(q)
+    ) {
+      rest.push(r);
+    }
+  }
+  return [...starts, ...rest];
+}
+
+// DIR_RE is layout.ValidName on the server: a repository becomes a
+// directory named after it, lower case.
+const DIR_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+
+// repoDir mirrors the server's layout.RepoDir: the directory a repository
+// gets in the sandbox (its name, lower case), or null for a name that can be
+// none (a leading dot, dash or underscore, more than 63 characters). The
+// server refuses such a repository when a project is created.
+export function repoDir(fullName: string): string | null {
+  const i = fullName.indexOf("/");
+  if (i <= 0) return null;
+  const name = fullName.slice(i + 1);
+  if (name.includes("/")) return null;
+  const dir = name.toLowerCase();
+  return DIR_RE.test(dir) ? dir : null;
+}
+
+// RepoClash is why the server would refuse a repository in a project:
+// badDir, no directory can be named after it; sameDir, another chosen one
+// (a fork and its upstream) would get its directory.
+export type RepoClash =
+  { kind: "badDir" } | { kind: "sameDir"; with: string } | null;
+
+// repoClash checks a repository against the server's rule and the ones
+// chosen already (itself excluded).
+export function repoClash(fullName: string, chosen: string[]): RepoClash {
+  const dir = repoDir(fullName);
+  if (dir === null) return { kind: "badDir" };
+  const key = repoKey(fullName);
+  const other = chosen.find((c) => repoKey(c) !== key && repoDir(c) === dir);
+  return other ? { kind: "sameDir", with: other } : null;
+}
+
 // isLocked: the repository is not public (the API's own flag).
 export function isLocked(r: Pick<GitHubRepo, "private">): boolean {
   return r.private === true;
