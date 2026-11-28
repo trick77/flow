@@ -1487,6 +1487,7 @@ svg.i {
     transition: none !important;
   }
   .st-working::before,
+  .sb-dot.dot-busy,
   .spin {
     animation: none;
   }
