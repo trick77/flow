@@ -8,8 +8,9 @@ as root on the host, from a checkout of this repository.
 
 - Debian 13 (systemd, cgroup v2), Docker with Compose 2.24+, firewalld; the rest `deploy/host-setup.sh` checks in
   its preflight (header of that file).
-- Traefik with the Docker provider, an entrypoint `websecure`, a certificate (file provider) that covers Flow's
-  host name, and an external Docker network Traefik reaches containers on (`PROXY_NETWORK`, default `traefik`).
+- Traefik with the Docker provider, an entrypoint `websecure`, a certificate for Flow's host name (whichever
+  Traefik serves for it: its own wildcard, a file provider's; Flow's router names no certresolver), and an
+  external Docker network Traefik reaches containers on (`PROXY_NETWORK`, default `traefik`; it may have IPv6).
 - An OIDC provider reachable from inside Flow's container at its issuer URL.
 - A DNS name for Flow (`BACKEND_PUBLIC_FQDN`, e.g. `flow.example.com`) pointing at Traefik.
 
