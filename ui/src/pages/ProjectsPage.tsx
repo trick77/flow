@@ -1,9 +1,7 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
-  ApiError,
-  createProject,
   deleteProject,
   errorCode,
   sandboxAction,
@@ -17,6 +15,7 @@ import type {
 } from "../api/types.gen";
 import { formatDate, formatDateTime, formatNumber } from "../i18n/format";
 import { Icon, projectBadge } from "../shell";
+import { AddProject } from "./AddProject";
 import { Page } from "./Page";
 import { SetupLog } from "./SetupLog";
 
@@ -95,140 +94,6 @@ export function ProjectsPage({
         </div>
       )}
     </Page>
-  );
-}
-
-// fieldError is the sentence for a refusal of the create form: the field's
-// own where the API names one, else the code's. A repository the API cannot
-// look up for another reason (github_not_connected, upstream) says that
-// reason, not that the name is malformed.
-function fieldError(err: unknown): { field?: string; key: string } {
-  if (err instanceof ApiError && err.field === "name") {
-    return {
-      field: "name",
-      key: err.code === "conflict" ? "nameTaken" : "invalidName",
-    };
-  }
-  if (
-    err instanceof ApiError &&
-    err.field === "repos" &&
-    err.code === "invalid_request"
-  ) {
-    return { field: "repos", key: "invalidRepos" };
-  }
-  return { key: errorCode(err) };
-}
-
-// AddProject is the create form: a name and the repositories, one per line.
-function AddProject({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: (p: Project) => void;
-}) {
-  const { t } = useTranslation("projects");
-  const [name, setName] = useState("");
-  const [repos, setRepos] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<{ field?: string; key: string }>();
-
-  const list = repos
-    .split("\n")
-    .map((r) => r.trim())
-    .filter((r) => r !== "");
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setFailure(undefined);
-    createProject({ name: name.trim(), repos: list }).then(onCreated, (err) => {
-      setFailure(fieldError(err));
-      setBusy(false);
-    });
-  };
-  const message = (key: string) =>
-    failure?.field
-      ? t(key as "invalidName" | "nameTaken" | "invalidRepos")
-      : t(key as ErrorCode, { ns: "errors" });
-
-  return (
-    <form className="addp" onSubmit={submit} aria-label={t("createTitle")}>
-      <div className="addp-h">
-        <Icon name="repo" className="file-ic" />
-        <div className="grow">
-          <div className="card-title">{t("createTitle")}</div>
-        </div>
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label={t("close")}
-          onClick={onClose}
-        >
-          <Icon name="x" />
-        </button>
-      </div>
-      <div className="addp-b">
-        <div className="field">
-          <label htmlFor="project-name">{t("name")}</label>
-          <input
-            id="project-name"
-            className="input"
-            type="text"
-            autoComplete="off"
-            placeholder={t("namePlaceholder")}
-            maxLength={64}
-            value={name}
-            aria-invalid={failure?.field === "name" || undefined}
-            onChange={(e) => setName(e.target.value)}
-          />
-          {failure?.field === "name" && (
-            <span className="err" role="alert">
-              {message(failure.key)}
-            </span>
-          )}
-        </div>
-        <div className="field">
-          <label htmlFor="project-repos">{t("repos")}</label>
-          <textarea
-            id="project-repos"
-            className="input"
-            rows={3}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={t("reposPlaceholder")}
-            value={repos}
-            aria-invalid={failure?.field === "repos" || undefined}
-            aria-describedby="project-repos-hint"
-            onChange={(e) => setRepos(e.target.value)}
-          />
-          <span className="hint" id="project-repos-hint">
-            {t("reposHint")}
-          </span>
-          {failure?.field === "repos" && (
-            <span className="err" role="alert">
-              {message(failure.key)}
-            </span>
-          )}
-        </div>
-        {failure && !failure.field && (
-          <p className="page-error" role="alert">
-            {message(failure.key)}
-          </p>
-        )}
-        <div className="row-inline">
-          <button
-            type="submit"
-            className="btn primary"
-            disabled={busy || name.trim() === "" || list.length === 0}
-          >
-            {busy ? t("creating") : t("create")}
-          </button>
-          <button type="button" className="btn ghost" onClick={onClose}>
-            {t("cancel")}
-          </button>
-        </div>
-      </div>
-    </form>
   );
 }
 

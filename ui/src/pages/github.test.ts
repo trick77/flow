@@ -3,16 +3,16 @@ import type { GitHubRepo } from "../api/types.gen";
 import {
   activeFlow,
   countdown,
-  filterRepos,
-  hasRepo,
+  isLocked,
   MIN_INTERVAL_MS,
   nextInterval,
+  parseRepo,
   pollOutcome,
   repoKey,
+  repoName,
   rowState,
   safeUrl,
   SLOW_DOWN_STEP_MS,
-  toggleRepo,
 } from "./github";
 
 describe("rowState", () => {
@@ -204,60 +204,24 @@ describe("repository lines", () => {
     );
   });
 
-  it("finds a repository typed in another form", () => {
-    const text = "https://github.com/Example-Org/Repo\nother/thing";
-    expect(hasRepo(text, "example-org/repo")).toBe(true);
-    expect(hasRepo(text, "example-org/else")).toBe(false);
-    expect(hasRepo("\n\n", "a/b")).toBe(false);
+  it("parses what the server takes, keeping the case", () => {
+    expect(parseRepo(" Example-Org/Repo ")).toBe("Example-Org/Repo");
+    expect(parseRepo("https://github.com/cli/cli.git")).toBe("cli/cli");
+    expect(parseRepo("github.com/cli/cli/")).toBe("cli/cli");
+    expect(parseRepo("cli")).toBeNull();
+    expect(parseRepo("a/b/c")).toBeNull();
+    expect(parseRepo("-a/b")).toBeNull();
+    expect(parseRepo("a/b.")).toBeNull();
+    expect(parseRepo("")).toBeNull();
   });
 
-  it("adds a repository as a line of its own", () => {
-    expect(toggleRepo("", "a/b")).toBe("a/b");
-    expect(toggleRepo("x/y", "a/b")).toBe("x/y\na/b");
-    expect(toggleRepo("x/y\n\n", "a/b")).toBe("x/y\na/b");
+  it("names a project after the part behind the slash", () => {
+    expect(repoName("cli/cli-tools")).toBe("cli-tools");
   });
 
-  it("removes every line that names it, keeping the rest as typed", () => {
-    expect(toggleRepo("a/b", "a/b")).toBe("");
-    expect(toggleRepo("A/B\nx/y", "a/b")).toBe("x/y");
-    expect(toggleRepo("x/y\nhttps://github.com/a/b\nz/w\na/b", "a/b")).toBe(
-      "x/y\nz/w",
-    );
-  });
-});
-
-describe("filterRepos", () => {
-  const repo = (fullName: string, description?: string): GitHubRepo => ({
-    fullName,
-    defaultBranch: "main",
-    private: false,
-    description,
-  });
-  const items = [
-    repo("example-org/web-api"),
-    repo("example-org/api"),
-    repo("octo-user/notes", "API notes"),
-    repo("octo-user/dotfiles"),
-  ];
-
-  it("returns everything for an empty query", () => {
-    expect(filterRepos(items, " ")).toEqual({ shown: items, more: 0 });
-  });
-
-  it("puts names that start with the query first", () => {
-    expect(filterRepos(items, "API").shown.map((r) => r.fullName)).toEqual([
-      "example-org/api",
-      "example-org/web-api",
-      "octo-user/notes",
-    ]);
-    expect(filterRepos(items, "octo").shown).toHaveLength(2);
-  });
-
-  it("bounds what it shows and counts the rest", () => {
-    const many = Array.from({ length: 7 }, (_, i) => repo(`o/r${i}`));
-    expect(filterRepos(many, "", 5)).toEqual({
-      shown: many.slice(0, 5),
-      more: 2,
-    });
+  it("locks only a repository that is not public", () => {
+    const r = (v: boolean): Pick<GitHubRepo, "private"> => ({ private: v });
+    expect(isLocked(r(true))).toBe(true);
+    expect(isLocked(r(false))).toBe(false);
   });
 });

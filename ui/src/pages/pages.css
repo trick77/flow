@@ -266,6 +266,256 @@
 .addp-b {
   padding: 12px 14px 14px;
 }
+/* GitHub not connected: the offer to connect, the device code in place. */
+.addp-gh {
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-ink-warm);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+.addp-gh > p {
+  margin: 0 0 10px;
+}
+.addp-gh .conn-device,
+.addp-gh .conn-note,
+.addp-gh .page-error {
+  margin: 10px 0 0;
+}
+.addp-gh .conn-device {
+  background: var(--color-card);
+}
+
+/* The repository picker: the chosen ones as chips in a field, a button in it
+   that opens the search and the list in a popover below. */
+.rpk {
+  position: relative;
+  min-width: 0;
+}
+.rpk-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg);
+  min-width: 0;
+}
+.rpk-field.open {
+  border-color: var(--color-accent-strong);
+}
+.rpk-field[data-invalid] {
+  border-color: var(--color-danger);
+}
+.rpk-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+  max-width: 100%;
+}
+.rpk-chip {
+  max-width: 100%;
+  min-width: 0;
+  padding-right: 2px;
+  background: var(--color-raised);
+}
+.rpk-chip .mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rpk-x {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  color: var(--color-muted);
+}
+.rpk-x:hover {
+  background: var(--color-track);
+  color: var(--color-ink);
+}
+.chip .rpk-x svg.i {
+  width: 12px;
+  height: 12px;
+}
+.rpk-x:focus-visible {
+  outline-offset: 0;
+}
+.rpk-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 180px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--color-muted);
+  font-size: 0.8125rem;
+  text-align: left;
+}
+.rpk-trigger:hover {
+  color: var(--color-ink);
+}
+/* The field shows the trigger's focus: one ring, not a box in a box. */
+.rpk-trigger:focus-visible {
+  outline: none;
+}
+.rpk-field:has(.rpk-trigger:focus-visible) {
+  outline: 2px solid var(--color-accent-strong);
+  outline-offset: 2px;
+}
+.rpk-trigger .grow {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rpk-chev {
+  color: var(--color-muted-2);
+  transition: transform 0.16s ease;
+}
+[aria-expanded="true"] > .rpk-chev {
+  transform: rotate(180deg);
+}
+.rpk-lock {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--color-muted);
+}
+.rpk-pop {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(100%, 560px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-ui);
+  background: var(--color-popover);
+  box-shadow: 0 18px 32px rgba(0, 0, 0, 0.38);
+}
+.rpk-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border-strong);
+  color: var(--color-muted);
+}
+.rpk-search input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink-bright);
+  font-size: 0.8125rem;
+}
+.rpk-search input:focus,
+.rpk-search input:focus-visible {
+  outline: none;
+}
+.rpk-search input::placeholder {
+  color: var(--color-faint);
+}
+.rpk-busy {
+  flex: 0 0 auto;
+  color: var(--color-muted-2);
+  font-size: 0.6875rem;
+}
+.rpk-list {
+  max-height: min(50vh, 340px);
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.rpk-list:empty {
+  display: none;
+}
+.rpk-opt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin: 0 4px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  color: var(--color-ink-bright);
+  cursor: pointer;
+}
+.rpk-opt.active {
+  background: var(--color-track);
+}
+.rpk-ic {
+  color: var(--color-muted);
+}
+.rpk-opt[aria-selected="true"] .rpk-ic {
+  color: var(--color-success);
+}
+.rpk-t {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.rpk-nm,
+.rpk-ds {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rpk-nm {
+  font-size: 0.8125rem;
+}
+.rpk-nm.mono {
+  font-size: 0.75rem;
+}
+.rpk-ds {
+  color: var(--color-muted);
+  font-size: 0.6875rem;
+  line-height: 1.35;
+}
+.rpk-note {
+  margin: 0;
+  padding: 8px 14px;
+  border-top: 1px solid var(--color-border-strong);
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+.rpk-search + .rpk-list:empty + .rpk-note {
+  border-top: 0;
+}
+.rpk-note.err {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-danger);
+}
+.field > .label {
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+.field > .rpk-chips {
+  margin-bottom: 2px;
+}
 
 /* forms */
 .field {

@@ -1,7 +1,7 @@
 // The Projects page. Owned by the projects and settings pages area.
 export const projects = {
   title: "Projects",
-  lead: "Each project groups one or more GitHub repositories in one warm sandbox. Sessions run in worktrees inside it.",
+  lead: "A project is one or more GitHub repositories in one warm sandbox. Sessions run in worktrees inside it.",
   add: "Add project",
   empty: "No projects yet.",
   emptyHint: "Add one with the repositories its sessions will work in.",
@@ -10,18 +10,62 @@ export const projects = {
   createTitle: "Add project",
   close: "Close",
   name: "Name",
-  namePlaceholder: "apps",
+  // The name follows the first repository until the owner types one.
+  namePlaceholder: "Named after the first repository",
+  nameHint: "Shown in the sidebar and on the project's card.",
   repos: "Repositories",
-  reposHint:
-    "One per line, as owner/name or https://github.com/owner/name. Only public repositories until GitHub is connected.",
-  reposPlaceholder: "owner/name",
   create: "Create project",
   creating: "Creating…",
+  needRepos: "Choose at least one repository.",
+  needName: "Give the project a name.",
+  // The repository picker (GitHub connected).
+  pickRepos: "Choose repositories",
+  pickMore: "Add a repository",
+  repoSearch: "Search repositories",
+  repoSearchPlaceholder: "Search your repositories",
+  repoList: "Repositories on GitHub",
+  repoLoading: "Loading your repositories…",
+  repoSearching: "Searching…",
+  repoNoMatch: "No repository matches “{{query}}”.",
+  repoNone: "This GitHub connection reaches no repositories.",
+  repoShown: "Showing the first {{shown}} of {{total}}. Type to narrow.",
+  repoCapped: "GitHub lists at most {{n}}. Type to narrow.",
+  repoListFailed: "The repositories could not be loaded.",
+  repoRetry: "Try again",
+  repoAddByName: "Add {{name}}",
+  // The lock icon's name; public repositories carry no mark.
+  repoNotPublic: "not public",
+  repoRemove: "Remove {{name}}",
+  repoChosen: "Chosen repositories",
+  repoMatches_one: "{{n}} repository",
+  repoMatches_other: "{{n}} repositories",
+  // GitHub not connected (but available) in the form.
+  ghOffer:
+    "Connect GitHub to choose from your repositories, the ones that are not public included.",
+  ghExpired:
+    "The GitHub connection has expired. Connect again to choose from your repositories.",
+  ghConnect: "Connect GitHub",
+  ghConnectAgain: "Connect again",
+  ghStarting: "Starting…",
+  ghTryAgain: "Try again",
+  // The server has no GitHub client id.
+  ghUnavailable:
+    "Only public repositories work on this installation. The operator enables GitHub with BACKEND_GITHUB_CLIENT_ID.",
+  // Adding a public repository by name.
+  byName: "Add a public repository by name",
+  byNameOr: "Or add a public repository by name",
+  byNamePlaceholder: "cli/cli or https://github.com/cli/cli",
+  byNameAdd: "Add",
+  byNameInvalid: "Use owner/name or a github.com address.",
+  byNameTwice: "This repository is chosen already.",
   // Field-level refusals of the create form (invalid_request with a field).
   invalidName: "Give the project a name of at most 64 characters.",
   nameTaken: "A project with this name exists already.",
   invalidRepos:
-    "Name at least one repository as owner/name or a github.com URL, each once.",
+    "A repository was refused: check that each exists on GitHub and is chosen once.",
+  // github_not_connected on a repository: not found as a public one.
+  notFoundPublic:
+    "A repository was not found among the public ones. If it is not public, connect GitHub first.",
   // Cards.
   repoCount_one: "{{n}} repository",
   repoCount_other: "{{n}} repositories",

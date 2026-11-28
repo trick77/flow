@@ -170,77 +170,50 @@ export function safeUrl(url: string): string | null {
   }
 }
 
-// repoKey reads one line of the repositories field as owner/name, lower
-// case: "Example-Org/Repo", "https://github.com/example-org/repo.git" and
-// "github.com/example-org/repo/" are the same repository.
-export function repoKey(line: string): string {
-  return line
+// stripRepo drops what a pasted GitHub address carries around owner/name.
+function stripRepo(text: string): string {
+  return text
     .trim()
     .replace(/^https?:\/\//i, "")
     .replace(/^(www\.)?github\.com\//i, "")
     .replace(/\/+$/, "")
-    .replace(/\.git$/i, "")
-    .toLowerCase();
+    .replace(/\.git$/i, "");
 }
 
-function lines(text: string): string[] {
-  return text.split("\n");
+// repoKey is a repository's identity, lower case: "Example-Org/Repo",
+// "https://github.com/example-org/repo.git" and "github.com/example-org/repo/"
+// are the same repository.
+export function repoKey(text: string): string {
+  return stripRepo(text).toLowerCase();
 }
 
-// hasRepo says whether the field names the repository already, in any form.
-export function hasRepo(text: string, fullName: string): boolean {
-  const key = repoKey(fullName);
-  return lines(text).some((l) => l.trim() !== "" && repoKey(l) === key);
+// REPO_RE is the server's own check (projects.NormalizeRepo): an owner of up
+// to 39 letters, digits or dashes, a name of letters, digits, dot, dash or
+// underscore, not ending in a dot.
+const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
+
+// parseRepo reads owner/name or a github.com address as owner/name, the case
+// as typed (GitHub ignores it); null for anything the server would refuse.
+export function parseRepo(text: string): string | null {
+  const s = stripRepo(text);
+  return REPO_RE.test(s) && !s.endsWith(".") ? s : null;
 }
 
-// toggleRepo adds the repository as a line of its own, or removes every line
-// that names it (in whatever form it was typed). Other lines stay as typed.
-export function toggleRepo(text: string, fullName: string): string {
-  if (hasRepo(text, fullName)) {
-    const key = repoKey(fullName);
-    return lines(text)
-      .filter((l) => l.trim() === "" || repoKey(l) !== key)
-      .join("\n")
-      .replace(/^\n+/, "")
-      .replace(/\n{2,}$/, "\n");
-  }
-  const kept = text.replace(/\s+$/, "");
-  return kept === "" ? fullName : `${kept}\n${fullName}`;
+// repoName is the part after the slash: what a new project is called until
+// the owner names it.
+export function repoName(fullName: string): string {
+  return fullName.slice(fullName.indexOf("/") + 1);
 }
 
 // MAX_SHOWN bounds the options the picker renders at once; the search
 // narrows the rest.
 export const MAX_SHOWN = 50;
 
-// filterRepos is the picker's search over the list the server returned: a
-// case-insensitive match on owner/name (and the description), repositories
-// whose name starts with the query first, else in the server's order; at most
-// limit, with the count left out.
-export function filterRepos(
-  items: GitHubRepo[],
-  query: string,
-  limit = MAX_SHOWN,
-): { shown: GitHubRepo[]; more: number } {
-  const q = query.trim().toLowerCase();
-  let matches = items;
-  if (q !== "") {
-    const starts: GitHubRepo[] = [];
-    const rest: GitHubRepo[] = [];
-    for (const r of items) {
-      const full = r.fullName.toLowerCase();
-      const name = full.slice(full.indexOf("/") + 1);
-      if (name.startsWith(q) || full.startsWith(q)) starts.push(r);
-      else if (
-        full.includes(q) ||
-        (r.description ?? "").toLowerCase().includes(q)
-      ) {
-        rest.push(r);
-      }
-    }
-    matches = [...starts, ...rest];
-  }
-  return {
-    shown: matches.slice(0, limit),
-    more: Math.max(0, matches.length - limit),
-  };
+// LIST_CAP is the most repositories the API lists (GET /api/github/repos):
+// a list this long may have been cut.
+export const LIST_CAP = 1000;
+
+// isLocked: the repository is not public (the API's own flag).
+export function isLocked(r: Pick<GitHubRepo, "private">): boolean {
+  return r.private === true;
 }
