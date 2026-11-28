@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import { Picker } from "./Picker";
+import { MultiPicker, Picker } from "./Picker";
 
 function picker(onChange = vi.fn()) {
   render(
@@ -91,6 +91,144 @@ describe("Picker", () => {
     expect(item(/Berry/)).toHaveFocus();
     fireEvent.keyDown(item(/Berry/), { key: "Escape" });
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("searches with the focus in the field, skipping disabled options", () => {
+    const onChange = vi.fn();
+    render(
+      <Picker
+        label="Fruit"
+        heading="Pick one"
+        value="a"
+        onChange={onChange}
+        search={{ label: "Find", placeholder: "Find", empty: "None" }}
+        options={[
+          { value: "a", label: "Apple" },
+          { value: "c", label: "Cherry", disabled: true },
+          { value: "d", label: "Date", description: "dried" },
+        ]}
+      >
+        Apple
+      </Picker>,
+    );
+    fireEvent.click(button());
+    const field = screen.getByRole("combobox", { name: "Find" });
+    expect(field).toHaveFocus();
+    // The heading gives way to the field.
+    expect(screen.queryByText("Pick one")).not.toBeInTheDocument();
+    const opt = (name: RegExp) => screen.getByRole("option", { name });
+    expect(opt(/Cherry/)).toHaveAttribute("aria-disabled", "true");
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(field).toHaveAttribute("aria-activedescendant", opt(/Date/).id);
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    expect(field).toHaveAttribute("aria-activedescendant", opt(/Apple/).id);
+    fireEvent.keyDown(field, { key: "ArrowUp" });
+    expect(field).toHaveAttribute("aria-activedescendant", opt(/Date/).id);
+    // A click on a disabled one does nothing; the mouse moves the active.
+    fireEvent.click(opt(/Cherry/));
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.mouseMove(opt(/Apple/));
+    expect(field).toHaveAttribute("aria-activedescendant", opt(/Apple/).id);
+    // The field takes a click; the list keeps the focus where it is.
+    expect(fireEvent.mouseDown(field)).toBe(true);
+    expect(fireEvent.mouseDown(opt(/Apple/))).toBe(false);
+    // The description is searched too.
+    fireEvent.change(field, { target: { value: "dried" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    fireEvent.change(field, { target: { value: "zzz" } });
+    expect(screen.getByRole("status")).toHaveTextContent("None");
+    fireEvent.keyDown(field, { key: "ArrowDown" });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.click(opt(/Date/));
+    expect(onChange).toHaveBeenCalledWith("d");
+    expect(button()).toHaveFocus();
+    fireEvent.click(button());
+    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Tab" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("keeps the order it opened with while options move", () => {
+    const opts = [
+      { value: "a", label: "Apple" },
+      { value: "b", label: "Berry" },
+    ];
+    const search = { label: "Find", placeholder: "Find", empty: "None" };
+    const { rerender } = render(
+      <Picker
+        label="Fruit"
+        value="a"
+        onChange={vi.fn()}
+        search={search}
+        options={opts}
+      >
+        A
+      </Picker>,
+    );
+    fireEvent.click(button());
+    rerender(
+      <Picker
+        label="Fruit"
+        value="a"
+        onChange={vi.fn()}
+        search={search}
+        options={[...opts].reverse().concat({ value: "c", label: "Cherry" })}
+      >
+        A
+      </Picker>,
+    );
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Apple",
+      "Berry",
+      "Cherry",
+    ]);
+  });
+
+  it("closes a multi picker when the focus leaves it", () => {
+    const onChange = vi.fn();
+    render(
+      <>
+        <MultiPicker
+          label="Repos"
+          values={["a"]}
+          onChange={onChange}
+          search={{ label: "Find", placeholder: "Find", empty: "None" }}
+          all="All"
+          none="None"
+          options={[
+            { value: "a", label: "Apple" },
+            { value: "b", label: "Berry" },
+          ]}
+        >
+          1 of 2
+        </MultiPicker>
+        <button type="button">outside</button>
+      </>,
+    );
+    const open = screen.getByRole("button", { name: "Repos" });
+    fireEvent.keyDown(open, { key: "ArrowUp" });
+    const none = screen.getByRole("button", { name: "None" });
+    // Inside: stays open.
+    fireEvent.blur(screen.getByRole("combobox"), { relatedTarget: none });
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    fireEvent.keyDown(none, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(open).toHaveFocus();
+    fireEvent.click(open);
+    // A click on the padding keeps the focus; a click on All does not.
+    expect(fireEvent.mouseDown(screen.getByRole("dialog"))).toBe(false);
+    expect(
+      fireEvent.mouseDown(screen.getByRole("button", { name: "All" })),
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("option", { name: "Berry" }));
+    expect(onChange).toHaveBeenLastCalledWith(["a", "b"]);
+    fireEvent.click(screen.getByRole("option", { name: "Apple" }));
+    expect(onChange).toHaveBeenLastCalledWith([]);
+    fireEvent.blur(screen.getByRole("combobox"), {
+      relatedTarget: screen.getByRole("button", { name: "outside" }),
+    });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("shows a note and can be disabled", () => {
