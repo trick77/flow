@@ -94,9 +94,11 @@ the sandbox network's gateway (`172.30.0.1:8443`, `INCUS_LISTEN`) and Flow's res
 `/etc/flow-host/incus` (`CERT_DIR`), owned by 65532 so the container can read it. Only Flow's container, at its
 static address on the sandbox network (`CONTAINER_ADDRESS`, default `172.30.1.2`, set in `compose.yaml`), reaches
 the API; every other container is refused (firewalld policy `flow-sb-incus`). Sandboxes have no IPv6: the unit
-`flow-sandbox-ipv6.service` keeps the nftables table `bridge flow_sandbox` (drops every IPv6 frame on `flowbr0`)
+`flow-sandbox-ipv6.service` keeps the nftables table `bridge flow_sandbox` (drops every IPv6 or VLAN-tagged frame on `flowbr0`)
 and `disable_ipv6` on the bridge; other Docker networks, an IPv6 one for Traefik included, are not touched, and
-the preflight lists those with IPv6. Settings changed here
+the preflight lists those with IPv6. A host set up before that (its `flow-sb-host` carries
+`rule family="ipv6" source address="::/0" reject`): run the setup again; it loads the table and the sysctl first,
+then removes that rule. Settings changed here
 (`BACKEND_SANDBOX_*`, `BACKEND_INCUS_POOL`, `BACKEND_INCUS_PROJECT`, `INCUS_LISTEN`, `CONTAINER_ADDRESS`,
 `CERT_DIR`, `DOCKER_NETWORK`) must reach `.env` too (step 3). The pool's size and place: `POOL_SIZE`, `POOL_PATH`
 ("Sizing a dedicated host"). A host set up before the listen address moved to the gateway: run it again, then `.env`'s `BACKEND_INCUS_URL` is `https://<INCUS_LISTEN>`, and `docker compose up -d`

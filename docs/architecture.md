@@ -456,7 +456,8 @@ and without a ban chain, then end to end with Flow itself.
   `security.port_isolation` (no L2 traffic between sandboxes), `security.mac_filtering` and
   `security.ipv4_filtering` with a static `ipv4.address` (no spoofing; Incus adds its `table bridge incus`
   chains, which do not depend on `br_netfilter`). No IPv6 in sandboxes: host-setup's nftables table
-  `bridge flow_sandbox` drops every IPv6 frame entering `flowbr0` (`meta ibrname`, so a re-created bridge is
+  `bridge flow_sandbox` drops every IPv6 frame entering `flowbr0`, and every VLAN-tagged one (nft sees a tag's
+  ether type as `8021q`, also for a priority tag that Linux takes as untagged; measured) (`meta ibrname`, so a re-created bridge is
   covered; bridge-family hooks need no `br_netfilter`), and the bridge's host side has `disable_ipv6=1`. Other
   Docker networks keep their IPv6 (the owner's Traefik network has it). Measured before (lab, firewalld's
   `IPv6_rpfilter=strict`; the L2 results with the bridge-nf-call sysctls at 0, standing in for a host without

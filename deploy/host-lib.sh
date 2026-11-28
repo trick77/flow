@@ -235,14 +235,28 @@ RULE_SPEC="-i $BRIDGE -s $RANGE -m conntrack --ctstate DNAT -j REJECT --reject-w
 # security.ipv6_filtering (refuses to start a NIC without br_netfilter: "security.ipv6_filtering requires bridge
 # netfilter: sysctl net.bridge.bridge-nf-call-ip6tables not enabled", Incus 6.0.4), narrowing the firewalld reject
 # (it can only match addresses; the open path used a link-local source, which every bridge's containers share).
-IPV6_NFT="add table bridge $IPV6_TABLE; flush table bridge $IPV6_TABLE; add chain bridge $IPV6_TABLE ipv6 { type filter hook prerouting priority filter; policy accept; }; add rule bridge $IPV6_TABLE ipv6 meta ibrname \"$BRIDGE\" ether type ip6 drop"
+# VLAN-tagged frames are dropped as well: nft sees a tagged frame's ether type as 8021q, not ip6 (measured: a
+# sandbox's priority-tagged ICMPv6, VLAN id 0, which Linux takes as untagged, counted as 8021q), and nothing of
+# Flow's uses VLANs on BRIDGE. Incus' filtering drops them from sandbox ports too (ether type != { ip, arp, ip6 });
+# this holds without it.
+IPV6_RULES="ether type ip6 drop
+ether type { 8021q, 8021ad } drop"
+IPV6_NFT="add table bridge $IPV6_TABLE; flush table bridge $IPV6_TABLE; add chain bridge $IPV6_TABLE ipv6 { type filter hook prerouting priority filter; policy accept; }; add rule bridge $IPV6_TABLE ipv6 meta ibrname \"$BRIDGE\" ether type ip6 drop; add rule bridge $IPV6_TABLE ipv6 meta ibrname \"$BRIDGE\" ether type { 8021q, 8021ad } drop"
+# ipv6_table_ok: each of IPV6_RULES, for BRIDGE, exactly once.
 ipv6_table_ok() {
-	nft list chain bridge "$IPV6_TABLE" ipv6 2>/dev/null | grep -qF "meta ibrname \"$BRIDGE\" ether type ip6 drop"
+	have="$(nft list chain bridge "$IPV6_TABLE" ipv6 2>/dev/null)" || return 1
+	printf '%s\n' "$IPV6_RULES" | while IFS= read -r r; do
+		[ "$(printf '%s\n' "$have" | grep -cF "meta ibrname \"$BRIDGE\" $r")" = 1 ] || exit 1
+	done
 }
 # The second layer: no IPv6 on the host's side of BRIDGE (no link-local address; the kernel discards IPv6 received
-# there before netfilter: measured, table gone and bridge-nf-call 0, nothing reached prerouting). Docker leaves it on for an IPv4-only network (measured: link-local present, disable_ipv6 0) and keeps it
-# across its restarts (measured); a re-created bridge has it on again until Docker next restarts, the table holds.
-ipv6_sysctl() { printf '/proc/sys/net/ipv6/conf/%s/disable_ipv6\n' "$BRIDGE"; }
+# there before netfilter: measured, table gone and bridge-nf-call 0, nothing reached prerouting). Docker leaves it
+# on for an IPv4-only network (measured: link-local present, disable_ipv6 0) and keeps it across its restarts
+# (measured); a re-created bridge has it on again until Docker next restarts, the table holds.
+IPV6_PROC=/proc/sys/net/ipv6
+ipv6_sysctl() { printf '%s/conf/%s/disable_ipv6\n' "$IPV6_PROC" "$BRIDGE"; }
+# ipv6_kernel: the kernel has IPv6 at all (booted with ipv6.disable=1 it has no IPV6_PROC, and nothing to switch off).
+ipv6_kernel() { [ -d "$IPV6_PROC" ]; }
 
 # --- address arithmetic (awk: POSIX sh has no 32-bit integers to rely on) ---
 
