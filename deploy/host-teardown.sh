@@ -10,9 +10,9 @@
 # Every step checks first, so a teardown that stopped half way can simply be run again. Verification compares
 # with a snapshot taken at the start of this run, not with the setup's old baseline: only Flow's own lines may
 # disappear and nothing may appear, so firewall changes the host made since the setup (a container, a ban) are
-# neither reported nor undone (OTHER_CHURN as in host-setup.sh). Then nothing of Flow's may be left, the ban chain
-# (when the host has one; detected and required as in host-setup.sh, and always when the setup recorded it) must be
-# first in FORWARD again and DOCKER-USER before DOCKER-FORWARD.
+# neither reported nor undone (OTHER_CHURN as in host-setup.sh). Then nothing of Flow's may be left, a third
+# party's chain kept first in FORWARD (when the host has one; detected and required as in host-setup.sh, and always
+# when the setup recorded it) must be first again and DOCKER-USER before DOCKER-FORWARD.
 #
 # Refuses while a Docker container is attached to the Docker network (Flow's own: `docker network disconnect`
 # it first), and when the project or pool settings differ from those the manifest records. Sandboxes and volumes

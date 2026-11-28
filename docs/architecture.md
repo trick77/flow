@@ -445,9 +445,9 @@ sandbox (Incus system container, one per project)
 ## Sandbox network
 
 The host is a shared server running Docker containers behind a layered firewall that must stay intact: Docker on
-iptables-nft and firewalld on nftables (both required), possibly a third party's ban chain that keeps its jump first
-in FORWARD, tables of its own. Measured in the lab `flow-net` (report `flow-net-findings.md`, owner's plans), with
-and without a ban chain, then end to end with Flow itself.
+iptables-nft and firewalld on nftables (both required), possibly a third party's chain kept first in FORWARD (a
+ban or intrusion-prevention tool's), tables of its own. Measured in the lab `flow-net` (report
+`flow-net-findings.md`, owner's plans), with and without such a chain, then end to end with Flow itself.
 
 - **Decision.** One Docker bridge network dedicated to Flow, `flow` on bridge `flowbr0` (`172.30.0.0/16`; Docker
   allocates only from `172.30.0.0/24`, the rest is the sandboxes' range `172.30.128.0/17`). Docker provides
@@ -477,9 +477,10 @@ and without a ban chain, then end to end with Flow itself.
   as it is); `enable_icc=false` (loads `br_netfilter` host-wide, changing bridged traffic for every container); a
   firewalld zone of its own for `flowbr0` (conflicts with Docker's runtime zone membership).
 - **Host additions**, by the owner's hand with `deploy/host-setup.sh` (preconditions in its header; baseline, dry
-  run, verified diff, `OTHER_CHURN` names others' churn to show but not count; the ban chain, when the host has
-  one, first before and after: `BAN_CHAIN` names it, a name set explicitly or recorded by the setup must exist,
-  `BAN_REQUIRE=1` refuses a host without the default) and reversed by `deploy/host-teardown.sh`: firewalld policies `flow-sb-host` (range → host rejected),
+  run, verified diff, `OTHER_CHURN` names others' churn to show but not count; a third party's chain kept
+  first in FORWARD, when the host has one, first before and after: detected as FORWARD's first rule jumping to a
+  chain that is not Docker's (no name assumed), or named by `BAN_CHAIN` (empty: none); one named or recorded by the
+  setup must exist, `BAN_REQUIRE=1` refuses a host where none is found) and reversed by `deploy/host-teardown.sh`: firewalld policies `flow-sb-host` (range → host rejected),
   `flow-sb-docker` (range → other Docker bridges, also the routed hairpin back
   to another sandbox) and `flow-sb-lan` (range → 10/8, 172.16/12, 192.168/16, 169.254/16 with cloud metadata,
   100.64/10 behind the host, which it forwards otherwise: measured; so resolvers must be public or on the sandbox

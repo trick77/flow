@@ -12,17 +12,18 @@ POOL="${BACKEND_INCUS_POOL:-default}"
 # Host-side settings.
 DOCKER_NETWORK="${DOCKER_NETWORK:-flow}"
 DOCKER_RANGE="${DOCKER_RANGE:-172.30.0.0/24}" # Docker's own allocations (Flow's container); the rest is RANGE's
-# A third party's iptables chain that keeps its jump first in FORWARD (mailcow's netfilter container: MAILCOW). If it
-# exists, it must be first before and after every change. If the default does not exist, its checks are skipped and
-# the output says so; a name set explicitly, or recorded by an earlier setup, must exist (a typo or a chain that is
-# being restarted never switches the checks off). BAN_REQUIRE=1: the default is required too. Empty BAN_CHAIN: none.
+# A third party's iptables chain that keeps its jump first in FORWARD (a ban or intrusion-prevention tool puts its
+# chain ahead of Docker's and restores it there when Docker or firewalld move it). It must be first before and after
+# every change. Unset BAN_CHAIN: detected (resolve_ban), no name assumed. A name set explicitly, or recorded by an
+# earlier setup, must exist and be first (a typo or a chain being restarted never switches the checks off).
+# BAN_REQUIRE=1: a chain must be found, named or detected. Empty BAN_CHAIN: none, no detection.
 BAN_CHAIN_SET="${BAN_CHAIN+1}"
-BAN_CHAIN="${BAN_CHAIN-MAILCOW}"
+BAN_CHAIN="${BAN_CHAIN-}"
 BAN_REQUIRE="${BAN_REQUIRE:-0}"
 BAN_WAIT="${BAN_WAIT:-60}" # seconds its owner gets to put it first again
-# An extended regular expression for snapshot lines that others change at any time (fail2ban's or CrowdSec's bans,
+# An extended regular expression for snapshot lines that others change at any time (a ban tool's per-ban rules,
 # containers starting): a difference it matches is shown, never counted. Never excuses a line of Flow's own. Empty
-# (the default): every difference outside Flow's and the ban chain's counts. Example: 'f2b-|crowdsec'.
+# (the default): every difference outside Flow's and the kept-first chain's counts. Example: 'ban-|blocklist'.
 OTHER_CHURN="${OTHER_CHURN:-}"
 # The Incus API on the sandbox network's gateway: Flow's container reaches it there (loopback is the container's
 # own); sandboxes (policy flow-sb-host) and every other container (flow-sb-incus: only CONTAINER_ADDRESS passes) do
@@ -305,7 +306,7 @@ ban_first() {
 	[ "$(iptables -S FORWARD 2>/dev/null | awk '$1 == "-A" { print; exit }')" = "-A FORWARD -j $BAN_CHAIN" ]
 }
 
-# wait_ban_first gives the ban chain's owner BAN_WAIT seconds to put it first in FORWARD again (Docker and
+# wait_ban_first gives the kept-first chain's owner BAN_WAIT seconds to put it first in FORWARD again (Docker and
 # firewalld reloads move it; its owner re-inserts it). It only looks: it never moves a rule it did not make.
 wait_ban_first() {
 	[ -z "$BAN_CHAIN" ] && return 0
@@ -332,11 +333,22 @@ user_first() {
 		END { exit !user }'
 }
 
-# other_jumps prints the chains FORWARD jumps to unconditionally that are not Docker's: a hint when BAN_CHAIN does
-# not exist. Never taken as the ban chain by itself: a VPN's or hypervisor's chain may sit first just as well.
+# Docker's own chains a FORWARD rule may jump to (measured, Docker 29: DOCKER, -BRIDGE, -CT, -FORWARD, -INTERNAL,
+# -USER; earlier versions' isolation stages; swarm's ingress) and the built-in targets: never a third party's.
+# firewalld on nftables keeps no iptables chain. An exact list, not a DOCKER prefix: anyone may name a chain DOCKER-x.
+NOT_THIRD_PARTY='^(DOCKER|DOCKER-(BRIDGE|CT|FORWARD|INTERNAL|USER|INGRESS|ISOLATION-STAGE-[12])|ACCEPT|DROP|REJECT|RETURN|LOG)$'
+
+# other_jumps prints the chains FORWARD jumps to unconditionally that are not Docker's, first one first.
 other_jumps() {
-	iptables -S FORWARD 2>/dev/null | awk '$1 == "-A" && NF == 4 && $3 == "-j" && $4 !~ /^(DOCKER|ACCEPT$|DROP$|REJECT$|RETURN$|LOG$)/ { print $4 }' |
+	iptables -S FORWARD 2>/dev/null | awk -v not="$NOT_THIRD_PARTY" '$1 == "-A" && NF == 4 && $3 == "-j" && $4 !~ not { print $4 }' |
 		tr '\n' ' ' | sed 's/ $//'
+}
+
+# first_jump prints the chain FORWARD's first rule jumps to unconditionally, if it is not Docker's: the chain a
+# third party keeps first. Nothing when the first rule is Docker's, conditional, or there is none.
+first_jump() {
+	iptables -S FORWARD 2>/dev/null | awk -v not="$NOT_THIRD_PARTY" '
+		$1 == "-A" { if (NF == 4 && $3 == "-j" && $4 !~ not) print $4; exit }'
 }
 
 # manifest_settings refuses a PROJECT or POOL other than the one an earlier setup worked with (manifest lines
@@ -355,8 +367,8 @@ manifest_settings() {
 	fi
 }
 
-# ban_from_manifest: a ban chain an earlier setup found (manifest line `ban-chain NAME`) is required from then on, by
-# setup re-runs and the teardown alike; a BAN_CHAIN that names another one (empty included) is refused.
+# ban_from_manifest: a kept-first chain an earlier setup found (manifest line `ban-chain NAME`) is required from then
+# on, by setup re-runs and the teardown alike; a BAN_CHAIN that names another one (empty included) is refused.
 ban_from_manifest() {
 	seen="$(sed -n 's/^ban-chain //p' "$MANIFEST" 2>/dev/null | tail -n 1)"
 	[ -n "$seen" ] || return 0
@@ -364,42 +376,55 @@ ban_from_manifest() {
 		BAN_CHAIN="$seen"
 		BAN_CHAIN_SET=1
 	elif [ "$BAN_CHAIN" != "$seen" ]; then
-		die "the setup found ban chain $seen (manifest $MANIFEST), BAN_CHAIN says '$BAN_CHAIN': run with BAN_CHAIN=$seen, or, if the host no longer has it, delete the line 'ban-chain $seen' from the manifest"
+		die "the setup found $seen first in FORWARD (manifest $MANIFEST), BAN_CHAIN says '$BAN_CHAIN': run with BAN_CHAIN=$seen, or, if the host no longer has it, delete the line 'ban-chain $seen' from the manifest"
 	fi
 }
 
-# resolve_ban decides once per run whether the host has the ban chain: it exists → it must be first now (and again
-# after each change); it does not → refused when it was named explicitly, recorded or BAN_REQUIRE=1, else BAN_CHAIN
-# is emptied, which skips every ban-chain step. Never re-decided later: a chain that vanishes during the run fails
-# the verification instead. BAN_SEEN=1: it exists (host-setup.sh records that).
+# resolve_ban decides once per run which chain, if any, must stay first in FORWARD:
+# - named (BAN_CHAIN set, or recorded by an earlier setup): it must exist and be first now, else refused;
+# - BAN_CHAIN empty: none, nothing detected;
+# - unset: the chain FORWARD's first rule jumps to unconditionally, if it is not Docker's (first_jump), taken as
+#   if named. None: the checks are skipped (refused under BAN_REQUIRE=1), with a hint naming any other non-Docker
+#   chain FORWARD jumps to.
+# Detection sees only what is first now: a chain its owner is restoring during the very first setup (gone, or not
+# first yet) is not found and that run records none; the hint line names it when FORWARD still jumps to it. After
+# a setup recorded one, its absence never switches the checks off. Never re-decided later: a chain that vanishes
+# during the run fails the verification instead. BAN_SEEN=1: there is one (host-setup.sh records it).
 BAN_SEEN=0
 resolve_ban() {
 	case "$BAN_REQUIRE" in
-	0) ;;
-	1) [ -n "$BAN_CHAIN" ] || die "BAN_REQUIRE=1 needs the chain's name in BAN_CHAIN" ;;
+	0 | 1) ;;
 	*) die "BAN_REQUIRE must be 0 or 1" ;;
 	esac
-	if [ -n "$BAN_CHAIN" ] && iptables -S "$BAN_CHAIN" >/dev/null 2>&1; then
+	if [ -n "$BAN_CHAIN_SET" ] && [ -z "$BAN_CHAIN" ]; then
+		[ "$BAN_REQUIRE" = 0 ] || die "BAN_REQUIRE=1 with an empty BAN_CHAIN: name the chain, or leave BAN_CHAIN unset to detect it"
+		log "BAN_CHAIN is empty: no chain is kept first in FORWARD"
+		return 0
+	fi
+	if [ -n "$BAN_CHAIN" ]; then
+		iptables -S "$BAN_CHAIN" >/dev/null 2>&1 ||
+			die "chain $BAN_CHAIN does not exist (named in BAN_CHAIN or found first in FORWARD by an earlier setup): fix the name or wait for its owner to restore it; a host without one: BAN_CHAIN= (and, if the manifest $MANIFEST has a line 'ban-chain $BAN_CHAIN', delete that line)"
 		ban_first || die "$BAN_CHAIN is not first in FORWARD now: wait for its owner to restore it"
-		log "ban chain $BAN_CHAIN is first in FORWARD; it must be again after the changes"
+		log "$BAN_CHAIN is first in FORWARD; it must be again after the changes"
 		BAN_SEEN=1
 		return 0
 	fi
-	if [ "$BAN_REQUIRE" = 1 ]; then
-		die "ban chain $BAN_CHAIN does not exist, and BAN_REQUIRE=1 says this host has one"
-	fi
-	if [ -n "$BAN_CHAIN_SET" ] && [ -n "$BAN_CHAIN" ]; then
-		die "ban chain $BAN_CHAIN does not exist (named in BAN_CHAIN or found by an earlier setup): fix the name or wait for its owner to restore it; a host without one: BAN_CHAIN= (and, if the manifest $MANIFEST has a line 'ban-chain $BAN_CHAIN', delete that line)"
+	BAN_CHAIN="$(first_jump)"
+	if [ -n "$BAN_CHAIN" ]; then
+		log "$BAN_CHAIN, a third party's chain, is first in FORWARD: it must be again after the changes (BAN_CHAIN= if it need not)"
+		BAN_SEEN=1
+		return 0
 	fi
 	jumps="$(other_jumps)"
-	log "no ban chain${BAN_CHAIN:+ ($BAN_CHAIN does not exist)}: its checks are skipped${jumps:+; FORWARD also jumps to $jumps (BAN_CHAIN=<name> if one of them must stay first)}"
-	BAN_CHAIN=""
+	[ "$BAN_REQUIRE" = 0 ] ||
+		die "no third party's chain is first in FORWARD, and BAN_REQUIRE=1 says this host has one${jumps:+ (FORWARD jumps to $jumps further down: wait for its owner to put it first)}; BAN_CHAIN=<name> names it"
+	log "no third party's chain first in FORWARD: nothing to keep in place${jumps:+; FORWARD also jumps to $jumps (BAN_CHAIN=<name> if one of them must stay first)}"
 }
 
 # preflight refuses unless the host has what the isolation design was measured with: firewalld on nftables, Docker
 # on iptables-nft with its firewalld zone `docker` and DOCKER-USER chain, FORWARD dropping and jumping to DOCKER-USER
 # before DOCKER-FORWARD, the units docker.service and (when Incus is installed) incus.service, and Incus without a
-# managed network. A ban chain is checked when the host has one (resolve_ban).
+# managed network. A third party's chain kept first in FORWARD is checked when the host has one (resolve_ban).
 preflight() {
 	for c in docker firewall-cmd iptables nft ip ss systemctl awk comm sort; do
 		command -v "$c" >/dev/null 2>&1 || die "$c not found"
@@ -439,7 +464,7 @@ preflight() {
 
 # snapshot DIR writes DIR/rules: the whole ruleset (iptables-nft, legacy tables, nft) and firewalld's runtime and
 # permanent zones and policies, one fact per line with its context, counters dropped, sorted. Order is not
-# compared: Docker and firewalld reorder on every reload; the ban chain's position is checked on its own.
+# compared: Docker and firewalld reorder on every reload; the kept-first chain's position is checked on its own.
 snapshot() {
 	mkdir -p "$1"
 	{
@@ -492,7 +517,7 @@ explained() {
 	return 1
 }
 
-# others LINE: churn of the ban chain, whose owner adds and removes bans at any time.
+# others LINE: churn of the kept-first chain, whose owner adds and removes rules (bans) at any time.
 others() {
 	[ -n "$BAN_CHAIN" ] || return 1
 	case "$1" in
@@ -525,7 +550,7 @@ allowed() {
 }
 
 # compare FROM TO MODE prints the difference of two snapshots and fails on any line MODE does not allow (see
-# allowed). Ban-chain churn and what OTHER_CHURN names are shown, never counted.
+# allowed). The kept-first chain's churn and what OTHER_CHURN names are shown, never counted.
 compare() {
 	LC_ALL=C comm -13 "$1/rules" "$2/rules" | sed 's/^/+ /' >"$2/diff"
 	LC_ALL=C comm -23 "$1/rules" "$2/rules" | sed 's/^/- /' >>"$2/diff"
