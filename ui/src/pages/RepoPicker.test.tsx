@@ -35,9 +35,11 @@ const filtered = (all: GitHubRepo[]) => (c: FetchCall) => {
 function Harness({
   start = [],
   onDisconnected = () => {},
+  onFailed,
 }: {
   start?: ChosenRepo[];
   onDisconnected?: () => void;
+  onFailed?: (failed: boolean) => void;
 }) {
   const [chosen, setChosen] = useState(start);
   return (
@@ -48,6 +50,7 @@ function Harness({
         onAdd={(r) => setChosen((c) => [...c, r])}
         onRemove={(f) => setChosen((c) => c.filter((x) => x.fullName !== f))}
         onDisconnected={onDisconnected}
+        onFailed={onFailed}
         labelId="lbl"
       />
       <output data-testid="chosen">
@@ -146,60 +149,153 @@ describe("RepoPicker", () => {
     expect(screen.getByRole("button", { expanded: false })).toHaveFocus();
   });
 
-  it("asks the server as typing pauses and offers to add a name it does not list", async () => {
+  it("reads the list once per opening and filters it here", async () => {
     const calls = routeFetch({ "GET /api/github/repos": filtered(items) });
     render(<Harness />);
     await openPicker();
     fireEvent.change(search(), { target: { value: "si" } });
-    fireEvent.change(search(), { target: { value: "sit" } });
+    fireEvent.change(search(), { target: { value: "docs" } });
     await wait(SEARCH_DELAY_MS + 10);
-    expect(calls.map((c) => c.url)).toEqual([
-      "/api/github/repos",
-      "/api/github/repos?query=sit",
-    ]);
-    expect(options().map((o) => o.textContent)).toEqual(["octo/site"]);
+    expect(calls.map((c) => c.url)).toEqual(["/api/github/repos"]);
+    // The description counts too.
+    expect(options().map((o) => o.textContent)).toEqual(["octo/docsDocs"]);
     fireEvent.change(search(), { target: { value: "nothing" } });
-    await wait(SEARCH_DELAY_MS + 10);
     expect(
       screen.getByText(en.repoNoMatch.replace("{{query}}", "nothing")),
     ).toBeInTheDocument();
-    // Before the server answered for the new text: neither "no match" nor
-    // an offer to add by name, though the old answer listed nothing.
-    fireEvent.change(search(), { target: { value: "octo/app" } });
-    expect(screen.queryByText(/No repository matches/)).toBeNull();
-    expect(screen.queryByRole("option", { name: /^Add / })).toBeNull();
-    await wait(SEARCH_DELAY_MS + 10);
+    // Enter at once after typing picks what matches this text, never an
+    // option of the text before.
+    fireEvent.change(search(), { target: { value: "sit" } });
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(chosen()).toBe("octo/site");
     // Listed: no offer to add it by name, and it keeps its lock.
+    fireEvent.change(search(), { target: { value: "octo/app" } });
     expect(screen.queryByRole("option", { name: /^Add / })).toBeNull();
     fireEvent.keyDown(search(), { key: "Enter" });
-    expect(chosen()).toBe("octo/app*");
+    expect(chosen()).toBe("octo/site,octo/app*");
     fireEvent.change(search(), {
       target: { value: "https://github.com/cli/cli" },
     });
-    await wait(SEARCH_DELAY_MS + 10);
-    const add = screen.getByRole("option", { name: "Add cli/cli" });
-    fireEvent.click(add);
-    expect(chosen()).toBe("octo/app*,cli/cli");
+    fireEvent.click(screen.getByRole("option", { name: "Add cli/cli" }));
+    expect(chosen()).toBe("octo/site,octo/app*,cli/cli");
     expect(search()).toHaveValue("");
+    // A new opening reads it again.
+    fireEvent.keyDown(search(), { key: "Escape" });
+    await openPicker();
+    expect(calls).toHaveLength(2);
   });
 
-  it("says when the list is longer than it shows, or cut by the API", async () => {
+  it("shows one the server would refuse, with why, and does not add it", async () => {
+    routeFetch({
+      "GET /api/github/repos": json(200, {
+        items: [repo("octo/.github"), repo("fork/app"), repo("octo/app")],
+      }),
+    });
+    render(<Harness start={[{ fullName: "octo/app", locked: false }]} />);
+    await openPicker();
+    const [dot, fork] = options();
+    expect(dot).toHaveAttribute("aria-disabled", "true");
+    expect(dot).toHaveTextContent(en.repoBadDir);
+    expect(fork).toHaveTextContent(
+      en.repoSameDir.replace("{{name}}", "octo/app"),
+    );
+    fireEvent.click(dot);
+    fireEvent.click(fork);
+    expect(chosen()).toBe("octo/app");
+    // The chosen one itself stays removable.
+    fireEvent.click(options()[2]);
+    expect(chosen()).toBe("");
+    // By name too.
+    fireEvent.change(search(), { target: { value: "x/_private-notes" } });
+    const add = screen.getByRole("option", { name: /Add x\/_private-notes/ });
+    expect(add).toHaveAttribute("aria-disabled", "true");
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(chosen()).toBe("");
+  });
+
+  it("searches a capped list on the server, past what was read", async () => {
+    const capped = Array.from({ length: 1000 }, (_, i) =>
+      repo(`o/r${String(i).padStart(4, "0")}`),
+    );
+    const far = repo("o/far-away");
+    const calls = routeFetch({
+      "GET /api/github/repos": (c) =>
+        c.url.includes("query=")
+          ? filtered([...capped, far])(c)
+          : json(200, { items: capped }),
+    });
+    render(<Harness />);
+    await openPicker();
+    expect(
+      screen.getByText(
+        "GitHub listed the first 1'000. Type to search all of them.",
+      ),
+    ).toBeInTheDocument();
+    expect(options()).toHaveLength(50);
+    fireEvent.change(search(), { target: { value: "far" } });
+    // Until the server answers: what was read, filtered; nothing matches,
+    // and Enter picks nothing (no option of another text).
+    expect(screen.getByText(en.repoSearching)).toBeInTheDocument();
+    expect(screen.queryByText(/No repository matches/)).toBeNull();
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(chosen()).toBe("");
+    await wait(SEARCH_DELAY_MS + 10);
+    expect(calls.map((c) => c.url)).toEqual([
+      "/api/github/repos",
+      "/api/github/repos?query=far",
+    ]);
+    expect(options().map((o) => o.textContent)).toEqual(["o/far-away"]);
+    // A search the server cut too says so.
+    fireEvent.change(search(), { target: { value: "o/r" } });
+    await wait(SEARCH_DELAY_MS + 10);
+    expect(
+      screen.getByText("Showing the first 1'000 matches. Type more to narrow."),
+    ).toBeInTheDocument();
+  });
+
+  it("says when the list is longer than it shows", async () => {
     const many = Array.from({ length: 60 }, (_, i) => repo(`o/r${i}`));
     routeFetch({ "GET /api/github/repos": filtered(many) });
-    const view = render(<Harness />);
+    render(<Harness />);
     await openPicker();
     expect(options()).toHaveLength(50);
     expect(
       screen.getByText("Showing the first 50 of 60. Type to narrow."),
     ).toBeInTheDocument();
-    view.unmount();
-    const capped = Array.from({ length: 1000 }, (_, i) => repo(`o/r${i}`));
-    routeFetch({ "GET /api/github/repos": filtered(capped) });
-    render(<Harness />);
+  });
+
+  it("stops at the search when Backspace is held", async () => {
+    routeFetch({ "GET /api/github/repos": json(200, { items }) });
+    render(<Harness start={[{ fullName: "a/one", locked: false }]} />);
     await openPicker();
-    expect(
-      screen.getByText("GitHub lists at most 1'000. Type to narrow."),
-    ).toBeInTheDocument();
+    fireEvent.keyDown(search(), { key: "Backspace", repeat: true });
+    expect(chosen()).toBe("a/one");
+    fireEvent.keyDown(search(), { key: "Backspace" });
+    expect(chosen()).toBe("");
+  });
+
+  it("fails a capped list's search with a retry", async () => {
+    const capped = Array.from({ length: 1000 }, (_, i) => repo(`o/r${i}`));
+    routeFetch({
+      "GET /api/github/repos": [
+        json(200, { items: capped }),
+        json(502, { code: "upstream" }),
+        json(200, { items: [repo("o/r7")] }),
+      ],
+    });
+    const failed = vi.fn();
+    render(<Harness onFailed={failed} />);
+    await openPicker();
+    fireEvent.change(search(), { target: { value: "r7" } });
+    await wait(SEARCH_DELAY_MS + 10);
+    expect(screen.getByRole("alert")).toHaveTextContent(errors.upstream);
+    expect(failed).toHaveBeenLastCalledWith(true);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: en.repoRetry }));
+    });
+    await wait(1);
+    expect(options().map((o) => o.textContent)).toEqual(["o/r7"]);
+    expect(failed).toHaveBeenLastCalledWith(false);
   });
 
   it("says when the connection reaches nothing", async () => {

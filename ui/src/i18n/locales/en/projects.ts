@@ -29,7 +29,13 @@ export const projects = {
   repoNoMatch: "No repository matches “{{query}}”.",
   repoNone: "This GitHub connection reaches no repositories.",
   repoShown: "Showing the first {{shown}} of {{total}}. Type to narrow.",
-  repoCapped: "GitHub lists at most {{n}}. Type to narrow.",
+  repoCapped: "GitHub listed the first {{n}}. Type to search all of them.",
+  repoCappedMatches: "Showing the first {{n}} matches. Type more to narrow.",
+  // A repository the server refuses in a project (its directory rule).
+  repoBadDir:
+    "Cannot be added: a name starting with a dot, dash or underscore, or longer than 63 characters, cannot be a directory in the sandbox.",
+  repoSameDir:
+    "Cannot be added next to {{name}}: both would get the same directory.",
   repoListFailed: "The repositories could not be loaded.",
   repoRetry: "Try again",
   repoAddByName: "Add {{name}}",
@@ -62,7 +68,7 @@ export const projects = {
   invalidName: "Give the project a name of at most 64 characters.",
   nameTaken: "A project with this name exists already.",
   invalidRepos:
-    "A repository was refused: check that each exists on GitHub and is chosen once.",
+    "A repository was refused: GitHub does not know it by that name, or this connection cannot reach it.",
   // github_not_connected on a repository: not found as a public one.
   notFoundPublic:
     "A repository was not found among the public ones. If it is not public, connect GitHub first.",

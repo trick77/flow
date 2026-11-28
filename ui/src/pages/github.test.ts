@@ -3,11 +3,14 @@ import type { GitHubRepo } from "../api/types.gen";
 import {
   activeFlow,
   countdown,
+  filterRepos,
   isLocked,
   MIN_INTERVAL_MS,
   nextInterval,
   parseRepo,
   pollOutcome,
+  repoClash,
+  repoDir,
   repoKey,
   repoName,
   rowState,
@@ -217,6 +220,57 @@ describe("repository lines", () => {
 
   it("names a project after the part behind the slash", () => {
     expect(repoName("cli/cli-tools")).toBe("cli-tools");
+  });
+
+  it("names the directory as the server's layout.RepoDir does", () => {
+    // The cases of TestRepoDir (backend/internal/layout/layout_test.go).
+    const cases: Record<string, string | null> = {
+      "trick77/Toolkit": "toolkit",
+      "a/.github": null,
+      "a/_x": null,
+      "a/-x": null,
+      ["a/" + "x".repeat(64)]: null,
+      x: null,
+      "/x": null,
+      "a/b/c": null,
+    };
+    for (const [input, want] of Object.entries(cases)) {
+      expect([input, repoDir(input)]).toEqual([input, want]);
+    }
+    expect(repoDir("a/" + "x".repeat(63))).toBe("x".repeat(63));
+  });
+
+  it("says why the server would refuse a repository in a project", () => {
+    expect(repoClash("octo/.github", [])).toEqual({ kind: "badDir" });
+    expect(repoClash("fork/App", ["octo/app"])).toEqual({
+      kind: "sameDir",
+      with: "octo/app",
+    });
+    // Itself is no clash, in any case.
+    expect(repoClash("octo/app", ["Octo/App"])).toBeNull();
+    expect(repoClash("octo/api", ["octo/app"])).toBeNull();
+  });
+
+  it("filters by name and description, prefix matches first", () => {
+    const r = (fullName: string, description?: string): GitHubRepo => ({
+      fullName,
+      defaultBranch: "main",
+      private: false,
+      description,
+    });
+    const items = [
+      r("example-org/web-api"),
+      r("example-org/api"),
+      r("octo-user/notes", "API notes"),
+      r("octo-user/dotfiles"),
+    ];
+    expect(filterRepos(items, " ")).toBe(items);
+    expect(filterRepos(items, "API").map((x) => x.fullName)).toEqual([
+      "example-org/api",
+      "example-org/web-api",
+      "octo-user/notes",
+    ]);
+    expect(filterRepos(items, "octo")).toHaveLength(2);
   });
 
   it("locks only a repository that is not public", () => {

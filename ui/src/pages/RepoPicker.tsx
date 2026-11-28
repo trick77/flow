@@ -12,7 +12,16 @@ import { errorCode, listGitHubRepos } from "../api";
 import type { ErrorCode, GitHubRepo } from "../api/types.gen";
 import { formatNumber } from "../i18n/format";
 import { Icon } from "../shell";
-import { isLocked, LIST_CAP, MAX_SHOWN, parseRepo, repoKey } from "./github";
+import {
+  filterRepos,
+  isLocked,
+  LIST_CAP,
+  MAX_SHOWN,
+  parseRepo,
+  repoClash,
+  repoKey,
+  type RepoClash,
+} from "./github";
 
 // ChosenRepo is a repository the form will create the project with: its
 // owner/name (what the API takes) and whether to show the lock.
@@ -21,7 +30,8 @@ export interface ChosenRepo {
   locked: boolean;
 }
 
-// SEARCH_DELAY_MS: the search asks the server once typing pauses this long.
+// SEARCH_DELAY_MS: a search the server answers (a capped list) is asked for
+// once typing pauses this long.
 export const SEARCH_DELAY_MS = 250;
 
 // LockMark is the mark of a repository that is not public; public ones carry
@@ -73,30 +83,51 @@ export function RepoChips({
   );
 }
 
-type ListState =
-  | { phase: "loading"; items: GitHubRepo[] | null }
-  | { phase: "ready"; items: GitHubRepo[] }
-  | { phase: "failed"; code: ErrorCode };
+// useClashText is the sentence for a repository the server would refuse.
+function useClashText() {
+  const { t } = useTranslation("projects");
+  return (c: NonNullable<RepoClash>) =>
+    c.kind === "badDir" ? t("repoBadDir") : t("repoSameDir", { name: c.with });
+}
 
 type Answer =
   { query: string; items: GitHubRepo[] } | { query: string; code: ErrorCode };
 
+// failed records a list that failed; a lost connection goes to lost.
+function failed(
+  query: string,
+  err: unknown,
+  lost: () => void,
+  set: (a: Answer) => void,
+) {
+  const code = errorCode(err);
+  if (code === "github_not_connected") lost();
+  else set({ query, code });
+}
+
 type Option =
-  { kind: "repo"; repo: GitHubRepo } | { kind: "byName"; fullName: string };
+  | { kind: "repo"; repo: GitHubRepo; clash: RepoClash }
+  | { kind: "byName"; fullName: string; clash: RepoClash };
 
 // RepoPicker chooses repositories from what the GitHub connection reaches:
 // a field with the chosen ones as chips and a button that opens a popover
-// with a search (asked of the server as typing pauses) and the list in the
-// API's order. Click or Enter adds or removes; a search that reads as
-// owner/name and is not listed offers to add it by name. Keyboard: arrows
-// move, Enter picks, Escape clears the search, then closes; Backspace in an
-// empty search removes the last chip. onDisconnected: the API answered
-// github_not_connected (the connection went or expired).
+// with a search and the list in the API's order. Each opening reads the list
+// once and the search filters it here; only a list the API cut at its cap is
+// searched on the server (as typing pauses), meanwhile what was read is
+// filtered. The options always match the text in the search. Click or Enter
+// adds or removes; one the server would refuse is shown with the reason and
+// cannot be added; a search that reads as owner/name and is not listed
+// offers to add it by name. Keyboard: arrows move, Enter picks, Escape
+// clears the search, then closes; Backspace in an empty search removes the
+// last chip (not while held). onDisconnected: the API answered
+// github_not_connected; onFailed: whether the list failed otherwise (the
+// form then offers adding by name).
 export function RepoPicker({
   chosen,
   onAdd,
   onRemove,
   onDisconnected,
+  onFailed,
   labelId,
   invalid,
 }: {
@@ -104,10 +135,12 @@ export function RepoPicker({
   onAdd: (r: ChosenRepo) => void;
   onRemove: (fullName: string) => void;
   onDisconnected: () => void;
+  onFailed?: (failed: boolean) => void;
   labelId: string;
   invalid?: boolean;
 }) {
   const { t } = useTranslation("projects");
+  const clashText = useClashText();
   const uid = useId();
   const listId = `${uid}-list`;
   const optId = (i: number) => `${uid}-opt-${i}`;
@@ -116,61 +149,86 @@ export function RepoPicker({
   const search = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  // asked is the search the server is asked for (null: not yet opened);
-  // answer is its last answer, last the last list it gave.
-  const [asked, setAsked] = useState<string | null>(null);
-  const [answer, setAnswer] = useState<Answer | null>(null);
-  const [last, setLast] = useState<GitHubRepo[] | null>(null);
+  // opening counts the openings: each reads the list again (base).
+  const [opening, setOpening] = useState(0);
+  const [base, setBase] = useState<Answer | null>(null);
+  // asked is the search the server is asked for (a capped list only),
+  // remote its answer.
+  const [asked, setAsked] = useState("");
+  const [remote, setRemote] = useState<Answer | null>(null);
+  const [remoteRetry, setRemoteRetry] = useState(0);
   const [active, setActive] = useState(0);
-  const [retry, setRetry] = useState(0);
   const lost = useRef(onDisconnected);
+  const failedRef = useRef(onFailed);
   useEffect(() => {
     lost.current = onDisconnected;
-  }, [onDisconnected]);
-
-  // A change of the search is asked for once typing pauses.
-  useEffect(() => {
-    if (!open || asked === null) return;
-    const q = query.trim();
-    if (q === asked) return;
-    const timer = setTimeout(() => setAsked(q), SEARCH_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [open, query, asked]);
+    failedRef.current = onFailed;
+  }, [onDisconnected, onFailed]);
 
   useEffect(() => {
-    if (asked === null) return;
+    if (opening === 0) return;
     let live = true;
-    listGitHubRepos(asked).then(
+    listGitHubRepos().then(
       (r) => {
-        if (!live) return;
-        setLast(r.items);
-        setAnswer({ query: asked, items: r.items });
+        if (live) setBase({ query: "", items: r.items });
       },
       (err: unknown) => {
-        if (!live) return;
-        const code = errorCode(err);
-        if (code === "github_not_connected") lost.current();
-        else setAnswer({ query: asked, code });
+        if (live) failed("", err, () => lost.current(), setBase);
       },
     );
     return () => {
       live = false;
     };
-  }, [asked, retry]);
+  }, [opening]);
 
-  // Typed but not asked yet (the pause before the request) counts as
-  // loading: the last answer is for other text, so it neither says "no
-  // match" nor offers to add the text by name.
-  const loading =
-    answer === null ||
-    answer.query !== asked ||
-    (asked !== null && query.trim() !== asked);
-  const failed = !loading && "code" in answer ? answer.code : null;
-  const list: ListState = failed
-    ? { phase: "failed", code: failed }
-    : loading
-      ? { phase: "loading", items: last }
-      : { phase: "ready", items: last ?? [] };
+  const baseItems = base && "items" in base ? base.items : null;
+  const capped = baseItems !== null && baseItems.length >= LIST_CAP;
+  const q = query.trim();
+  const searching = capped && q !== "";
+
+  // A capped list's search is asked for once typing pauses.
+  useEffect(() => {
+    if (!open || !capped || q === asked) return;
+    const timer = setTimeout(() => setAsked(q), SEARCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [open, capped, q, asked]);
+
+  useEffect(() => {
+    if (!capped || asked === "") return;
+    let live = true;
+    listGitHubRepos(asked).then(
+      (r) => {
+        if (live) setRemote({ query: asked, items: r.items });
+      },
+      (err: unknown) => {
+        if (live) failed(asked, err, () => lost.current(), setRemote);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [capped, asked, remoteRetry]);
+
+  // What the list shows: the base filtered by the search; for a capped list
+  // and a search, the server's answer for exactly this text once it is in
+  // (until then the base filtered, pending).
+  const answered = searching && remote?.query === q ? remote : null;
+  let failure: ErrorCode | null = null;
+  let pending = false;
+  let pool: GitHubRepo[] = [];
+  if (base === null) pending = true;
+  else if ("code" in base) failure = base.code;
+  else if (!searching) pool = base.items;
+  else if (answered === null) {
+    pending = true;
+    pool = base.items;
+  } else if ("code" in answered) failure = answered.code;
+  else pool = answered.items;
+  const items = filterRepos(pool, q);
+
+  useEffect(() => {
+    failedRef.current?.(failure !== null);
+  }, [failure]);
 
   // A click or a focus outside closes the popover.
   useEffect(() => {
@@ -186,18 +244,29 @@ export function RepoPicker({
     };
   }, [open]);
 
-  const items = list.phase === "failed" ? [] : (list.items ?? []);
   const shown = items.slice(0, MAX_SHOWN);
-  const chosenKeys = new Set(chosen.map((c) => repoKey(c.fullName)));
+  const chosenNames = chosen.map((c) => c.fullName);
+  const chosenKeys = new Set(chosenNames.map(repoKey));
   const typed = parseRepo(query);
-  const options: Option[] = shown.map((repo) => ({ kind: "repo", repo }));
+  const options: Option[] = shown.map((repo) => ({
+    kind: "repo",
+    repo,
+    clash: chosenKeys.has(repoKey(repo.fullName))
+      ? null
+      : repoClash(repo.fullName, chosenNames),
+  }));
   if (
     typed &&
-    list.phase === "ready" &&
+    !pending &&
+    failure === null &&
     !chosenKeys.has(repoKey(typed)) &&
-    !items.some((r) => repoKey(r.fullName) === repoKey(typed))
+    !pool.some((r) => repoKey(r.fullName) === repoKey(typed))
   ) {
-    options.push({ kind: "byName", fullName: typed });
+    options.push({
+      kind: "byName",
+      fullName: typed,
+      clash: repoClash(typed, chosenNames),
+    });
   }
   const n = options.length;
   const current = n === 0 ? -1 : Math.min(active, n - 1);
@@ -214,8 +283,11 @@ export function RepoPicker({
   const openPicker = () => {
     setOpen(true);
     setActive(0);
-    // The first opening asks at once.
-    if (asked === null) setAsked(query.trim());
+    // Each opening reads the list again.
+    setBase(null);
+    setRemote(null);
+    setAsked("");
+    setOpening((o) => o + 1);
     // The search takes the focus once it is rendered.
     setTimeout(() => search.current?.focus(), 0);
   };
@@ -226,12 +298,15 @@ export function RepoPicker({
 
   const pick = (o: Option) => {
     if (o.kind === "byName") {
+      if (o.clash) return;
       onAdd({ fullName: o.fullName, locked: false });
       setQuery("");
       return;
     }
     if (chosenKeys.has(repoKey(o.repo.fullName))) onRemove(o.repo.fullName);
-    else onAdd({ fullName: o.repo.fullName, locked: isLocked(o.repo) });
+    else if (!o.clash) {
+      onAdd({ fullName: o.repo.fullName, locked: isLocked(o.repo) });
+    }
   };
 
   const removeLast = () => {
@@ -275,7 +350,8 @@ export function RepoPicker({
         } else close(true);
         break;
       case "Backspace":
-        if (query === "") {
+        // A held Backspace clears the search and stops there.
+        if (query === "" && !e.repeat) {
           e.preventDefault();
           removeLast();
         }
@@ -290,18 +366,19 @@ export function RepoPicker({
     if (e.key === "ArrowDown") {
       e.preventDefault();
       openPicker();
-    } else if (e.key === "Backspace" || e.key === "Delete") {
+    } else if ((e.key === "Backspace" || e.key === "Delete") && !e.repeat) {
       e.preventDefault();
       removeLast();
     }
   };
 
-  const q = query.trim();
   let note: string | null = null;
-  if (list.phase === "loading" && list.items === null) note = t("repoLoading");
-  else if (list.phase === "ready" && items.length === 0 && n === 0) {
+  if (base === null) note = t("repoLoading");
+  else if (!pending && failure === null && items.length === 0 && n === 0) {
     note = q !== "" ? t("repoNoMatch", { query: q }) : t("repoNone");
-  } else if (items.length >= LIST_CAP) {
+  } else if (searching && answered && pool.length >= LIST_CAP) {
+    note = t("repoCappedMatches", { n: formatNumber(LIST_CAP) });
+  } else if (capped && !searching) {
     note = t("repoCapped", { n: formatNumber(LIST_CAP) });
   } else if (items.length > shown.length) {
     note = t("repoShown", {
@@ -309,6 +386,15 @@ export function RepoPicker({
       total: formatNumber(items.length),
     });
   }
+  const retry = () => {
+    if (base && "code" in base) {
+      setBase(null);
+      setOpening((o) => o + 1);
+    } else {
+      setRemote(null);
+      setRemoteRetry((r) => r + 1);
+    }
+  };
 
   return (
     <div className="rpk" ref={root}>
@@ -358,7 +444,7 @@ export function RepoPicker({
               }}
               onKeyDown={onSearchKey}
             />
-            {list.phase === "loading" && list.items !== null && (
+            {searching && pending && (
               <span className="rpk-busy">{t("repoSearching")}</span>
             )}
           </div>
@@ -370,16 +456,26 @@ export function RepoPicker({
             className="rpk-list"
           >
             {options.map((o, i) => {
-              const cls = i === current ? "rpk-opt active" : "rpk-opt";
+              const cls = [
+                "rpk-opt",
+                i === current ? "active" : "",
+                o.clash ? "off" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
               const common = {
                 id: optId(i),
                 role: "option",
                 className: cls,
+                "aria-disabled": o.clash ? true : undefined,
                 // Keep the focus in the search.
                 onMouseDown: (e: MouseEvent) => e.preventDefault(),
                 onMouseMove: () => i !== current && setActive(i),
                 onClick: () => pick(o),
               } as const;
+              const why = o.clash && (
+                <span className="rpk-ds rpk-why">{clashText(o.clash)}</span>
+              );
               if (o.kind === "byName") {
                 return (
                   <li key="by-name" {...common} aria-selected={false}>
@@ -388,6 +484,7 @@ export function RepoPicker({
                       <span className="rpk-nm">
                         {t("repoAddByName", { name: o.fullName })}
                       </span>
+                      {why}
                     </span>
                   </li>
                 );
@@ -401,11 +498,12 @@ export function RepoPicker({
                     <span className="rpk-nm mono" title={r.fullName}>
                       {r.fullName}
                     </span>
-                    {r.description && (
-                      <span className="rpk-ds" title={r.description}>
-                        {r.description}
-                      </span>
-                    )}
+                    {why ||
+                      (r.description && (
+                        <span className="rpk-ds" title={r.description}>
+                          {r.description}
+                        </span>
+                      ))}
                   </span>
                   {isLocked(r) && <LockMark />}
                 </li>
@@ -413,23 +511,16 @@ export function RepoPicker({
             })}
           </ul>
           {note && <p className="rpk-note">{note}</p>}
-          {list.phase === "failed" && (
+          {failure && (
             <div className="rpk-note err" role="alert">
-              {t("repoListFailed")} {t(list.code, { ns: "errors" })}{" "}
-              <button
-                type="button"
-                className="btn sm"
-                onClick={() => {
-                  setAnswer(null);
-                  setRetry((r) => r + 1);
-                }}
-              >
+              {t("repoListFailed")} {t(failure, { ns: "errors" })}{" "}
+              <button type="button" className="btn sm" onClick={retry}>
                 {t("repoRetry")}
               </button>
             </div>
           )}
           <span className="sr" role="status">
-            {list.phase === "ready"
+            {!pending && failure === null
               ? t("repoMatches", { count: n, n: formatNumber(n) })
               : ""}
           </span>
@@ -440,7 +531,8 @@ export function RepoPicker({
 }
 
 // RepoByName adds a public repository typed as owner/name or a github.com
-// address, checked in place before it is added.
+// address, checked in place before it is added: the form, then the server's
+// rule for a project's repositories.
 export function RepoByName({
   chosen,
   onAdd,
@@ -451,15 +543,21 @@ export function RepoByName({
   label: string;
 }) {
   const { t } = useTranslation("projects");
+  const clashText = useClashText();
   const uid = useId();
   const [text, setText] = useState("");
-  const [why, setWhy] = useState<"byNameInvalid" | "byNameTwice" | null>(null);
+  const [why, setWhy] = useState<string | null>(null);
   const add = () => {
     const full = parseRepo(text);
-    if (!full) return setWhy("byNameInvalid");
+    if (!full) return setWhy(t("byNameInvalid"));
     if (chosen.some((c) => repoKey(c.fullName) === repoKey(full))) {
-      return setWhy("byNameTwice");
+      return setWhy(t("byNameTwice"));
     }
+    const clash = repoClash(
+      full,
+      chosen.map((c) => c.fullName),
+    );
+    if (clash) return setWhy(clashText(clash));
     onAdd({ fullName: full, locked: false });
     setText("");
     setWhy(null);
@@ -501,7 +599,7 @@ export function RepoByName({
       </div>
       {why && (
         <span className="err" id={`${uid}-err`} role="alert">
-          {t(why)}
+          {why}
         </span>
       )}
     </div>

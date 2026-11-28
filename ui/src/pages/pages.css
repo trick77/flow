@@ -477,6 +477,19 @@
 .rpk-ic {
   color: var(--color-muted);
 }
+/* One the server would refuse: dimmed, the reason in place of the
+   description. */
+.rpk-opt.off {
+  cursor: not-allowed;
+}
+.rpk-opt.off .rpk-nm,
+.rpk-opt.off .rpk-ic {
+  color: var(--color-faint);
+}
+.rpk-ds.rpk-why {
+  color: var(--color-sun);
+  white-space: normal;
+}
 .rpk-opt[aria-selected="true"] .rpk-ic {
   color: var(--color-success);
 }
