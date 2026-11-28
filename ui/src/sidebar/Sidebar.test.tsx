@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 
 import type { Project, SessionSummary } from "../api/types.gen";
 import { resources } from "../i18n/resources";
@@ -146,17 +152,91 @@ describe("Sidebar", () => {
     rerender(<Sidebar {...props} grouping="project" />);
     const heads = screen
       .getAllByRole("heading", { level: 2 })
-      .map((h) => h.firstChild?.textContent);
-    expect(heads).toEqual(["alpha", "beta", en.otherProjects]);
+      .map((h) => h.querySelector(".nm")?.textContent ?? h.textContent);
+    expect(heads).toEqual(["alpha", "beta", `${en.otherProjects}1`]);
     fireEvent.keyDown(screen.getByRole("radio", { name: en.groupByProject }), {
       key: "ArrowLeft",
     });
     expect(props.onGrouping).toHaveBeenLastCalledWith("status");
   });
 
-  it("says nothing is there when grouped by project without sessions", () => {
-    renderSidebar({ sessions: [], grouping: "project" });
+  it("lists projects without sessions by project, each with its +", () => {
+    const { props } = renderSidebar({
+      sessions: [sessions[4]],
+      grouping: "project",
+      projects: [
+        proj("pa", "alpha"),
+        proj("pb", "beta"),
+        { ...proj("pc", "gamma"), sandbox: { state: "setup" } },
+      ],
+    });
+    // beta has a session: its own section, its dot named.
+    const beta = screen.getByRole("region", { name: "beta" });
+    expect(within(beta).getByRole("img", { name: "Sandbox warm" })).toHaveClass(
+      "dot-warm",
+    );
+    fireEvent.click(
+      within(beta).getByRole("button", { name: "New session in beta" }),
+    );
+    expect(props.onNewSession).toHaveBeenLastCalledWith("pb");
+    // alpha and gamma: one line each under "No sessions yet".
+    const idle = screen.getByRole("region", { name: en.noSessionsYet });
+    expect(within(idle).getAllByRole("listitem")).toHaveLength(2);
+    expect(
+      within(idle).getByRole("img", { name: "Sandbox setting up" }),
+    ).toHaveClass("dot-busy");
+    fireEvent.click(
+      within(idle).getByRole("button", { name: "New session in gamma" }),
+    );
+    expect(props.onNewSession).toHaveBeenLastCalledWith("pc");
+    expect(props.onNewSession).toHaveBeenCalledTimes(2);
+    // A click on the line itself starts one too.
+    fireEvent.click(within(idle).getByText("alpha"));
+    expect(props.onNewSession).toHaveBeenLastCalledWith("pa");
+  });
+
+  it("closes the drawer after a + on narrow screens", () => {
+    const { props } = renderSidebar({
+      sessions: [],
+      grouping: "project",
+      narrow: true,
+      drawerOpen: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "New session in alpha" }),
+    );
+    expect(props.onNewSession).toHaveBeenCalledWith("pa");
+    expect(props.onCloseDrawer).toHaveBeenCalled();
+  });
+
+  it("points to the projects page without any project", () => {
+    const onOpenProjects = vi.fn();
+    renderSidebar({
+      sessions: [],
+      projects: [],
+      grouping: "project",
+      onOpenProjects,
+    });
+    expect(screen.getByText(en.noProjects)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: en.addProject }));
+    expect(onOpenProjects).toHaveBeenCalled();
+    cleanup();
+    // A failed project list is not "no project".
+    renderSidebar({
+      sessions: [],
+      projects: [],
+      grouping: "project",
+      projectsError: "internal",
+    });
+    expect(screen.queryByText(en.noProjects)).not.toBeInTheDocument();
     expect(screen.getByText(en.empty)).toBeInTheDocument();
+  });
+
+  it("starts a plain new session from New session, no project given", () => {
+    const { props } = renderSidebar({ sessions: [] });
+    expect(screen.getAllByText(en.empty)).toHaveLength(4);
+    fireEvent.click(screen.getByRole("button", { name: en.newSession }));
+    expect(props.onNewSession).toHaveBeenCalledWith(undefined);
   });
 
   it("collapses to the rail: icons, sessions with status dots, the account", () => {

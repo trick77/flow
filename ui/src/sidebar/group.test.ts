@@ -4,6 +4,7 @@ import {
   groupByProject,
   groupSessions,
   isGrouping,
+  lastUse,
   orderSessions,
   sectionOf,
 } from "./group";
@@ -102,8 +103,46 @@ describe("sidebar grouping", () => {
     ).toEqual([
       ["pb", "beta", ["b1"]],
       ["pa", "alpha", ["a2", "a1"]],
+      ["pc", "empty", []],
       [null, undefined, ["x"]],
     ]);
+    expect(got[2].project?.sandbox.state).toBe("warm");
+    // Without sessions of unknown projects there is no "Other".
+    expect(
+      groupByProject([], [proj("pc", "empty")]).map((g) => g.projectId),
+    ).toEqual(["pc"]);
+  });
+
+  it("knows when each project was last worked in", () => {
+    const proj = (id: string, lastUsedAt?: string): Project => ({
+      id,
+      name: id,
+      repos: [],
+      sandbox: { state: "warm", lastUsedAt },
+      createdAt: "2026-11-26T10:00:00Z",
+    });
+    const at = (id: string, projectId: string, t: string) => ({
+      ...s(id, "idle", t),
+      projectId,
+    });
+    const got = lastUse(
+      [
+        at("a1", "pa", "2026-11-26T10:00:00Z"),
+        at("a2", "pa", "2026-11-26T12:00:00Z"),
+        at("b1", "pb", "2026-11-20T10:00:00Z"),
+        at("bad", "pd", "not a time"),
+      ],
+      [
+        proj("pa", "2026-11-25T10:00:00Z"),
+        proj("pb", "2026-11-27T10:00:00Z"),
+        proj("pc"),
+        proj("pd"),
+      ],
+    );
+    expect(got.get("pa")).toBe(Date.parse("2026-11-26T12:00:00Z"));
+    expect(got.get("pb")).toBe(Date.parse("2026-11-27T10:00:00Z"));
+    expect(got.has("pc")).toBe(false);
+    expect(got.has("pd")).toBe(false);
   });
 
   it("accepts only the two groupings", () => {

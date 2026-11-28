@@ -14,7 +14,7 @@ import { formatNumber } from "../i18n/format";
 import { AgentPill } from "../shell/AgentPill";
 import { projectBadge } from "../shell/badge";
 import { Icon } from "../shell/Icon";
-import { searchSessions, type Part } from "./search";
+import { searchProjects, searchSessions, type Part } from "./search";
 import { statusClass, statusKey } from "./status";
 
 // The list grows and shrinks with its content up to this share of the
@@ -45,12 +45,15 @@ export function SearchPalette({
   sessions,
   projects,
   onSelect,
+  onNewSession,
   onClose,
   measure = contentHeight,
 }: {
   sessions: readonly SessionSummary[];
   projects: readonly Project[];
   onSelect: (id: string) => void;
+  // Starts a new session in a project; without it no project is listed.
+  onNewSession?: (projectId: string) => void;
   onClose: () => void;
   measure?: (el: HTMLElement) => number;
 }) {
@@ -74,7 +77,17 @@ export function SearchPalette({
     () => searchSessions(sessions, (pid) => names.get(pid) ?? "", query),
     [sessions, names, query],
   );
-  const current = Math.min(active, Math.max(results.length - 1, 0));
+  // Projects to start a session in, after the sessions: the matching ones,
+  // or every one while there is no session to list.
+  const projectHits = useMemo(
+    () =>
+      onNewSession
+        ? searchProjects(projects, query, sessions.length === 0)
+        : [],
+    [onNewSession, projects, query, sessions.length],
+  );
+  const count = results.length + projectHits.length;
+  const current = Math.min(active, Math.max(count - 1, 0));
 
   // Focus moves in on open and back to the trigger on close.
   useEffect(() => {
@@ -97,7 +110,7 @@ export function SearchPalette({
     return () => window.removeEventListener("resize", fit);
   }, [results, measure]);
 
-  const activeId = results.length > 0 ? optionId(current) : undefined;
+  const activeId = count > 0 ? optionId(current) : undefined;
   // The active option stays in view.
   useEffect(() => {
     if (activeId) {
@@ -107,8 +120,10 @@ export function SearchPalette({
 
   const choose = (i: number) => {
     const r = results[i];
-    if (!r) return;
-    onSelect(r.session.id);
+    const p = projectHits[i - results.length];
+    if (r) onSelect(r.session.id);
+    else if (p && onNewSession) onNewSession(p.projectId);
+    else return;
     onClose();
   };
 
@@ -122,9 +137,9 @@ export function SearchPalette({
       case "ArrowDown":
       case "ArrowUp": {
         e.preventDefault();
-        if (results.length === 0) return;
+        if (count === 0) return;
         const step = e.key === "ArrowDown" ? 1 : -1;
-        setActive((current + step + results.length) % results.length);
+        setActive((current + step + count) % count);
         return;
       }
       case "Enter":
@@ -179,7 +194,7 @@ export function SearchPalette({
             ref={input}
             type="text"
             role="combobox"
-            aria-expanded={results.length > 0}
+            aria-expanded={count > 0}
             aria-controls={listId}
             aria-autocomplete="list"
             aria-activedescendant={activeId}
@@ -197,20 +212,22 @@ export function SearchPalette({
         </div>
         <div className="pal-body" style={{ height }}>
           <div ref={content} className="pal-content">
-            <div className="pal-h" aria-hidden="true">
-              {!typed
-                ? t("searchRecent")
-                : total > results.length
-                  ? t("searchMatchesFirst", {
-                      shown: formatNumber(results.length),
-                      n: formatNumber(total),
-                    })
-                  : t("searchMatches", {
-                      count: total,
-                      n: formatNumber(total),
-                    })}
-            </div>
-            {results.length === 0 && (
+            {(results.length > 0 || projectHits.length === 0 || !typed) && (
+              <div className="pal-h" aria-hidden="true">
+                {!typed
+                  ? t("searchRecent")
+                  : total > results.length
+                    ? t("searchMatchesFirst", {
+                        shown: formatNumber(results.length),
+                        n: formatNumber(total),
+                      })
+                    : t("searchMatches", {
+                        count: total,
+                        n: formatNumber(total),
+                      })}
+              </div>
+            )}
+            {results.length === 0 && (!typed || projectHits.length === 0) && (
               <p className="pal-empty" role="status">
                 {typed ? t("searchNone") : t("searchNoSessions")}
               </p>
@@ -257,6 +274,41 @@ export function SearchPalette({
                   </span>
                 </li>
               ))}
+              {projectHits.length > 0 && (
+                <li className="pal-h pal-h-in" role="presentation">
+                  {t("searchProjects")}
+                </li>
+              )}
+              {projectHits.map((p, j) => {
+                const i = results.length + j;
+                const name = names.get(p.projectId) ?? "";
+                return (
+                  <li
+                    key={`p-${p.projectId}`}
+                    id={optionId(i)}
+                    role="option"
+                    aria-selected={i === current}
+                    aria-label={t("newSessionIn", { project: name })}
+                    className="pal-opt"
+                    onMouseMove={() => i !== current && setActive(i)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => choose(i)}
+                  >
+                    <span className="mono-badge" aria-hidden="true">
+                      {projectBadge(name)}
+                    </span>
+                    <span className="pal-main">
+                      <span className="pal-title">
+                        <Marked parts={p.name} />
+                      </span>
+                      <span className="pal-sub">{t("newSession")}</span>
+                    </span>
+                    <span className="pal-right" aria-hidden="true">
+                      <Icon name="plus" />
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </div>
