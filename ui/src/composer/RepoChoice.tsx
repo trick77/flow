@@ -66,7 +66,7 @@ export function RepoChoice({
   return (
     <div className="rpick rpick-many">
       <MultiPicker
-        label={`${t("repos")}: ${count}`}
+        label={t("reposOf", { picked: count })}
         values={picked}
         options={repos.map((r) => ({ value: r.id, label: r.fullName }))}
         onChange={onChange}

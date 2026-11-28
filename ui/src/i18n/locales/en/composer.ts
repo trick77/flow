@@ -56,6 +56,8 @@ export const composer = {
   // More repositories than chips fit: the menu button and its menu.
   repoPicked_one: "{{picked}} of {{n}} repository",
   repoPicked_other: "{{picked}} of {{n}} repositories",
+  // The menu button's name; picked is repoPicked's text.
+  reposOf: "Repositories in this session: {{picked}}",
   repoSearch: "Search repositories",
   repoSearchPlaceholder: "Search repositories",
   repoSearchNone: "No repository matches.",
