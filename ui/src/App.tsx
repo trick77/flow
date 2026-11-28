@@ -206,7 +206,7 @@ export function App({ EventSource }: { EventSource?: EventSourceCtor } = {}) {
           onCloseDrawer={closeDrawer}
           onOpenSettings={() => setView("settings")}
           onOpenProjects={() => setView("projects")}
-          projectsError={projectsError}
+          projectsError={projectsError ?? error}
         />
         {narrow && drawerOpen && (
           <div className="scrim" aria-hidden="true" onClick={closeDrawer} />

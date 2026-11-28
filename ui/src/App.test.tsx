@@ -270,6 +270,24 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
+  it("does not say there is no project when the session list fails", async () => {
+    window.localStorage.clear();
+    serve({ sessions: [], projects: [], sessionsStatus: 500, calls: [] });
+    render(<App EventSource={FakeEventSource} />);
+    fireEvent.click(
+      screen.getByRole("radio", { name: en.sidebar.groupByProject }),
+    );
+    expect(
+      await within(
+        screen.getByRole("navigation", { name: en.sidebar.listLabel }),
+      ).findByRole("alert"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(en.sidebar.noProjects)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: en.sidebar.addProject }),
+    ).not.toBeInTheDocument();
+  });
+
   it("starts a session from the sidebar and opens it at once", async () => {
     window.localStorage.clear();
     const created = summary({
