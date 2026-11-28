@@ -37,11 +37,13 @@ func openPTY() (master, slave *os.File, err error) {
 		return nil, nil, err
 	}
 	var unlock int32
+	//nolint:gosec // ioctl argument: pointer to a local the kernel reads during the call
 	if err := ioctl(master, syscall.TIOCSPTLCK, unsafe.Pointer(&unlock)); err != nil {
 		_ = master.Close()
 		return nil, nil, err
 	}
 	var n uint32
+	//nolint:gosec // ioctl argument: pointer to a local the kernel fills during the call
 	if err := ioctl(master, syscall.TIOCGPTN, unsafe.Pointer(&n)); err != nil {
 		_ = master.Close()
 		return nil, nil, err
@@ -58,6 +60,7 @@ type winsize struct{ rows, cols, x, y uint16 }
 
 func setSize(f *os.File, cols, rows int) error {
 	ws := winsize{rows: uint16(rows), cols: uint16(cols)} //nolint:gosec // bounded by flowdproto.ValidTerminalSize
+	//nolint:gosec // ioctl argument: pointer to a local the kernel reads during the call
 	return ioctl(f, syscall.TIOCSWINSZ, unsafe.Pointer(&ws))
 }
 
