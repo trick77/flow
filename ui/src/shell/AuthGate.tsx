@@ -17,6 +17,7 @@ import {
   onUnauthenticated,
 } from "../api";
 import type { ErrorCode } from "../api/types.gen";
+import signInImage from "./sign-in.webp";
 
 // Account is the signed-in owner as the shell shows it.
 export interface Account {
@@ -118,6 +119,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
 // SignIn is the whole page while signed out: the wordmark and one way in. The
 // login endpoint is a navigation (it redirects to the identity provider).
 // failed: the last sign-in was refused; why is only in the server log.
+// The background is decoration: a CSS image (no broken-image icon when it
+// fails, bg-bg stays), anchored top left where the picture is dark and empty;
+// wide screens put the block there, narrow ones centre it. The black halo
+// behind the block is what holds text-muted and text-danger at 4.5:1: danger
+// on bare bg-bg is only 4.4:1.
 export function SignIn({
   error,
   failed,
@@ -127,8 +133,18 @@ export function SignIn({
 }) {
   const { t } = useTranslation("shell");
   return (
-    <main className="grid h-full place-items-center bg-bg px-4">
-      <div className="flex flex-col items-center gap-5 text-center">
+    <main className="relative isolate grid h-full place-items-center overflow-hidden bg-bg px-4 md:place-items-start md:px-[12vw] md:pt-[24vh]">
+      <div
+        className="absolute inset-0 -z-10 bg-cover bg-left-top"
+        style={{ backgroundImage: `url(${signInImage})` }}
+        aria-hidden="true"
+        data-testid="sign-in-image"
+      />
+      <div className="relative flex flex-col items-center gap-5 text-center md:items-start md:text-left">
+        <div
+          className="absolute -inset-x-40 -inset-y-32 -z-10 bg-radial-[closest-side] from-black/35 from-40% to-transparent"
+          aria-hidden="true"
+        />
         <h1 className="font-serif text-[2.5rem] leading-[3rem] font-medium text-ink-bright">
           {t("appName", { ns: "common" })}
         </h1>

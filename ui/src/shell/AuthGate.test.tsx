@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { App } from "../App";
 import { resources } from "../i18n/resources";
 import { FakeEventSource } from "../test/fakeEventSource";
-import { AuthGate } from "./AuthGate";
+import { AuthGate, SignIn } from "./AuthGate";
 
 const en = resources.en;
 
@@ -218,6 +218,18 @@ describe("AuthGate", () => {
     await act(async () => {});
     expect(screen.getByText(en.shell.empty)).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: en.shell.signIn })).toBeNull();
+  });
+
+  it("puts the background image behind the sign-in page as decoration", () => {
+    render(<SignIn />);
+    const image = screen.getByTestId("sign-in-image");
+    expect(image.style.backgroundImage).toMatch(/sign-in.*\.webp/);
+    // Nothing for a screen reader: hidden, and no img to name.
+    expect(image).toHaveAttribute("aria-hidden", "true");
+    expect(screen.queryByRole("img")).toBeNull();
+    // The page colour stays underneath when the image does not load.
+    expect(screen.getByRole("main")).toHaveClass("bg-bg");
+    expect(screen.getByRole("link", { name: en.shell.signIn })).toBeVisible();
   });
 
   it("renders nothing until the session check answers", async () => {
