@@ -178,6 +178,13 @@ function ProjectCard({
   // While the server runs an operation on the sandbox, start, stop, rebuild
   // and delete would wait or be refused with sandbox_busy: none is offered.
   const busy = sandboxBusy(sb);
+  // A confirmation open when the sandbox turns busy is dropped, not kept for
+  // when it ends (the owner asked about a sandbox that has changed since).
+  const [wasBusy, setWasBusy] = useState(busy);
+  if (busy !== wasBusy) {
+    setWasBusy(busy);
+    if (busy) setConfirm(null);
+  }
   // A failed setup script: its log says why.
   const setupFailed = sb.errorCode === "sandbox_setup_failed";
   const [showLog, setShowLog] = useState(false);

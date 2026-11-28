@@ -160,6 +160,18 @@ describe("ProjectsPage", () => {
       />,
     );
     expect(screen.queryByRole("alertdialog")).toBeNull();
+    // Busy over: the confirmation does not come back on its own.
+    view.rerender(
+      <ProjectsPage
+        projects={[project()]}
+        loaded
+        error={null}
+        onEvent={(e) => events.push(e)}
+        nav={null}
+      />,
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.getByRole("button", { name: en.delete })).toBeVisible();
   });
 
   it("says sandbox_busy when an operation began meanwhile", async () => {
