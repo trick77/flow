@@ -26,10 +26,19 @@ const items = [
   repo("octo/docs", false, "Docs"),
 ];
 
-// filtered answers the list as the server would: by name.
+// filtered answers the list as the server would: by owner/name or
+// description.
 const filtered = (all: GitHubRepo[]) => (c: FetchCall) => {
-  const q = new URL(c.url, "http://x").searchParams.get("query") ?? "";
-  return json(200, { items: all.filter((r) => r.fullName.includes(q)) });
+  const q = (
+    new URL(c.url, "http://x").searchParams.get("query") ?? ""
+  ).toLowerCase();
+  return json(200, {
+    items: all.filter(
+      (r) =>
+        r.fullName.toLowerCase().includes(q) ||
+        (r.description ?? "").toLowerCase().includes(q),
+    ),
+  });
 };
 
 function Harness({
@@ -262,6 +271,94 @@ describe("RepoPicker", () => {
     expect(
       screen.getByText("Showing the first 50 of 60. Type to narrow."),
     ).toBeInTheDocument();
+  });
+
+  it("finds a listed repository pasted as an address", async () => {
+    routeFetch({
+      "GET /api/github/repos": json(200, {
+        items: [repo("octo/site-kit"), repo("octo/site", true)],
+      }),
+    });
+    render(<Harness />);
+    await openPicker();
+    for (const pasted of [
+      "https://github.com/octo/site",
+      "octo/site.git",
+      "octo/site/",
+    ]) {
+      fireEvent.change(search(), { target: { value: pasted } });
+      expect(screen.queryByText(/No repository matches/)).toBeNull();
+      expect(screen.queryByRole("option", { name: /^Add / })).toBeNull();
+      // The one named comes first, before a longer name it is part of.
+      expect(options()[0]).toHaveTextContent(/^octo\/site$/);
+    }
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(chosen()).toBe("octo/site*");
+  });
+
+  it("aborts a search a newer one replaced", async () => {
+    const capped = Array.from({ length: 1000 }, (_, i) => repo(`o/r${i}`));
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (!String(input).includes("query=")) {
+          return Promise.resolve(json(200, { items: capped }));
+        }
+        signals.push(init!.signal!);
+        // A search that takes long: answered only once aborted.
+        return new Promise((_, reject) =>
+          init!.signal!.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          ),
+        );
+      }),
+    );
+    render(<Harness />);
+    await openPicker();
+    fireEvent.change(search(), { target: { value: "far" } });
+    await wait(SEARCH_DELAY_MS + 10);
+    fireEvent.change(search(), { target: { value: "farther" } });
+    await wait(SEARCH_DELAY_MS + 10);
+    expect(signals).toHaveLength(2);
+    expect(signals[0].aborted).toBe(true);
+    expect(signals[1].aborted).toBe(false);
+  });
+
+  it("asks a capped list's search as owner/name and keeps what matched", async () => {
+    const capped = Array.from({ length: 1000 }, (_, i) => repo(`o/r${i}`));
+    const hidden = repo("octo/hidden", true, "Not in the first thousand");
+    const calls = routeFetch({
+      "GET /api/github/repos": (c) =>
+        c.url.includes("query=")
+          ? filtered([...capped, hidden])(c)
+          : json(200, {
+              items: [
+                ...capped.slice(0, 999),
+                repo("o/x", false, "first thousand"),
+              ],
+            }),
+    });
+    render(<Harness />);
+    await openPicker();
+    // A description match while pending stays once the server answered.
+    fireEvent.change(search(), { target: { value: "thousand" } });
+    expect(options().map((o) => o.textContent)).toEqual(["o/xfirst thousand"]);
+    await wait(SEARCH_DELAY_MS + 10);
+    expect(options().map((o) => o.textContent)).toEqual([
+      "octo/hiddenNot in the first thousand",
+    ]);
+    // A pasted address is asked as owner/name, found with its lock.
+    fireEvent.change(search(), {
+      target: { value: "https://github.com/octo/hidden.git" },
+    });
+    await wait(SEARCH_DELAY_MS + 10);
+    expect(calls[calls.length - 1].url).toBe(
+      "/api/github/repos?query=octo%2Fhidden",
+    );
+    expect(screen.queryByRole("option", { name: /^Add / })).toBeNull();
+    fireEvent.keyDown(search(), { key: "Enter" });
+    expect(chosen()).toBe("octo/hidden*");
   });
 
   it("stops at the search when Backspace is held", async () => {

@@ -96,10 +96,13 @@ export function onUnauthenticated(fn: () => void): () => void {
 
 // request is the one fetch every call goes through: JSON in, JSON out, a
 // non-2xx answer thrown as ApiError. 204 and 202-without-body give undefined.
+// signal aborts the request (the server sees its request context end); an
+// aborted one rejects like a lost answer.
 export async function request<T>(
   method: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (body !== undefined) {
@@ -112,6 +115,7 @@ export async function request<T>(
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: "same-origin",
+      signal,
     });
   } catch {
     throw new ApiError("internal", 0);
@@ -323,10 +327,19 @@ export function disconnectGitHub(): Promise<void> {
 }
 
 // listGitHubRepos is what the GitHub connection can reach, optionally
-// filtered by name on the server.
-export function listGitHubRepos(query = ""): Promise<GitHubRepoList> {
+// filtered on the server (owner/name or description); signal gives up a
+// search a newer one replaced.
+export function listGitHubRepos(
+  query = "",
+  signal?: AbortSignal,
+): Promise<GitHubRepoList> {
   const q = query === "" ? "" : `?query=${seg(query)}`;
-  return request<GitHubRepoList>("GET", `/api/github/repos${q}`);
+  return request<GitHubRepoList>(
+    "GET",
+    `/api/github/repos${q}`,
+    undefined,
+    signal,
+  );
 }
 
 export function createProject(project: ProjectCreate): Promise<Project> {

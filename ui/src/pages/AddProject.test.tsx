@@ -346,6 +346,35 @@ describe("AddProject with GitHub connected", () => {
     });
   });
 
+  it("keeps the by-name field while a failed list loads again", async () => {
+    routeFetch({
+      "GET /api/connections": connections({
+        state: "connected",
+        available: true,
+      }),
+      "GET /api/github/repos": [
+        json(502, { code: "upstream" }),
+        json(200, { items: [repo("octo/app")] }),
+      ],
+    });
+    await renderForm();
+    const open = () =>
+      fireEvent.click(
+        screen.getByRole("button", { name: /Choose repositories/ }),
+      );
+    await act(async () => open());
+    fireEvent.change(byName(en.byNameOr), { target: { value: "cli/half" } });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: en.repoSearch }), {
+      key: "Escape",
+    });
+    // Opened again: the list loads; the field and its text stay meanwhile.
+    open();
+    expect(byName(en.byNameOr)).toHaveValue("cli/half");
+    // Once a list is in, the picker is the way again.
+    await flush();
+    expect(byNameQuery()).toBeNull();
+  });
+
   it("clears a refusal of the repositories once one is removed", async () => {
     routeFetch({
       "GET /api/connections": connections({
