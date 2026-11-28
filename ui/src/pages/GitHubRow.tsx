@@ -1,18 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { disconnectGitHub, errorCode } from "../api";
 import type { ErrorCode, GitHubConnection } from "../api/types.gen";
-import { formatDate, formatNumber } from "../i18n/format";
+import { formatDate } from "../i18n/format";
 import { Icon } from "../shell";
-import { copyText } from "./clipboard";
-import {
-  countdown,
-  rowState,
-  safeUrl,
-  type ActiveFlow,
-  type RowState,
-} from "./github";
+import { DeviceOutcome, DevicePanel, flowEnded } from "./DevicePanel";
+import { rowState, type RowState } from "./github";
 import { useDeviceFlow, type FlowState } from "./useDeviceFlow";
 
 const pill: Record<
@@ -136,11 +130,7 @@ export function GitHubRow({
       description = t("githubUnknownState");
   }
 
-  const ended =
-    flow.phase === "expired" ||
-    flow.phase === "denied" ||
-    flow.phase === "ended" ||
-    flow.phase === "failed";
+  const ended = flowEnded(flow);
   const waiting = flow.phase === "waiting" ? flow.flow : null;
   const starting = flow.phase === "starting";
   const showActs = !confirming && !waiting && state !== "unavailable";
@@ -207,27 +197,7 @@ export function GitHubRow({
           onCancel={device.cancel}
         />
       )}
-      {flow.phase === "connected" && (
-        <p className="form-status ok conn-note" role="status">
-          {flow.connection.login
-            ? t("deviceConnectedAs", { login: flow.connection.login })
-            : t("deviceConnected")}
-        </p>
-      )}
-      {flow.phase === "ended" && (
-        <p className="form-status conn-note" role="status">
-          {t("deviceEnded")}
-        </p>
-      )}
-      {ended && flow.phase !== "ended" && (
-        <p className="page-error" role="alert">
-          {flow.phase === "expired"
-            ? t("deviceExpired")
-            : flow.phase === "denied"
-              ? t("deviceDenied")
-              : `${t("deviceFailed")} ${t(flow.code, { ns: "errors" })}`}
-        </p>
-      )}
+      <DeviceOutcome flow={flow} />
       {confirming && (
         <div className="confirm" role="alertdialog" aria-label={t("github")}>
           {t("confirmDisconnect")}
@@ -255,109 +225,6 @@ export function GitHubRow({
           {t(failure, { ns: "errors" })}
         </p>
       )}
-    </div>
-  );
-}
-
-const two = (n: number) => formatNumber(n, { minimumIntegerDigits: 2 });
-
-// DevicePanel shows the code to enter on GitHub: large, with a copy button
-// and a link to GitHub's page, the time left and whether the page still
-// waits.
-function DevicePanel({
-  flow,
-  remainingMs,
-  paused,
-  onCancel,
-}: {
-  flow: ActiveFlow;
-  remainingMs: number;
-  paused: boolean;
-  onCancel: () => void;
-}) {
-  const { t } = useTranslation("settings");
-  const [copied, setCopied] = useState<"ok" | "failed" | null>(null);
-  const codeRef = useRef<HTMLOutputElement>(null);
-  const clear = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => () => clearTimeout(clear.current), []);
-  const url = safeUrl(flow.verificationUri);
-  const left = countdown(remainingMs);
-
-  const copy = () => {
-    void copyText(flow.userCode).then((ok) => {
-      clearTimeout(clear.current);
-      setCopied(ok ? "ok" : "failed");
-      if (ok) {
-        clear.current = setTimeout(() => setCopied(null), 2000);
-      } else if (codeRef.current) {
-        // Select the code: the owner copies it by hand.
-        const range = document.createRange();
-        range.selectNodeContents(codeRef.current);
-        const sel = window.getSelection();
-        sel?.removeAllRanges();
-        sel?.addRange(range);
-      }
-    });
-  };
-
-  return (
-    <div className="conn-device" role="region" aria-label={t("deviceTitle")}>
-      <p className="device-lead">{t("deviceEnter")}</p>
-      <div className="device-code-row">
-        <output
-          ref={codeRef}
-          className="device-code"
-          aria-label={t("deviceCode")}
-        >
-          {flow.userCode}
-        </output>
-        <div className="row-inline">
-          <button type="button" className="btn sm" onClick={copy}>
-            <Icon name={copied === "ok" ? "check" : "file"} />
-            {copied === "ok" ? t("deviceCopied") : t("deviceCopy")}
-          </button>
-          {url && (
-            <a
-              className="btn sm primary"
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={t("deviceOpenHint")}
-            >
-              <Icon name="external" />
-              {t("deviceOpen")}
-            </a>
-          )}
-        </div>
-      </div>
-      {copied === "failed" && (
-        <p className="form-status" role="alert">
-          {t("deviceCopyFailed")}
-        </p>
-      )}
-      {copied === "ok" && (
-        <span className="sr" role="status">
-          {t("deviceCopied")}
-        </span>
-      )}
-      <p className="device-status">
-        <span role="status">
-          {paused ? t("devicePaused") : t("deviceWaiting")}
-        </span>{" "}
-        <span className="device-left">
-          {t("deviceExpiresIn", {
-            time: t("deviceTime", {
-              minutes: formatNumber(left.minutes),
-              seconds: two(left.seconds),
-            }),
-          })}
-        </span>
-      </p>
-      <div className="row-inline">
-        <button type="button" className="btn sm ghost" onClick={onCancel}>
-          {t("cancel")}
-        </button>
-      </div>
     </div>
   );
 }
