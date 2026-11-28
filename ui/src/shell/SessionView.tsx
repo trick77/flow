@@ -15,6 +15,9 @@ import {
   errorCode,
   getSession,
   sandboxAction,
+  sandboxBusy,
+  sandboxStale,
+  sandboxStartable,
   updateSession,
   type EventSourceCtor,
 } from "../api";
@@ -49,9 +52,12 @@ import { NARROW, useMediaQuery } from "./useMediaQuery";
 function SandboxNotice({
   projectId,
   state,
+  busy,
 }: {
   projectId: string;
   state: SandboxState;
+  // busy: an operation runs on the sandbox now; no start is offered then.
+  busy: boolean;
 }) {
   const { t } = useTranslation("shell");
   const [starting, setStarting] = useState(false);
@@ -64,22 +70,21 @@ function SandboxNotice({
       setStarting(false);
     });
   };
-  const text =
-    starting || state === "setup"
-      ? t("sandboxStarting")
-      : state === "failed"
-        ? t("sandboxFailed")
-        : state === "stopping"
-          ? t("sandboxStopping")
-          : state === "deleting"
-            ? t("sandboxDeleting")
+  const sb = { state, busy };
+  const text = sandboxStale(sb)
+    ? state === "setup"
+      ? t("sandboxSetupStale")
+      : t("sandboxStopStale")
+    : state === "stopping"
+      ? t("sandboxStopping")
+      : state === "deleting"
+        ? t("sandboxDeleting")
+        : starting || busy
+          ? t("sandboxStarting")
+          : state === "failed"
+            ? t("sandboxFailed")
             : t("sandboxStopped");
-  const startable =
-    !starting &&
-    (state === "stopped" ||
-      state === "none" ||
-      state === "failed" ||
-      state === "stopping");
+  const startable = !starting && sandboxStartable(sb);
   return (
     <div className="confirm sandbox-notice" role="status">
       {text}
@@ -381,6 +386,7 @@ export function SessionView({
           onRename={renaming === null ? rename : undefined}
           branch={session.branch}
           sandbox={sandbox?.state}
+          sandboxBusy={sandboxBusy(sandbox)}
           repos={repos}
           onOpenRepo={openRepo}
           actions={
@@ -475,9 +481,10 @@ export function SessionView({
         <div className="center-body">
           {downState && (
             <SandboxNotice
-              key={downState}
+              key={`${downState}:${sandboxBusy(sandbox)}`}
               projectId={session.projectId}
               state={downState}
+              busy={sandboxBusy(sandbox)}
             />
           )}
           <Timeline
@@ -531,6 +538,7 @@ export function SessionView({
           onRefresh={refresh}
           onClose={closePanel}
           sandboxState={sandbox?.state}
+          sandboxBusy={sandboxBusy(sandbox)}
           overlay={overlay}
           narrow={narrow}
         />

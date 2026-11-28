@@ -41,6 +41,7 @@ export {
   updateSession,
   type SandboxAction,
 } from "./client";
+export { sandboxBusy, sandboxStale, sandboxStartable } from "./sandbox";
 export {
   onStreamGaveUp,
   streamAppEvents,

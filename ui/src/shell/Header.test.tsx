@@ -78,12 +78,27 @@ describe("Header", () => {
 
   it("shows the sandbox chip for every state", () => {
     expect(sandboxTone("warm")).toBe("warm");
-    expect(sandboxTone("setup")).toBe("busy");
+    expect(sandboxTone("setup", true)).toBe("busy");
+    expect(sandboxTone("warm", true)).toBe("busy");
     expect(sandboxTone("deleting")).toBe("busy");
     expect(sandboxTone("stopped")).toBe("down");
+    // A setup with nothing running was left behind: not on its way.
+    expect(sandboxTone("setup")).toBe("down");
     const { rerender } = render(<Header title="T" branch="b" sandbox="warm" />);
     expect(screen.getByTitle(en.shell.sandboxChipWarm)).toHaveClass(
       "tone-warm",
+    );
+    rerender(<Header title="T" branch="b" sandbox="setup" sandboxBusy />);
+    expect(screen.getByTitle(en.shell.sandboxChipSetup)).toHaveClass(
+      "tone-busy",
+    );
+    rerender(<Header title="T" branch="b" sandbox="setup" />);
+    expect(screen.getByTitle(en.shell.sandboxChipSetupStale)).toHaveClass(
+      "tone-down",
+    );
+    rerender(<Header title="T" branch="b" sandbox="stopping" />);
+    expect(screen.getByTitle(en.shell.sandboxChipStopStale)).toHaveClass(
+      "tone-down",
     );
     rerender(<Header title="T" branch="b" sandbox="failed" />);
     expect(screen.getByTitle(en.shell.sandboxChipFailed)).toHaveClass(

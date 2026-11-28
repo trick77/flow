@@ -156,13 +156,24 @@
 .sbx.warm {
   color: var(--color-success);
 }
-.sbx.setup,
-.sbx.stopping,
+.sbx.busy,
 .sbx.deleting {
   color: var(--color-sun);
 }
-.sbx.setup::before {
+/* Something runs on the sandbox now: the dot breathes. */
+.sbx.busy::before {
   animation: pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sbx.busy::before {
+    animation: none;
+  }
+}
+.pcard-busy {
+  margin: auto 0 0;
+  padding-top: 12px;
+  color: var(--color-muted);
+  font-size: 0.75rem;
 }
 .sbx.failed {
   color: var(--color-danger);

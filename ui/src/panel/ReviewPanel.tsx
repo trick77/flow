@@ -9,7 +9,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
-import { errorCode, sandboxAction } from "../api";
+import { errorCode, sandboxAction, sandboxStartable } from "../api";
 import type {
   Diff,
   DiffFile,
@@ -183,23 +183,17 @@ function DiffBody({ diff, branch }: { diff: Diff; branch: string }) {
   );
 }
 
-// startable: the states a Start helps (as the session's sandbox notice).
-const startable = (s?: SandboxState) =>
-  s === undefined ||
-  s === "stopped" ||
-  s === "none" ||
-  s === "failed" ||
-  s === "stopping";
-
 function DiffError({
   code,
   projectId,
   sandboxState,
+  sandboxBusy = false,
   onRetry,
 }: {
   code: ErrorCode;
   projectId: string;
   sandboxState?: SandboxState;
+  sandboxBusy?: boolean;
   onRetry: () => void;
 }) {
   const { t } = useTranslation("panel");
@@ -225,21 +219,32 @@ function DiffError({
       setStarting(false);
     });
   };
-  const busy = starting || sandboxState === "setup";
+  // A start helps as the session's sandbox notice says (sandboxStartable):
+  // never while an operation runs on the sandbox.
+  const sb =
+    sandboxState === undefined
+      ? undefined
+      : { state: sandboxState, busy: sandboxBusy };
+  const busy = starting || sandboxBusy;
+  const startable = sandboxStartable(sb);
+  // Starting only for a start or setup; a busy stop or delete is down.
+  const comingUp =
+    starting ||
+    (sandboxBusy && sandboxState !== "stopping" && sandboxState !== "deleting");
   return (
     <div className="rp-empty" role="status">
-      <p>{busy ? t("sandboxStarting") : t("sandboxDown")}</p>
+      <p>{comingUp ? t("sandboxStarting") : t("sandboxDown")}</p>
       {failed && (
         <p className="rp-err" role="alert">
           {t(failed, { ns: "errors" })}
         </p>
       )}
-      {!busy && startable(sandboxState) && (
+      {!busy && startable && (
         <button type="button" className="btn sm primary" onClick={start}>
           {t("startSandbox")}
         </button>
       )}
-      {!busy && !startable(sandboxState) && (
+      {!busy && !startable && (
         <button type="button" className="btn sm" onClick={onRetry}>
           {t("retry")}
         </button>
@@ -333,6 +338,7 @@ export function ReviewPanel({
   onRefresh,
   onClose,
   sandboxState,
+  sandboxBusy = false,
   overlay = false,
   narrow = false,
 }: {
@@ -348,6 +354,8 @@ export function ReviewPanel({
   onRefresh: () => void;
   onClose: () => void;
   sandboxState?: SandboxState;
+  // sandboxBusy: an operation runs on the sandbox now (Sandbox.busy).
+  sandboxBusy?: boolean;
   overlay?: boolean;
   narrow?: boolean;
 }) {
@@ -396,10 +404,11 @@ export function ReviewPanel({
       return (
         <DiffError
           // A new sandbox state ends a "starting" (as the sandbox notice).
-          key={`${code}:${sandboxState ?? ""}`}
+          key={`${code}:${sandboxState ?? ""}:${sandboxBusy}`}
           code={code}
           projectId={projectId}
           sandboxState={sandboxState}
+          sandboxBusy={sandboxBusy}
           onRetry={onRefresh}
         />
       );

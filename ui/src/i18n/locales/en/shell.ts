@@ -29,6 +29,9 @@ export const shell = {
   sandboxChipStopped: "Sandbox stopped",
   sandboxChipFailed: "Sandbox failed",
   sandboxChipDeleting: "Sandbox deleting",
+  // setup or stopping with nothing running (Sandbox.busy false).
+  sandboxChipSetupStale: "Sandbox setup did not finish",
+  sandboxChipStopStale: "Sandbox stop did not finish",
   // The header's repositories menu of a session in several repositories.
   repoCount_one: "{{n}} repo",
   repoCount_other: "{{n}} repos",
@@ -61,6 +64,10 @@ export const shell = {
   sandboxFailed:
     "This session's sandbox failed. Start it again to see its history and continue.",
   sandboxStopping: "This session's sandbox is stopping.",
+  sandboxSetupStale:
+    "This session's sandbox did not finish setting up. Start it again to see its history and continue.",
+  sandboxStopStale:
+    "This session's sandbox did not finish stopping. Start it again to see its history and continue.",
   sandboxDeleting: "This session's sandbox is being deleted.",
   sandboxStarting: "Starting the sandbox…",
   startSandbox: "Start sandbox",

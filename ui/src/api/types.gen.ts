@@ -177,6 +177,12 @@ export interface Sandbox {
   state: SandboxState;
   /** i18n code of the setup step running now. */
   progressCode?: string;
+  /**
+   * An operation on the sandbox runs now (a setup or start, a stop, a rebuild, a delete): another one
+   * waits for it or is refused with sandbox_busy. A setup or stopping state without it was left by an
+   * operation that did not finish (Flow restarted mid-way).
+   */
+  busy?: boolean;
   errorCode?: ErrorCode;
   lastUsedAt?: string;
   diskBytes?: number;

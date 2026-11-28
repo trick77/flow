@@ -5,12 +5,16 @@ import {
   deleteProject,
   errorCode,
   sandboxAction,
+  sandboxBusy,
+  sandboxStale,
+  sandboxStartable,
   type SandboxAction,
 } from "../api";
 import type {
   AppEvent,
   ErrorCode,
   Project,
+  Sandbox,
   SandboxState,
 } from "../api/types.gen";
 import { formatDate, formatDateTime, formatNumber } from "../i18n/format";
@@ -116,6 +120,41 @@ const stateKey: Record<
   deleting: "sandboxDeleting",
 };
 
+type Label = {
+  key:
+    | (typeof stateKey)[SandboxState]
+    | "busySetup"
+    | "busyStopping"
+    | "busyDeleting"
+    | "busyWorking"
+    | "staleSetup"
+    | "staleStop";
+  tone: string;
+};
+
+// stateLabel is the card's state line: what runs now while the server is
+// busy with the sandbox; a setup or stop left behind in words of its own.
+function stateLabel(sb: Sandbox): Label {
+  if (sandboxBusy(sb)) {
+    const key =
+      sb.state === "stopping"
+        ? "busyStopping"
+        : sb.state === "deleting"
+          ? "busyDeleting"
+          : sb.state === "warm"
+            ? "busyWorking"
+            : "busySetup";
+    return { key, tone: "busy" };
+  }
+  if (sandboxStale(sb)) {
+    return {
+      key: sb.state === "setup" ? "staleSetup" : "staleStop",
+      tone: "failed",
+    };
+  }
+  return { key: stateKey[sb.state], tone: sb.state };
+}
+
 type Pending = "rebuild" | "delete" | null;
 
 // ProjectCard is one project: its repositories, its sandbox's state and what
@@ -130,34 +169,33 @@ function ProjectCard({
   onEvent: (e: AppEvent) => void;
 }) {
   const { t } = useTranslation("projects");
-  const [busy, setBusy] = useState(false);
+  // sending: this card's own request is under way.
+  const [sending, setSending] = useState(false);
   const [confirm, setConfirm] = useState<Pending>(null);
   const [failed, setFailed] = useState<ErrorCode | null>(null);
   const sb = project.sandbox;
   const state = sb.state;
+  // While the server runs an operation on the sandbox, start, stop, rebuild
+  // and delete would wait or be refused with sandbox_busy: none is offered.
+  const busy = sandboxBusy(sb);
   // A failed setup script: its log says why.
   const setupFailed = sb.errorCode === "sandbox_setup_failed";
   const [showLog, setShowLog] = useState(false);
-  // setup and stopping are offered start, rebuild and delete as well: such a
-  // state can outlive its operation, and while one really runs the server
-  // answers sandbox_busy. Stop is not: it would wait for a whole bring-up. A
+  // A setup or stopping state left behind (nothing runs) is offered start,
+  // rebuild and delete. Stop never: the sandbox is not known to run. A
   // project left in deleting (its rows failed to go) offers the delete again.
-  const startable =
-    state === "none" ||
-    state === "stopped" ||
-    state === "failed" ||
-    state === "setup" ||
-    state === "stopping";
+  const startable = sandboxStartable(sb);
+  const label = stateLabel(sb);
 
   const run = (call: () => Promise<void>) => {
-    setBusy(true);
+    setSending(true);
     setFailed(null);
     setConfirm(null);
     call().then(
-      () => setBusy(false),
+      () => setSending(false),
       (err: unknown) => {
         setFailed(errorCode(err));
-        setBusy(false);
+        setSending(false);
       },
     );
   };
@@ -186,7 +224,9 @@ function ProjectCard({
             })}
           </div>
         </div>
-        <span className={`sbx ${state}`}>{t(stateKey[state])}</span>
+        <span className={`sbx ${label.tone}`} role="status">
+          {t(label.key)}
+        </span>
       </div>
       <ul className="prepos" aria-label={t("reposIn", { name: project.name })}>
         {project.repos.map((r) => (
@@ -223,7 +263,8 @@ function ProjectCard({
             : t(failed, { ns: "errors" })}
         </p>
       )}
-      {confirm && (
+      {busy && <p className="pcard-busy">{t("busyNote")}</p>}
+      {confirm && !busy && (
         <div className="confirm" role="alertdialog" aria-label={project.name}>
           {confirm === "rebuild"
             ? t("confirmRebuild", { name: project.name })
@@ -248,13 +289,13 @@ function ProjectCard({
           </div>
         </div>
       )}
-      {!confirm && (
+      {!confirm && !busy && (
         <div className="pcard-foot">
           {startable && (
             <button
               type="button"
               className="btn sm"
-              disabled={busy}
+              disabled={sending}
               onClick={() => act("start")}
             >
               {t("start")}
@@ -264,7 +305,7 @@ function ProjectCard({
             <button
               type="button"
               className="btn sm"
-              disabled={busy}
+              disabled={sending}
               onClick={() => act("stop")}
             >
               {t("stop")}
@@ -285,7 +326,7 @@ function ProjectCard({
             <button
               type="button"
               className="btn sm ghost"
-              disabled={busy}
+              disabled={sending}
               onClick={() => setConfirm("rebuild")}
             >
               <Icon name="reload" />
@@ -295,7 +336,7 @@ function ProjectCard({
           <button
             type="button"
             className="btn sm ghost"
-            disabled={busy}
+            disabled={sending}
             onClick={() => setConfirm("delete")}
           >
             <Icon name="trash" />
