@@ -27,6 +27,19 @@ func TestHandler_unknownRouteGetsTheShell(t *testing.T) {
 	}
 }
 
+// The favicon (ui/public/icon.svg, copied to the dist root) is asked for by the sign-in page: it must come back as
+// itself with an SVG type, never as the shell.
+func TestHandler_rootFileIsServedAsItself(t *testing.T) {
+	h := handler(fstest.MapFS{"index.html": {Data: []byte("INDEX")}, "icon.svg": {Data: []byte("<svg/>")}})
+	rec := serve(h, "/icon.svg")
+	if rec.Code != http.StatusOK || rec.Body.String() != "<svg/>" {
+		t.Fatalf("/icon.svg = %d %q, want 200 and the file", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("/icon.svg Content-Type = %q, want image/svg+xml", ct)
+	}
+}
+
 func TestHandler_unbuiltServesPlaceholder(t *testing.T) {
 	rec := serve(handler(fstest.MapFS{".gitkeep": {}}), "/")
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "built without its UI") {
