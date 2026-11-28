@@ -94,6 +94,14 @@ check_settings
 manifest_settings
 ban_from_manifest
 preflight
+# The bridge family with meta ibrname (Incus' own filters need the family too); -c changes nothing.
+nft -c "$IPV6_NFT" >/dev/null 2>&1 ||
+	die "nftables cannot load Flow's bridge table (bridge family, meta ibrname): $(nft -c "$IPV6_NFT" 2>&1 | head -n 1)"
+for n in $(docker network ls -q --filter driver=bridge); do
+	if [ "$(docker network inspect -f '{{.EnableIPv6}}' "$n")" = true ]; then
+		log "Docker network $(docker network inspect -f '{{.Name}}' "$n") has IPv6: left alone, IPv6 is dropped on $BRIDGE only"
+	fi
+done
 case "$POOL_DRIVER" in
 btrfs | dir) ;;
 *) die "POOL_DRIVER must be btrfs or dir" ;;
